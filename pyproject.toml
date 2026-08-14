@@ -10,7 +10,7 @@ dependencies = ["requests"]
 Repository = "https://github.com/Hearmeman24/ComfyUI-MiniMaxRefPack"
 
 [tool.comfy]
-PublisherId = "hearmeman"
+PublisherId = "hearmeman24"
 DisplayName = "MiniMax H3 Reference Pack"
 Icon = ""
 
