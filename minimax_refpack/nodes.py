@@ -97,6 +97,14 @@ class MiniMaxH3ReferencePack:
                     "tooltip": "How hard the VLM thinks before writing. Sent to OpenRouter, "
                                "which drops it for models that don't reason.",
                 }),
+                "job_type": (list(prompt.MODES), {
+                    "default": "auto",
+                    "tooltip": "Which register to write in. standard = a scene (six-section "
+                               "Ref2VA). replacement = swap one thing in a reference video "
+                               "for the thing in a reference image. auto = a cheap classifier "
+                               "decides, and only runs when there is at least 1 video and "
+                               "1 image.",
+                }),
             },
         }
 
@@ -109,7 +117,7 @@ class MiniMaxH3ReferencePack:
     def IS_CHANGED(
         cls, direction="", openrouter_api_key="", model="", references_json="", system_prompt="",
         width=0, height=0, length_seconds=0.0, use_openrouter=True,
-        reasoning_effort=prompt.DEFAULT_REASONING_EFFORT, **kwargs
+        reasoning_effort=prompt.DEFAULT_REASONING_EFFORT, job_type="auto", **kwargs
     ):
         import folder_paths
 
@@ -123,13 +131,13 @@ class MiniMaxH3ReferencePack:
         return "|".join([
             sig, direction, model, references_json, system_prompt,
             str(width), str(height), str(length_seconds), str(use_openrouter),
-            str(reasoning_effort),
+            str(reasoning_effort), str(job_type),
         ])
 
     def build(
         self, direction="", openrouter_api_key="", model="", references_json="", system_prompt="",
         width=0, height=0, length_seconds=0.0, use_openrouter=True,
-        reasoning_effort=prompt.DEFAULT_REASONING_EFFORT,
+        reasoning_effort=prompt.DEFAULT_REASONING_EFFORT, job_type="auto",
     ):
         import folder_paths
 
@@ -165,6 +173,7 @@ class MiniMaxH3ReferencePack:
             f"width: {width or '(unspecified)'}  height: {height or '(unspecified)'}  "
             f"length_seconds: {length_seconds or '(unspecified)'}",
             f"reasoning_effort: {reasoning_effort}",
+            f"job_type: {job_type}",
             f"system_prompt: {'workflow override' if (system_prompt or '').strip() else 'packaged default'}",
             f"references: {len(reference_set.references)} "
             f"({', '.join(f'{t.tag} {t.file}' for t in reference_set.assign_tags()) or 'none'})",
@@ -191,6 +200,7 @@ class MiniMaxH3ReferencePack:
                     height=height,
                     length_seconds=length_seconds,
                     reasoning_effort=reasoning_effort,
+                    job_type=job_type,
                     debug=debug_sink,
                 )
             except prompt.PromptError as e:

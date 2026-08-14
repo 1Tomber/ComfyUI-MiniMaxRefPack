@@ -734,7 +734,11 @@ function draw(node) {
         arr.forEach((ref, i) => {
             const tx = CL.x0 + i * (CL.tile + CL.gap);
             const t = taggedArr[i];
-            const lines = kind === "video" && t.audioTag ? [t.tag, t.audioTag] : [t.tag];
+            // "vid_audio <Audio 1>" not bare "<Audio 1>": the tag is what MiniMax binds
+            // and has to stay visible, but unlabelled it reads as a standalone audio ref.
+            const lines = kind === "video" && t.audioTag
+                ? [t.tag, `vid_audio ${t.audioTag}`]
+                : [t.tag];
             const badgeH = lines.length > 1 ? CL.badge2 : CL.badge1;
             const selected =
                 node._mmrpSelected && node._mmrpSelected.kind === kind && node._mmrpSelected.index === i;
@@ -996,7 +1000,8 @@ async function addFiles(node, kind, files) {
     for (const file of take) {
         try {
             const name = await apiUpload(file);
-            arr.push(kind === "video" ? { file: name, use_soundtrack: false } : { file: name });
+            // soundtrack ON by default; the probe turns it back off for a silent clip
+            arr.push(kind === "video" ? { file: name, use_soundtrack: true } : { file: name });
         } catch (e) {
             alert(`Upload failed for ${file.name}: ${e.message}`);
         }

@@ -23,6 +23,9 @@ This pack replaces all of that with one node.
 - **It writes the prompt.** A multimodal model over OpenRouter sees your references and your direction text,
   and the result comes out of the `prompt` output. Turn `use_openrouter` off and your direction text passes
   through verbatim instead, with no API call.
+- **Two registers, one node.** `job_type` picks how the prompt is written: `standard` for a scene, or
+  `replacement` for swapping one object or character in a reference video for the thing in a reference image.
+  `auto` lets a cheap classifier decide.
 - **A `debug` output.** The exact payload that went to the model: every setting, your direction, the target
   format, the reference manifest and each media part (base64 elided). Wire it into any text preview node.
 
@@ -45,6 +48,27 @@ writing — and defaults to `google/gemini-3-flash-preview`.
 
 Note that a key typed into the node is saved inside the workflow JSON. If you share workflows, use the
 environment variable instead.
+
+## Job types
+
+`standard` writes MiniMax's six-section Ref2VA prompt for a scene: `subject_definitions`, `summary`,
+`retention_analysis`, `detailed_description`, `overall_soundscape`, `non_diegetic_music`.
+
+`replacement` is for the case where a reference video is the finished shot and one thing inside it is swapped
+for the thing in a reference image, with everything else untouched. It emits the **same six sections**, because
+MiniMax documents this as a `video editing` task — the summary opens `[video editing]` followed by
+`The target video is an edited version of <Video 1>.` Motion inheritance, integration, optics, camera, physics
+and lighting all live inside `detailed_description`.
+
+`auto` (the default) asks a cheap classifier which of the two you meant. It only runs when there is at least
+one video **and** one image attached, since a swap is impossible otherwise, and any failure falls back to
+`standard` rather than blocking the run.
+
+## Reasoning effort
+
+`reasoning_effort` (`none` / `low` / `medium` / `high`, default `medium`) is passed to OpenRouter, which drops
+it for models that don't reason. `medium` measurably raises conformance on the structural rules above, at
+roughly 1.8x the cost per call.
 
 ## Target format
 

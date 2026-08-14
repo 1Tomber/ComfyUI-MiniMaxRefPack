@@ -76,7 +76,10 @@ def test_video_without_use_soundtrack_leaves_video_audio_slot_empty(fake_folder_
     monkeypatch.setattr(nodes.media, "load_video", lambda path: (f"VIDEO:{path}", f"AUDIO:{path}"))
     _stub_prompt(monkeypatch)
 
-    references_json = json.dumps({"references": [{"kind": "video", "file": "v1.mp4"}]})
+    # use_soundtrack now defaults to True, so the OFF case has to be explicit
+    references_json = json.dumps(
+        {"references": [{"kind": "video", "file": "v1.mp4", "use_soundtrack": False}]}
+    )
     out = nodes.MiniMaxH3ReferencePack().build(
         direction="", openrouter_api_key="", model="m", references_json=references_json
     )

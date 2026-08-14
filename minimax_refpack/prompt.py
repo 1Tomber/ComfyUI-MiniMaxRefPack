@@ -50,6 +50,38 @@ DEFAULT_REASONING_EFFORT = "medium"
 REASONING_EFFORTS = ("none", "low", "medium", "high")
 
 _SYSTEM_PROMPT_PATH = os.path.join(os.path.dirname(__file__), "system_prompt.md")
+_REPLACEMENT_PROMPT_PATH = os.path.join(os.path.dirname(__file__), "system_prompt_replacement.md")
+
+# Two registers, one per job. "standard" is the six-section Ref2VA writer; "replacement"
+# swaps one thing in a reference video for the thing in a reference image and changes
+# nothing else. They are separate FILES, not two halves of one prompt: the Ref2VA rules
+# are ~22KB of hard formatting mandates and putting both in context produces hybrids.
+MODES = ("auto", "standard", "replacement")
+_PROMPT_PATHS = {"standard": _SYSTEM_PROMPT_PATH, "replacement": _REPLACEMENT_PROMPT_PATH}
+
+# Free models were measured and rejected for this job (2026-08-15): gemma-4-31b:free
+# returned HTTP 429 on every call, gpt-oss-20b:free returned no `content` field.
+# flash-lite scored 6/6 at ~0.6s and ~$0.03 per 1000 calls.
+CLASSIFIER_MODEL = "google/gemini-2.5-flash-lite"
+_CLASSIFY_TIMEOUT = 20
+
+# Measured, not guessed: eval/classify scores prompt variants over 20 simple and complex
+# directions. Slimmer variants all failed the same way - a false REPLACEMENT on an
+# ordinary scene write that happens to borrow a face or a camera move from a reference.
+# What works is ENUMERATING what STANDARD covers (abstractions like "however much it
+# borrows" scored 12/20) plus the two contrasting examples, which together took the last
+# case: 20/20 on repeat runs vs 19/20 without the examples. ~141 tokens, ~$0.00004/call.
+_CLASSIFY_SYSTEM = (
+    "Classify the user's video-generation request. Answer with exactly one word.\n"
+    "REPLACEMENT - they want a specific object, product or character in a reference VIDEO "
+    "swapped for the thing shown in a reference IMAGE, with everything else in that video "
+    "left exactly as it is.\n"
+    "STANDARD - anything else: a new scene, a continuation of a clip, a described shot, or "
+    "a scene built from reference imagery.\n"
+    "e.g. putting the character from the image into the video is REPLACEMENT; "
+    "taking the motion from the video to animate a character is STANDARD.\n"
+    "Answer REPLACEMENT or STANDARD."
+)
 
 _models_cache: list[str] | None = None
 _models_cache_at: float = 0.0
@@ -177,9 +209,48 @@ def _text_part(text: str) -> dict:
 # ---- payload assembly -----------------------------------------------------------
 
 
-def _read_system_prompt() -> str:
-    with open(_SYSTEM_PROMPT_PATH, "r", encoding="utf-8") as f:
+def _read_system_prompt(mode: str = "standard") -> str:
+    path = _PROMPT_PATHS.get(mode, _SYSTEM_PROMPT_PATH)
+    with open(path, "r", encoding="utf-8") as f:
         return f.read()
+
+
+def classify_mode(*, direction: str, references, api_key: str, model: str = "") -> str:
+    """'replacement' or 'standard' for a direction. Never raises.
+
+    Replacement is only reachable with at least one video AND one image to swap between,
+    so the cheap structural check runs first and skips the call entirely when the set
+    can't support it. Any failure - no key, network, rate limit, a model that answers
+    something else - falls back to 'standard', which is the right register for almost
+    every job and never produces a catastrophically wrong format.
+    """
+    counts = references.counts()
+    if not counts.get("video") or not counts.get("image"):
+        return "standard"
+    if not (direction and direction.strip()):
+        return "standard"
+    try:
+        key = _resolve_api_key(api_key)
+        resp = requests.post(
+            _CHAT_URL,
+            headers={"Authorization": f"Bearer {key}"},
+            json={
+                "model": model or CLASSIFIER_MODEL,
+                "max_tokens": 6,
+                "temperature": 0,
+                "messages": [
+                    {"role": "system", "content": _CLASSIFY_SYSTEM},
+                    {"role": "user", "content": direction},
+                ],
+            },
+            timeout=_CLASSIFY_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            return "standard"
+        answer = (resp.json()["choices"][0]["message"].get("content") or "").strip().upper()
+    except Exception:
+        return "standard"
+    return "replacement" if "REPLACEMENT" in answer else "standard"
 
 
 def _file_audio_part(path: str, tag: str, filename: str) -> dict:
@@ -359,17 +430,27 @@ def _short_reason(resp: requests.Response) -> str:
 def write_prompt(
     *, references, input_dir: str, direction: str, api_key: str, model: str,
     system_prompt: str = "", width: int = 0, height: int = 0, length_seconds: float = 0.0,
-    reasoning_effort: str = DEFAULT_REASONING_EFFORT, debug: list | None = None,
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT, job_type: str = "auto",
+    classifier_model: str = "", debug: list | None = None,
 ) -> str:
     """Pass a list as `debug` to have the rendered payload appended to it. A sink rather
     than a second return value, so the frozen `-> str` contract and every existing caller
     stay untouched, and so the payload survives a raised PromptError."""
     key = _resolve_api_key(api_key)
+
+    # job_type picks the register. "auto" asks a cheap classifier; anything else is taken
+    # at its word and makes no extra call. An explicit system_prompt overrides all of it.
+    resolved = job_type if job_type in ("standard", "replacement") else "standard"
+    if job_type == "auto":
+        resolved = classify_mode(
+            direction=direction, references=references, api_key=api_key, model=classifier_model
+        )
+
     # Non-blank (after strip) -> the workflow's own edited prompt, used verbatim (not
-    # stripped). Blank -> fall back to the packaged file, read at call time (not import
-    # time) so an edit to system_prompt.md on disk is picked up on the next queue.
+    # stripped). Blank -> fall back to the packaged file for the resolved job type, read
+    # at call time (not import time) so an edit on disk lands on the next queue.
     if not (system_prompt and system_prompt.strip()):
-        system_prompt = _read_system_prompt()
+        system_prompt = _read_system_prompt(resolved)
     content = _build_content(
         references, input_dir, direction,
         width=width, height=height, length_seconds=length_seconds,
@@ -391,7 +472,10 @@ def write_prompt(
     # Filled before the call, so a failed request still leaves the caller the payload
     # that caused it - that's when it's worth the most.
     if debug is not None:
-        debug.append(render_payload(payload))
+        # Exactly ONE entry: the node reads debug_sink[0]. The routing line rides on top
+        # of the payload render rather than being a second entry.
+        routing = f"job_type: {job_type} -> {resolved} (system prompt: {resolved}.md)"
+        debug.append(routing + "\n" + render_payload(payload))
 
     try:
         resp = requests.post(

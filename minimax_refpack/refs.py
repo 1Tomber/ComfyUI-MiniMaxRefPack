@@ -51,8 +51,10 @@ class Reference:
 
     kind: Kind
     file: str
-    # video only: also emit the clip's soundtrack on the index-matched video_audio_N output
-    use_soundtrack: bool = False
+    # video only: also emit the clip's soundtrack on the index-matched video_audio_N output.
+    # ON by default - a reference video's sound is part of the reference, and a silent
+    # clip is handled downstream (the probe clears the flag when there is no audio track).
+    use_soundtrack: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"kind": self.kind, "file": self.file}
@@ -71,7 +73,7 @@ class Reference:
         return cls(
             kind=kind,
             file=file.strip(),
-            use_soundtrack=bool(d.get("use_soundtrack", False)) if kind == "video" else False,
+            use_soundtrack=bool(d.get("use_soundtrack", True)) if kind == "video" else False,
         )
 
 

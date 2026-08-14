@@ -12,3 +12,6 @@ eval/
 
 # Internal design notes and the working bug ledger. The shipped documentation is README.md.
 docs/
+
+# Artifact written by `comfy node publish`.
+node.zip

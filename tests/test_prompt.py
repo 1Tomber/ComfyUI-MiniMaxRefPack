@@ -655,3 +655,120 @@ def test_debug_shows_the_user_message_before_the_system_prompt(monkeypatch, tmp_
 
     # ...but the wire order is unchanged: system is still messages[0].
     assert [m["role"] for m in captured["payload"]["messages"]] == ["system", "user"]
+
+
+# ---- job_type routing ------------------------------------------------------------
+
+
+def _refset_with(video=0, image=0):
+    refs_list = [img(f"i{i}.png") for i in range(image)] + [vid(f"v{i}.mp4") for i in range(video)]
+    return ReferenceSet(refs_list)
+
+
+def test_replacement_is_impossible_without_both_a_video_and_an_image(monkeypatch):
+    """The structural gate runs before the classifier, so most jobs never pay for it."""
+    def boom(*a, **k):
+        raise AssertionError("classifier must not be called when the set can't support a swap")
+
+    monkeypatch.setattr(prompt.requests, "post", boom)
+    for refset in (_refset_with(video=1), _refset_with(image=1), _refset_with()):
+        assert prompt.classify_mode(
+            direction="swap the bottle for the can", references=refset, api_key="k"
+        ) == "standard"
+
+
+def test_classifier_routes_to_replacement(monkeypatch):
+    monkeypatch.setattr(
+        prompt.requests, "post",
+        lambda *a, **k: FakeResponse(200, {"choices": [{"message": {"content": "REPLACEMENT"}}]}),
+    )
+    got = prompt.classify_mode(
+        direction="swap the bottle for the can in the image",
+        references=_refset_with(video=1, image=1), api_key="k",
+    )
+    assert got == "replacement"
+
+
+@pytest.mark.parametrize("failure", [
+    lambda *a, **k: FakeResponse(429, {"error": {"message": "rate limited"}}),
+    lambda *a, **k: FakeResponse(200, {"choices": [{"message": {"content": "banana"}}]}),
+    lambda *a, **k: (_ for _ in ()).throw(requests.exceptions.ConnectionError("down")),
+])
+def test_any_classifier_failure_falls_back_to_standard(monkeypatch, failure):
+    """A classifier that 429s or answers nonsense must never block a run, and must never
+    route into replacement - the wrong-way error produces a completely wrong format."""
+    monkeypatch.setattr(prompt.requests, "post", failure)
+    assert prompt.classify_mode(
+        direction="swap it", references=_refset_with(video=1, image=1), api_key="k"
+    ) == "standard"
+
+
+def test_explicit_job_type_never_calls_the_classifier(monkeypatch, tmp_path):
+    calls = []
+    real_post = prompt.requests.post
+
+    def counting_post(url, headers=None, json=None, timeout=None):  # noqa: A002
+        calls.append(json.get("model"))
+        return FakeResponse(200, {"choices": [{"message": {"content": "p"}}]})
+
+    monkeypatch.setattr(prompt.requests, "post", counting_post)
+    prompt.write_prompt(
+        references=ReferenceSet([]), input_dir=str(tmp_path), direction="d",
+        api_key="k", model="m", job_type="replacement",
+    )
+    # exactly one call - the write - and never the classifier model
+    assert len(calls) == 1
+    assert prompt.CLASSIFIER_MODEL not in calls
+
+
+def test_each_job_type_loads_its_own_system_prompt():
+    """Both registers emit MiniMax's six-section Ref2VA IR - a replacement is a
+    documented `video editing` task, not a bespoke format - so what separates them is
+    the task type and the editing semantics, not the section names."""
+    std = prompt._read_system_prompt("standard")
+    rep = prompt._read_system_prompt("replacement")
+    assert std != rep
+
+    # both speak the same IR
+    for text in (std, rep):
+        assert "subject_definitions" in text
+        assert "retention_analysis" in text
+
+    # only the replacement register carries the editing task type and its fixed opener
+    assert "[video editing]" in rep
+    assert "The target video is an edited version of <Video 1>." in rep
+    assert "[video editing]" not in std
+
+    # and the replacement register must forbid the ten-section prose shape that the
+    # source template produced, which returned headingless prose in eval/replacement
+    assert "NEVER emit the ten-section prose format" in rep
+
+
+def test_replacement_prompt_uses_minimax_tag_spelling():
+    """The source template used <Image_1>/<Video_1>; MiniMax binds <Picture N>/<Video N>.
+    The wrong spelling may appear ONLY where it is taught against - never in the format
+    spec the model copies from."""
+    rep = prompt._read_system_prompt("replacement")
+    assert "<Picture N>" in rep
+    assert "underscore" in rep, "the prompt should say why the wrong spelling fails"
+
+    _, _, after = rep.partition("=== OUTPUT FORMAT")
+    fmt, _, _checklist = after.partition("=== RULES ===")
+    assert fmt, "OUTPUT FORMAT section not found"
+    assert "<Image_1>" not in fmt, "the wrong spelling leaked into the format spec"
+    assert "<Video_1>" not in fmt
+    assert "<Picture N>" in fmt
+
+
+def test_debug_records_the_routing_decision(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        prompt.requests, "post",
+        lambda *a, **k: FakeResponse(200, {"choices": [{"message": {"content": "p"}}]}),
+    )
+    sink = []
+    prompt.write_prompt(
+        references=ReferenceSet([]), input_dir=str(tmp_path), direction="d",
+        api_key="k", model="m", job_type="replacement", debug=sink,
+    )
+    assert len(sink) == 1, "the node reads debug_sink[0]; exactly one entry"
+    assert "job_type: replacement -> replacement" in sink[0]

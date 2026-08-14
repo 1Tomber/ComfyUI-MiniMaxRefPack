@@ -323,3 +323,23 @@ def test_saved_settings_survive_a_disk_round_trip(tmp_path):
     save_pack(str(tmp_path), p)
     back = load_pack(str(tmp_path), "cfg")
     assert (back.model, back.reasoning_effort) == ("m/1", "low")
+
+
+def test_video_soundtrack_is_on_by_default():
+    """A reference video's sound is part of the reference. Opt out, don't opt in."""
+    assert Reference(kind="video", file="v.mp4").use_soundtrack is True
+    # and a dict that simply omits the key inherits that default
+    assert Reference.from_dict({"kind": "video", "file": "v.mp4"}).use_soundtrack is True
+    # explicit False still wins
+    assert Reference.from_dict(
+        {"kind": "video", "file": "v.mp4", "use_soundtrack": False}
+    ).use_soundtrack is False
+    # non-videos never carry it
+    assert Reference.from_dict({"kind": "image", "file": "i.png"}).use_soundtrack is False
+
+
+def test_a_default_video_takes_an_audio_tag():
+    s = ReferenceSet([Reference(kind="video", file="v.mp4"), aud("vo.wav")])
+    tagged = {t.file: t for t in s.assign_tags()}
+    assert tagged["v.mp4"].audio_tag == "<Audio 1>"
+    assert tagged["vo.wav"].tag == "<Audio 2>"
