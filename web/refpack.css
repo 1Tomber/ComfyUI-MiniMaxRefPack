@@ -1,0 +1,296 @@
+/* MiniMax H3 Reference Pack — DOM half of the hybrid UI.
+ *
+ * Visual spec: the DOM/canvas split stays VISIBLE. There is NO wrapping
+ * panel — buttons and the prompt textarea sit directly on ComfyUI's own grey node
+ * background, and the canvas is the one BLACK slab on the node (its background is
+ * set here; its edge, section dividers and everything inside are drawn — see
+ * refpack.js draw()). Palette stays LTX Director's flat neutral greyscale, no
+ * gradients; the only colour anywhere is #ff4444 (danger / selection).
+ *
+ * FIXED GEOMETRY: the node is fixed-size (refpack.js fixedSize()), and that
+ * arithmetic assumes the heights pinned here — .mmrp-uploads 30px, .mmrp-direction
+ * 110px, .mmrp-block gap 8px (CONTENT.uploadsH / promptH / gap in refpack.js),
+ * and .mmrp-preview matches CL.tile (131px). Change one side only in lockstep
+ * with the other.
+ */
+
+.mmrp-block {
+    position: relative; /* offsetParent for the canvas and the preview overlay */
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    box-sizing: border-box;
+    font-size: 12px;
+    color: #e0e0e0;
+    background: transparent; /* the grey node body IS the background */
+}
+
+/* Light-black fill, white text, flat — buttons on the node, not a custom panel. */
+.mmrp-btn {
+    background: #2a2a2a;
+    border: 1px solid #444;
+    color: #fff;
+    border-radius: 4px;
+    padding: 5px 10px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.mmrp-btn:hover:not(:disabled) {
+    background: #333;
+    border-color: #555;
+}
+
+.mmrp-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+/* Same surface as every other button — emphasis through weight, not a new shade. */
+.mmrp-btn-primary {
+    font-weight: 600;
+}
+
+/* ---- upload row (also holds Save/Load config + the ⚙ settings button) ----
+   Fixed 30px, no wrap: the node is fixed at 1340px wide, everything fits on one
+   line, and the fixed-height arithmetic depends on this never growing.
+   Per spec: buttons are content-sized and LEFT-weighted — a comfortable group on
+   the left of the node, never stretched edge to edge; only the ⚙ sits far right. */
+
+.mmrp-uploads {
+    position: relative; /* anchors .mmrp-pack-panel */
+    display: flex;
+    flex-wrap: nowrap;
+    height: 30px;
+    gap: 8px;
+}
+
+.mmrp-upload-btn {
+    flex: 0 0 auto; /* size to content — "not spanning across the whole node" */
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 0 14px; /* comfortable, "not crammed"; height comes from the 30px row */
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.mmrp-upload-btn svg {
+    display: block;
+    flex: 0 0 auto;
+}
+
+.mmrp-gear-btn {
+    flex: 0 0 auto;
+    margin-left: auto; /* far right, on its own */
+    width: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    font-size: 14px;
+    line-height: 1;
+}
+
+.mmrp-pack-panel {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    z-index: 20;
+    margin-top: 4px;
+    min-width: 140px;
+    max-height: 180px;
+    overflow-y: auto;
+    background: #1e1e1e;
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 4px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
+    font-size: 12px;
+}
+
+.mmrp-pack-item {
+    padding: 5px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mmrp-pack-item:hover {
+    background: #333;
+}
+
+/* Save-config variant of the pack panel: name box + Save button + a status line.
+   Replaces window.prompt(), which some embeddings refuse (see saveConfig). */
+.mmrp-save-panel {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px;
+    overflow: visible;
+}
+
+.mmrp-save-name {
+    flex: 1 1 auto;
+    min-width: 150px;
+    background: #111;
+    border: 1px solid #444;
+    border-radius: 4px;
+    color: #e0e0e0;
+    padding: 5px 8px;
+    font-size: 12px;
+    font-family: inherit;
+    outline: none;
+}
+
+.mmrp-save-name:focus {
+    border-color: #888;
+}
+
+.mmrp-save-name::placeholder {
+    color: #666;
+}
+
+.mmrp-save-status {
+    flex: 1 0 100%;
+    font-size: 11px;
+    color: #aaa;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mmrp-save-status:empty {
+    display: none;
+}
+
+/* ---- the reference area: one black drawn slab ----
+   The black background is what announces "this is the reference area" against the
+   grey node; the 1px edge and everything inside are drawn on the canvas itself
+   (a CSS border would offset hit-test coordinates from the drawn content box).
+   Height is set inline once from CANVAS_ROWS.height — fixed, like everything else.
+   display:block kills the inline-baseline gap under the canvas (same fix as the
+   reference's .pr-canvas). */
+
+.mmrp-canvas {
+    display: block;
+    width: 100%;
+    background: #000;
+    border-radius: 6px;
+}
+
+/* The single shared click-to-play video overlay, positioned over a tile by
+   togglePreview(). Child of .mmrp-block, so ComfyUI's zoom transform applies to
+   it exactly as it does to the canvas underneath. */
+
+.mmrp-preview {
+    position: absolute;
+    display: none;
+    width: 131px; /* CL.tile */
+    height: 131px;
+    object-fit: cover;
+    border-radius: 4px;
+    background: #000;
+    z-index: 5;
+    cursor: pointer;
+}
+
+/* ---- prompt (bound to the hidden `direction` widget) ----
+   One plain textarea on the grey, fixed at 110px — halved per spec ("it's even
+   larger than the rows of the canvas"), so it now sits clearly smaller than a
+   canvas row. Definition comes from the dark fill against the grey node body
+   plus a visible border — no overlay label, no unfocused dimming: a low-contrast
+   border plus opacity once made this box read as absent, so it stays fully opaque
+   at rest. */
+
+.mmrp-direction {
+    width: 100%;
+    height: 110px;
+    box-sizing: border-box;
+    background: #1e1e1e;
+    border: 1px solid #444;
+    border-radius: 6px;
+    color: #e0e0e0;
+    padding: 8px 10px;
+    font-size: 13px;
+    line-height: 1.45;
+    resize: none; /* the node is fixed-size; the box is too */
+    outline: none;
+    font-family: inherit;
+    transition: border-color 0.2s ease;
+}
+
+.mmrp-direction:focus {
+    border-color: #888;
+}
+
+.mmrp-direction::placeholder {
+    color: #666;
+}
+
+/* ---- system prompt modal (the ONLY place system_prompt is shown) ---- */
+
+.mmrp-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+}
+
+.mmrp-modal {
+    background: #1e1e1e;
+    border: 1px solid #444;
+    border-radius: 8px;
+    width: min(520px, 92vw);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 14px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7);
+    color: #e0e0e0;
+    font-size: 13px;
+    box-sizing: border-box;
+}
+
+.mmrp-modal-header {
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.mmrp-modal-hint {
+    color: #888;
+    font-size: 11px;
+}
+
+.mmrp-modal-textarea {
+    width: 100%;
+    min-height: 220px;
+    resize: vertical;
+    box-sizing: border-box;
+    background: #111;
+    border: 1px solid #444;
+    color: #e0e0e0;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-size: 12px;
+    font-family: inherit;
+}
+
+.mmrp-modal-textarea:focus {
+    outline: none;
+    border-color: #666;
+}
+
+.mmrp-modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+}

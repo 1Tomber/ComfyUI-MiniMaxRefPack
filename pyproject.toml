@@ -1,0 +1,20 @@
+[project]
+name = "comfyui-minimaxrefpack"
+description = "Reference management, reference packs and VLM prompt writing for MiniMax H3 Reference-to-Video."
+version = "0.1.0"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = ["requests"]
+
+[project.urls]
+Repository = "https://github.com/Hearmeman24/ComfyUI-MiniMaxRefPack"
+
+[tool.comfy]
+PublisherId = "hearmeman"
+DisplayName = "MiniMax H3 Reference Pack"
+Icon = ""
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "--import-mode=importlib"

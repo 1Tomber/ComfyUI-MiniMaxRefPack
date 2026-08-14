@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+*.egg-info/
+.venv/
+
+# Local development harness: an eval rig for iterating on system_prompt.md against a
+# live model, plus its test media and outputs. Not part of the node, not needed to run
+# it, and not something a user should have to download.
+eval/
+
+# Internal design notes and the working bug ledger. The shipped documentation is README.md.
+docs/
