@@ -420,6 +420,78 @@ def test_write_prompt_threads_target_format_into_the_payload(monkeypatch, tmp_pa
     assert "duration: 12.250 seconds" in text
 
 
+# ---- what the VLM actually receives -------------------------------------------
+
+
+def _decode_part(part):
+    """(mime, PIL image) behind an image_url part."""
+    import base64
+    import io
+
+    from PIL import Image
+
+    url = part["image_url"]["url"]
+    head, b64 = url.split(",", 1)
+    return head[len("data:") : head.find(";")], Image.open(io.BytesIO(base64.b64decode(b64)))
+
+
+def _oversized_image(path):
+    return np.random.rand(1, 1000, 2000, 3).astype(np.float32)
+
+
+def _oversized_video(path, target_fps=24):
+    return np.random.rand(9, 1000, 2000, 3).astype(np.float32), None
+
+
+def test_references_go_out_as_jpeg(monkeypatch, tmp_path):
+    monkeypatch.setattr(prompt.media, "load_image", fake_load_image, raising=False)
+    content = prompt._build_content(ReferenceSet([img("a.jpg")]), str(tmp_path), "direction")
+
+    mime, _ = _decode_part(content[2])
+    assert mime == "image/jpeg"
+
+
+def test_an_oversized_reference_is_capped_on_its_long_edge(monkeypatch, tmp_path):
+    """A 5000x2550 sheet was ~10MB of base64 and ~1.8s of PNG compression per call, and
+    none of it survived the trip - Gemini tiles images at 768px."""
+    monkeypatch.setattr(prompt.media, "load_image", _oversized_image, raising=False)
+    content = prompt._build_content(ReferenceSet([img("a.jpg")]), str(tmp_path), "direction")
+
+    _, image = _decode_part(content[2])
+    assert max(image.size) == prompt.VLM_IMAGE_LONG_EDGE
+    assert image.size == (prompt.VLM_IMAGE_LONG_EDGE, prompt.VLM_IMAGE_LONG_EDGE // 2)  # 2:1 kept
+
+
+def test_a_small_reference_is_never_upscaled(monkeypatch, tmp_path):
+    monkeypatch.setattr(prompt.media, "load_image", fake_load_image, raising=False)
+    content = prompt._build_content(ReferenceSet([img("a.jpg")]), str(tmp_path), "direction")
+
+    _, image = _decode_part(content[2])
+    assert image.size == (4, 4)
+
+
+def test_sampled_video_frames_get_the_same_cap(monkeypatch, tmp_path):
+    """Six frames per video ride the same encoder as the stills - at 1080p they were the
+    larger half of the payload."""
+    monkeypatch.setattr(prompt.media, "load_video", _oversized_video, raising=False)
+    content = prompt._build_content(ReferenceSet([vid("clip.mp4")]), str(tmp_path), "direction")
+
+    frames = [p for p in content if p.get("type") == "image_url"]
+    assert len(frames) == 6
+    for part in frames:
+        mime, image = _decode_part(part)
+        assert mime == "image/jpeg"
+        assert max(image.size) == prompt.VLM_IMAGE_LONG_EDGE
+
+
+def test_render_payload_reports_the_jpeg_mime(monkeypatch, tmp_path):
+    monkeypatch.setattr(prompt.media, "load_image", fake_load_image, raising=False)
+    content = prompt._build_content(ReferenceSet([img("a.jpg")]), str(tmp_path), "direction")
+
+    rendered = prompt.render_payload({"messages": [{"role": "user", "content": content}]})
+    assert "[image/jpeg, ~" in rendered
+
+
 # ---- write_prompt: the full round trip ----------------------------------------
 
 

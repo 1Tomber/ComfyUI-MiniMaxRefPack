@@ -158,15 +158,32 @@ def _to_numpy(x):
     return np.asarray(x)
 
 
-def _tensor_to_png_b64(tensor) -> str:
-    """A [H,W,3] or [1,H,W,3] float tensor in 0..1 -> base64 PNG bytes."""
+# Everything the VLM sees goes through _tensor_to_jpeg_b64 - the standalone stills AND
+# the six frames sampled per video - so the cap lives in one place.
+#
+# It used to send native-resolution PNG, which for one 5000x2550 sheet plus one 10s 1080p
+# clip meant ~24MB of base64 uploaded off the pod after ~3.7s of PNG compression. All of it
+# wasted: the vision models tile images at 768px, so resolution above the cap is discarded
+# on the far side. Measured on the same pair of references: 10.4MB -> 0.19MB for the sheet
+# (1816ms -> 2ms), 2.3MB -> 0.30MB per frame. q90 loss is invisible to a model writing a
+# scene description; it is not a delivery format.
+VLM_IMAGE_LONG_EDGE = 1536
+VLM_JPEG_QUALITY = 90
+
+
+def _tensor_to_jpeg_b64(tensor) -> str:
+    """A [H,W,3] or [1,H,W,3] float tensor in 0..1 -> base64 JPEG bytes, long edge capped
+    at VLM_IMAGE_LONG_EDGE. Downscale only - a small reference is sent as it is."""
     arr = _to_numpy(tensor).astype(np.float32)
     if arr.ndim == 4:
         arr = arr[0]
     arr = np.clip(arr, 0.0, 1.0)
     arr = (arr * 255.0).astype(np.uint8)
+    img = Image.fromarray(arr, "RGB")
+    # thumbnail() shrinks in place and never enlarges, which is the behaviour we want.
+    img.thumbnail((VLM_IMAGE_LONG_EDGE, VLM_IMAGE_LONG_EDGE), Image.LANCZOS)
     buf = io.BytesIO()
-    Image.fromarray(arr, "RGB").save(buf, format="PNG")
+    img.save(buf, format="JPEG", quality=VLM_JPEG_QUALITY)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
@@ -198,8 +215,8 @@ def _six_evenly_spaced(n: int) -> list[int]:
     return [round(i * (n - 1) / 5) for i in range(6)]
 
 
-def _image_part(png_b64: str) -> dict:
-    return {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_b64}"}}
+def _image_part(jpeg_b64: str) -> dict:
+    return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{jpeg_b64}"}}
 
 
 def _text_part(text: str) -> dict:
@@ -320,7 +337,7 @@ def _build_content(
         if t.kind == "image":
             tensor = media.load_image(path)
             parts.append(_text_part(f"image_reference {t.tag} ({t.file}) - the next image:"))
-            parts.append(_image_part(_tensor_to_png_b64(tensor)))
+            parts.append(_image_part(_tensor_to_jpeg_b64(tensor)))
 
         elif t.kind == "video":
             frames, audio = media.load_video(path, target_fps=24)
@@ -333,7 +350,7 @@ def _build_content(
                 )
             )
             for i in idxs:
-                parts.append(_image_part(_tensor_to_png_b64(frames[i])))
+                parts.append(_image_part(_tensor_to_jpeg_b64(frames[i])))
             if t.audio_tag is not None:
                 if audio is not None:
                     parts.append(
