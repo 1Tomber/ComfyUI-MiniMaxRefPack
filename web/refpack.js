@@ -389,27 +389,80 @@ function hideWidget(w) {
 // liveNodes tracks which nodes to repaint when a thumb lands.
 // ---------------------------------------------------------------------------
 
-const thumbCache = new Map(); // file -> { img, state: "loading"|"ok"|"error" }
+const thumbCache = new Map(); // file -> { img, state: "loading"|"ok"|"error", tries, reqs, timer }
 const liveNodes = new Set();
+
+// A thumb request fails for reasons that have nothing to do with the file: thumb_route
+// decodes SYNCHRONOUSLY on the aiohttp loop, so while ComfyUI is still starting up (model
+// loads, Manager's registry fetch) the request stalls and whatever proxy sits in front of
+// the pod kills it. The first version cached that <img> error forever — one unlucky
+// request and the tile read "no preview" until the tab was reloaded, with the file sitting
+// happily in input/ the whole time. So: back off and retry, and only claim "no preview"
+// once the ladder is exhausted.
+const THUMB_RETRY_MS = [1000, 2000, 4000, 8000, 15000];
+
+function repaintLive() {
+    for (const n of liveNodes) scheduleDraw(n);
+}
+
+// `reqs` is monotonic and only feeds the cache-buster — a retry must not be answered from
+// whatever cached the failure. The first request stays clean so it can be cached normally.
+function requestThumb(entry, file) {
+    entry.timer = null;
+    entry.reqs += 1;
+    entry.img.src = entry.reqs === 1 ? thumbUrl(file) : `${thumbUrl(file)}&retry=${entry.reqs - 1}`;
+}
 
 function getThumb(file) {
     let entry = thumbCache.get(file);
     if (!entry) {
         const img = new Image();
-        entry = { img, state: "loading" };
+        entry = { img, state: "loading", tries: 0, reqs: 0, timer: null };
         img.onload = () => {
             entry.state = "ok";
-            for (const n of liveNodes) scheduleDraw(n);
+            entry.tries = 0;
+            repaintLive();
         };
         img.onerror = () => {
-            entry.state = "error";
-            for (const n of liveNodes) scheduleDraw(n);
+            const delay = THUMB_RETRY_MS[entry.tries];
+            entry.tries += 1;
+            if (delay === undefined) {
+                // Ladder spent (~30s). Say so on the tile — but the entry stays retryable,
+                // see retryFailedThumbs().
+                entry.state = "error";
+                repaintLive();
+                return;
+            }
+            // Still trying: the tile shows the plain well, not a verdict it may have to
+            // take back a second later.
+            entry.state = "loading";
+            entry.timer = setTimeout(() => requestThumb(entry, file), delay);
         };
-        img.src = thumbUrl(file);
         thumbCache.set(file, entry);
+        requestThumb(entry, file);
     }
     return entry;
 }
+
+// Giving up is not giving up for good. Anything that says the world may have changed — the
+// tab coming back to the front, the browser going back online — puts every failed thumb
+// back in flight, so a pod that took minutes to finish booting recovers on its own instead
+// of demanding a page reload. Cheap: entries that loaded fine are skipped, and nothing
+// here polls.
+function retryFailedThumbs() {
+    let any = false;
+    for (const [file, entry] of thumbCache) {
+        if (entry.state !== "error") continue;
+        entry.state = "loading";
+        entry.tries = 0;
+        requestThumb(entry, file);
+        any = true;
+    }
+    if (any) repaintLive();
+}
+
+window.addEventListener("focus", retryFailedThumbs);
+window.addEventListener("online", retryFailedThumbs);
 
 // The single repaint funnel: every change (refs, selection, thumb load, probe
 // answer, preview toggle, the canvas's one real mount) lands here, coalesced to one
