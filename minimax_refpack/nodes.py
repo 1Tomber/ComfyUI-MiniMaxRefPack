@@ -167,13 +167,13 @@ class MiniMaxH3ReferencePack:
         prompt_text = ""
         debug_sink: list[str] = []
         debug_header = [
-            "=== MiniMax H3 Reference Pack ===",
+            "=== MiniMax References Manager ===",
             f"use_openrouter: {bool(use_openrouter)}",
             f"model: {model}",
             f"width: {width or '(unspecified)'}  height: {height or '(unspecified)'}  "
             f"length_seconds: {length_seconds or '(unspecified)'}",
             f"reasoning_effort: {reasoning_effort}",
-            f"job_type: {job_type}",
+            f"job_type: {job_type}",   # rewritten below once auto has resolved
             f"system_prompt: {'workflow override' if (system_prompt or '').strip() else 'packaged default'}",
             f"references: {len(reference_set.references)} "
             f"({', '.join(f'{t.tag} {t.file}' for t in reference_set.assign_tags()) or 'none'})",
@@ -214,6 +214,16 @@ class MiniMaxH3ReferencePack:
             debug_header.append("")
             debug_header.append("No references attached - no request was made.")
 
+        # Hoist the resolved mode into the header. With job_type=auto the header alone
+        # would only say "auto", and which register actually ran is the thing worth
+        # seeing at a glance - it decides the entire output format.
+        if debug_sink:
+            routing = next(
+                (ln for ln in debug_sink[0].splitlines() if ln.startswith("job_type:")), ""
+            )
+            if routing:
+                debug_header = [routing if ln.startswith("job_type:") else ln for ln in debug_header]
+
         debug_text = "\n".join(debug_header)
         if debug_sink:
             debug_text += "\n\n--- payload sent to OpenRouter ---\n" + debug_sink[0]
@@ -230,4 +240,6 @@ class MiniMaxH3ReferencePack:
 
 
 NODE_CLASS_MAPPINGS = {"MiniMaxH3ReferencePack": MiniMaxH3ReferencePack}
-NODE_DISPLAY_NAME_MAPPINGS = {"MiniMaxH3ReferencePack": "MiniMax H3 Reference Pack"}
+# The class key stays MiniMaxH3ReferencePack forever — it is what saved workflows
+# reference. Only the human-facing label changes.
+NODE_DISPLAY_NAME_MAPPINGS = {"MiniMaxH3ReferencePack": "MiniMax References Manager"}

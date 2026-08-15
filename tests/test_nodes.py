@@ -474,3 +474,43 @@ def test_api_key_never_appears_in_the_debug_socket(fake_folder_paths, monkeypatc
         direction="", openrouter_api_key=secret, model="m", references_json=references_json,
     )
     assert secret not in out[refs.slot_index("debug")]
+
+
+def test_debug_header_shows_what_auto_resolved_to(fake_folder_paths, monkeypatch):
+    """With job_type=auto the header alone would only say "auto". Which register
+    actually ran decides the entire output format, so it belongs at the top."""
+    _touch(fake_folder_paths, "i1.jpg")
+    monkeypatch.setattr(nodes.media, "load_image", lambda path: f"IMG:{path}")
+
+    def fake_write_prompt(**kwargs):
+        kwargs["debug"].append(
+            "job_type: auto -> replacement (system prompt: replacement.md)\nmodel: m"
+        )
+        return "a prompt"
+
+    monkeypatch.setattr(nodes.prompt, "write_prompt", fake_write_prompt, raising=False)
+
+    references_json = json.dumps({"references": [{"kind": "image", "file": "i1.jpg"}]})
+    out = nodes.MiniMaxH3ReferencePack().build(
+        direction="d", openrouter_api_key="", model="m",
+        references_json=references_json, job_type="auto",
+    )
+    header = out[refs.slot_index("debug")].split("--- payload")[0]
+    assert "job_type: auto -> replacement" in header
+    assert "\njob_type: auto\n" not in header, "the unresolved line should be replaced"
+
+
+def test_debug_header_keeps_the_raw_job_type_when_no_call_is_made(fake_folder_paths, monkeypatch):
+    """Nothing resolved, so nothing to hoist - the header still reports the setting."""
+    _touch(fake_folder_paths, "i1.jpg")
+    monkeypatch.setattr(nodes.media, "load_image", lambda path: f"IMG:{path}")
+    monkeypatch.setattr(
+        nodes.prompt, "write_prompt",
+        lambda **k: (_ for _ in ()).throw(AssertionError("must not run")), raising=False,
+    )
+    references_json = json.dumps({"references": [{"kind": "image", "file": "i1.jpg"}]})
+    out = nodes.MiniMaxH3ReferencePack().build(
+        direction="d", openrouter_api_key="", model="m",
+        references_json=references_json, job_type="auto", use_openrouter=False,
+    )
+    assert "job_type: auto" in out[refs.slot_index("debug")]

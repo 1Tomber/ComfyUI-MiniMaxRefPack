@@ -1,5 +1,5 @@
 /**
- * MiniMax H3 Reference Pack — native widgets (openrouter_api_key, model) stay on top,
+ * MiniMax References Manager — native widgets (openrouter_api_key, model) stay on top,
  * untouched; everything custom lives in one DOM block BELOW them. Per the visual
  * spec the DOM/canvas split is VISIBLE: no wrapping panel, buttons and prompt sit
  * directly on ComfyUI's grey node body, and the canvas is a BLACK slab that

@@ -1,33 +1,20 @@
-# ComfyUI-MiniMaxRefPack
+# MiniMax References Manager
 
-Reference management for ComfyUI's **MiniMax H3 Reference to Video**.
+One node that manages every reference for **MiniMax H3 Reference to Video**, writes the prompt for you, and saves the whole setup to a file you can carry between installs.
 
-MiniMax H3 takes up to 9 reference images, 3 reference videos, their 3 soundtracks and 3 standalone audio
-clips — 18 sockets, each its own link, each fed by its own loader node. Changing a reference set means
-rewiring the graph.
+![The MiniMax References Manager node](assets/node.png)
 
-This pack replaces all of that with one node.
+## Features
 
-## What it does
-
-- **20 outputs, always present.** Wire the 18 reference sockets plus `prompt` into
-  `MiniMax H3 Reference to Video` once and save the workflow. Slots you aren't using send nothing, and MiniMax
-  skips them.
-- **A UI instead of links.** Upload, preview, play and delete images, videos and audio without touching the
-  graph.
-- **It shows you the tags.** Every tile displays the label MiniMax will actually give that asset —
-  `<Picture 2>`, `<Video 1>`, `<Audio 1>` — computed by the same rule the model's node uses, so your prompt
-  addresses the right thing.
-- **Portable configs.** Save the current set — direction text, model, reasoning effort and the reference list —
-  as a JSON file on your own machine, and load it back on any install.
-- **It writes the prompt.** A multimodal model over OpenRouter sees your references and your direction text,
-  and the result comes out of the `prompt` output. Turn `use_openrouter` off and your direction text passes
-  through verbatim instead, with no API call.
-- **Two registers, one node.** `job_type` picks how the prompt is written: `standard` for a scene, or
-  `replacement` for swapping one object or character in a reference video for the thing in a reference image.
-  `auto` lets a cheap classifier decide.
-- **A `debug` output.** The exact payload that went to the model: every setting, your direction, the target
-  format, the reference manifest and each media part (base64 elided). Wire it into any text preview node.
+- **Upload instead of wiring.** Drop in images, videos and audio through the node's own UI. Preview them, play them, delete them, reorder nothing. No loader nodes, no links.
+- **20 outputs, wired once.** Connect the 18 reference sockets plus `prompt` into `MiniMax H3 Reference to Video` and save the workflow. Change your references as often as you like, the graph never changes.
+- **Auto prompting.** A multimodal model over OpenRouter looks at your references, reads your direction text, and writes a full MiniMax H3 prompt in the exact six-section format the model expects.
+- **Two registers.** `standard` writes a scene. `replacement` swaps one object or character in a reference video for the thing in a reference image. `auto` lets a cheap classifier pick.
+- **Portable configs.** **Save config** downloads a JSON file to your machine. **Load config** reads it back on any install, on any pod, and restores your direction text, model, reasoning effort and reference list.
+- **The tags are on the tiles.** Every asset shows the label MiniMax will actually give it: `<Picture 2>`, `<Video 1>`, `<Audio 1>`. What you see is what you address in the prompt.
+- **Video soundtracks come along.** A video's audio track is extracted and sent as its own reference by default. Toggle it off per video.
+- **A `debug` output.** The exact payload that went to the model: every setting, your direction, the target format, the reference manifest, each media part. Wire it into any text preview node.
+- **Prompt passthrough.** Turn `use_openrouter` off and your direction text goes straight to the `prompt` output with no API call.
 
 ## Install
 
@@ -39,80 +26,40 @@ pip install -r ComfyUI-MiniMaxRefPack/requirements.txt
 
 Restart ComfyUI.
 
-## The OpenRouter key
+## Example workflow
 
-Order of precedence: the node's `openrouter_api_key` box, then `OPENROUTER_API_KEY`, then `LLM_KEY`.
+A complete Reference-to-Video graph ships with the pack: **Workflow → Browse Templates → ComfyUI-MiniMaxRefPack**, or drag `example_workflows/MiniMax R2V - Auto Prompting + Reference Manager.json` onto the canvas.
 
-The model dropdown lists only models that accept text, images, audio and video — 31 of them at time of
-writing — and defaults to `google/gemini-3-flash-preview`.
+## OpenRouter key
 
-Note that a key typed into the node is saved inside the workflow JSON. If you share workflows, use the
-environment variable instead.
+Precedence: the node's `openrouter_api_key` box, then `OPENROUTER_API_KEY`, then `LLM_KEY`.
 
-## Job types
+The model dropdown lists only models that accept text, images, audio and video, and defaults to `google/gemini-3-flash-preview`. A key typed into the node is saved inside the workflow JSON, so use the environment variable if you share workflows.
 
-`standard` writes MiniMax's six-section Ref2VA prompt for a scene: `subject_definitions`, `summary`,
-`retention_analysis`, `detailed_description`, `overall_soundscape`, `non_diegetic_music`.
+## Settings
 
-`replacement` is for the case where a reference video is the finished shot and one thing inside it is swapped
-for the thing in a reference image, with everything else untouched. It emits the **same six sections**, because
-MiniMax documents this as a `video editing` task — the summary opens `[video editing]` followed by
-`The target video is an edited version of <Video 1>.` Motion inheritance, integration, optics, camera, physics
-and lighting all live inside `detailed_description`.
-
-`auto` (the default) asks a cheap classifier which of the two you meant. It only runs when there is at least
-one video **and** one image attached, since a swap is impossible otherwise, and any failure falls back to
-`standard` rather than blocking the run.
-
-## Reasoning effort
-
-`reasoning_effort` (`none` / `low` / `medium` / `high`, default `medium`) is passed to OpenRouter, which drops
-it for models that don't reason. `medium` measurably raises conformance on the structural rules above, at
-roughly 1.8x the cost per call.
-
-## Target format
-
-`width`, `height` and `length_seconds` are told to the model so it composes for the real frame and places its
-cut timestamps inside the real duration. Set any of them to `0` to leave it unspecified. They do **not** set
-the output size — that's `Empty MiniMax H3 AV Latent`'s job, and if the two disagree the latent wins.
-
-## Configs
-
-**Save config** downloads `minimax-refpack-<name>.json` to your machine; **Load config** reads one back
-through a file picker. A config stores the direction text, the model, the reasoning effort and the reference
-list — filenames relative to `ComfyUI/input`, not absolute paths, so the same file works on any install.
-
-On load, any file the config names that isn't in this install's input folder is marked on its tile rather than
-dropped, so you can see exactly what needs re-uploading. A saved model that's no longer in the dropdown is
-reported instead of being silently applied.
+| Setting | What it does |
+| --- | --- |
+| `job_type` | `standard` / `replacement` / `auto`. `auto` only classifies when at least one video and one image are attached, and falls back to `standard` on any failure. |
+| `reasoning_effort` | `none` / `low` / `medium` / `high`, default `medium`. Passed to OpenRouter, dropped for models that don't reason. |
+| `width` / `height` / `length_seconds` | Told to the model so it composes for the real frame and keeps its cut timestamps inside the real duration. `0` leaves one unspecified. These do not set the output size, `Empty MiniMax H3 AV Latent` does. |
+| `use_openrouter` | Off: no API call, `direction` passes through verbatim. |
 
 ## The tag rule
 
-Worth knowing, because it isn't obvious:
-
-1. reference images, in order → `<Picture 1..n>`
-2. then each reference video: **if it has a soundtrack, that soundtrack takes the next `<Audio j>` first**,
-   then the video takes `<Video k>`
+1. reference images, in order, become `<Picture 1..n>`
+2. then each reference video: if its soundtrack is on, that soundtrack takes the next `<Audio j>` **first**, then the video takes `<Video k>`
 3. then standalone audio, continuing the `<Audio j>` count
 
-So a video's soundtrack is `<Audio 1>` even if you added a standalone audio clip before it. `<Video N>` and
-`<Audio N>` are counted independently of each other.
+So a video's soundtrack is `<Audio 1>` even if you added a standalone audio clip before it. `<Video N>` and `<Audio N>` count independently.
 
 ## Limits
 
-They're the model's, not ours: 9 images, 3 videos, 3 soundtracks, 3 audio clips. Reference videos need at
-least 5 frames and get trimmed to MiniMax's 17k+5 frame grid, then capped to the length of the video you're
-generating. Clips are resampled to 24fps on the way in, because MiniMax reads whatever frames it gets as
-24fps.
+The model's, not the node's: 9 images, 3 videos, 3 soundtracks, 3 audio clips. Reference videos need at least 5 frames, get trimmed to MiniMax's 17k+5 frame grid, then capped to the length of the video you're generating. Clips are resampled to 24fps on the way in.
 
-## Known limitations
+## Known issue
 
-The packaged system prompt asks the model to give every label it defines in
-`subject_definitions` exactly one `retention_analysis` line. MiniMax's own guide says newly invented content
-gets no retention entry at all. When the model invents something the references didn't supply — an environment
-written purely from your direction — those two rules pull against each other, and it sometimes resolves the
-conflict by dropping a label or inventing a line for one it never defined. Worth an eye on the output; the
-`debug` socket shows exactly what the model was told.
+The packaged system prompt asks the model to give every label it defines in `subject_definitions` exactly one `retention_analysis` line, while MiniMax's guide says newly invented content gets no retention entry at all. When the model invents something the references didn't supply, it sometimes resolves that by dropping a label or inventing a line for one it never defined. The `debug` socket shows exactly what it was told.
 
 ## Licence
 

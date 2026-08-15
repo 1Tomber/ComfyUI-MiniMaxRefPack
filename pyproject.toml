@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-minimaxrefpack"
 description = "Reference management, portable configs and VLM prompt writing for MiniMax H3 Reference-to-Video, with a dedicated object/character replacement mode."
-version = "0.2.0"
+version = "0.2.1"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = ["requests"]
@@ -11,7 +11,7 @@ Repository = "https://github.com/Hearmeman24/ComfyUI-MiniMaxRefPack"
 
 [tool.comfy]
 PublisherId = "hearmeman24"
-DisplayName = "MiniMax H3 Reference Pack"
+DisplayName = "MiniMax References Manager"
 Icon = ""
 
 [tool.pytest.ini_options]
