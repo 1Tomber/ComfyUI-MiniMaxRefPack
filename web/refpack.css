@@ -294,3 +294,140 @@
     gap: 8px;
     flex-wrap: wrap;
 }
+
+/* ---- crop/trim edit modal (openEditModal) ----
+   Same overlay/modal family as the system prompt modal, widened for media. The
+   crop rect works in percentages of the media box, so no JS pixel sync is needed
+   when the media loads — the layer just tracks the element it overlays. */
+
+.mmrp-edit-modal {
+    width: min(720px, 94vw);
+}
+
+.mmrp-edit-stage {
+    position: relative;
+    align-self: center;
+    max-width: 100%;
+}
+
+/* The edit preview reframes the media inside this box: it becomes the crop's window
+   (explicit size + overflow hidden), with the media absolutely placed inside it. */
+.mmrp-edit-media-wrap {
+    position: relative;
+    overflow: hidden;
+    line-height: 0;
+}
+
+.mmrp-edit-stage img,
+.mmrp-edit-stage video {
+    display: block;
+    max-width: 672px;
+    max-height: 400px;
+    background: #000;
+}
+
+.mmrp-edit-stage audio {
+    display: block;
+    width: 560px;
+    max-width: 100%;
+}
+
+.mmrp-crop-layer {
+    position: absolute;
+    inset: 0;
+    overflow: hidden; /* contains the rect's 9999px darkening shadow */
+}
+
+.mmrp-crop-rect {
+    position: absolute;
+    box-sizing: border-box;
+    border: 1px solid #fff;
+    /* darkens everything OUTSIDE the rect without a second element */
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+    cursor: move;
+}
+
+.mmrp-crop-handle {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    background: #fff;
+    border: 1px solid #000;
+    box-sizing: border-box;
+}
+
+.mmrp-crop-nw { left: -6px; top: -6px; cursor: nwse-resize; }
+.mmrp-crop-ne { right: -6px; top: -6px; cursor: nesw-resize; }
+.mmrp-crop-sw { left: -6px; bottom: -6px; cursor: nesw-resize; }
+.mmrp-crop-se { right: -6px; bottom: -6px; cursor: nwse-resize; }
+
+.mmrp-aspect-row,
+.mmrp-trim-row,
+.mmrp-play-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.mmrp-aspect-row .mmrp-btn.mmrp-active {
+    background: #e0e0e0;
+    border-color: #e0e0e0;
+    color: #000;
+}
+
+.mmrp-edit-label {
+    color: #888;
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.mmrp-trim-bar {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 160px;
+    height: 18px;
+    background: #141414;
+    border: 1px solid #444;
+    border-radius: 4px;
+}
+
+.mmrp-trim-span {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: rgba(224, 224, 224, 0.22);
+}
+
+.mmrp-trim-handle {
+    position: absolute;
+    top: -3px;
+    bottom: -3px;
+    width: 10px;
+    background: #e0e0e0;
+    border: 1px solid #000;
+    border-radius: 2px;
+    cursor: ew-resize;
+}
+
+.mmrp-trim-num {
+    width: 64px;
+    background: #111;
+    border: 1px solid #444;
+    border-radius: 4px;
+    color: #e0e0e0;
+    padding: 4px 6px;
+    font-size: 12px;
+    font-family: inherit;
+    outline: none;
+}
+
+.mmrp-trim-num:focus {
+    border-color: #888;
+}
+
+/* The Clear pair — one per row, pushed to the row's right edge so "Clear crop" and
+   "Clear trim" read as a pair. Disabled styling comes from .mmrp-btn:disabled. */
+.mmrp-clear-btn {
+    margin-left: auto;
+}

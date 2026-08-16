@@ -21,7 +21,7 @@ import numpy as np
 import requests
 from PIL import Image
 
-from . import media
+from . import logs, media
 
 DEFAULT_MODEL = "google/gemini-3-flash-preview"
 
@@ -207,12 +207,15 @@ def _waveform_to_wav_b64(waveform, sample_rate: int) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def _six_evenly_spaced(n: int) -> list[int]:
-    if n <= 0:
-        return []
-    if n <= 6:
-        return list(range(n))
-    return [round(i * (n - 1) / 5) for i in range(6)]
+def _video_part(data: bytes, mime: str) -> dict:
+    """OpenRouter's video content part. Verified live against
+    google/gemini-3-flash-preview: a 10.12s 1080p clip inlined this way came back 200 in
+    4.5s and billed 660 video tokens + 250 audio tokens - the model reads the motion, the
+    cut and the dialogue, none of which six stills carry."""
+    return {
+        "type": "video_url",
+        "video_url": {"url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"},
+    }
 
 
 def _image_part(jpeg_b64: str) -> dict:
@@ -334,44 +337,65 @@ def _build_content(
         label = t.tag if t.audio_tag is None else f"{t.tag} {t.audio_tag}"
         manifest.append(f"{label}: {t.file}")
 
+        # crop/trim go through the same loaders build() uses, so the VLM sees exactly
+        # the media the pack's sockets will emit - never the untrimmed original.
         if t.kind == "image":
-            tensor = media.load_image(path)
+            tensor = media.load_image(path, crop=t.ref.crop)
             parts.append(_text_part(f"image_reference {t.tag} ({t.file}) - the next image:"))
             parts.append(_image_part(_tensor_to_jpeg_b64(tensor)))
 
         elif t.kind == "video":
-            frames, audio = media.load_video(path, target_fps=24)
-            idxs = _six_evenly_spaced(len(frames))
-            manifest.append(f"  ({len(idxs)} frames of {t.tag} follow, in order)")
+            # The whole clip, not stills. An untouched reference is the file itself,
+            # soundtrack included and nothing decoded; a cropped/trimmed one is the
+            # re-encoded window, which is video-only and therefore still needs its
+            # soundtrack sent separately below.
+            data, mime = media.video_clip_bytes(path, crop=t.ref.crop, trim=t.ref.trim)
+            edited = t.ref.crop is not None or t.ref.trim is not None
             parts.append(
-                _text_part(
-                    f"video_reference {t.tag} ({t.file}) - the next {len(idxs)} images are frames "
-                    f"sampled evenly across this one clip, in playback order:"
-                )
+                _text_part(f"video_reference {t.tag} ({t.file}) - the next video, whole:")
             )
-            for i in idxs:
-                parts.append(_image_part(_tensor_to_jpeg_b64(frames[i])))
+            parts.append(_video_part(data, mime))
             if t.audio_tag is not None:
-                if audio is not None:
-                    parts.append(
-                        _text_part(
-                            f"audio_reference {t.audio_tag} - the soundtrack of {t.tag} ({t.file}), "
-                            f"the next audio clip:"
-                        )
-                    )
-                    parts.append(_video_audio_part(audio, t.audio_tag, t.file))
+                if not edited:
+                    # Its own audio track rides inside the file - sending the WAV too
+                    # would bill the same sound twice.
+                    manifest.append(f"  ({t.audio_tag}: the soundtrack inside {t.tag})")
                 else:
-                    manifest.append(f"  ({t.audio_tag}: {t.file}'s soundtrack could not be read)")
+                    _, audio = media.load_video(
+                        path, target_fps=24, crop=t.ref.crop, trim=t.ref.trim
+                    )
+                    if audio is not None:
+                        parts.append(
+                            _text_part(
+                                f"audio_reference {t.audio_tag} - the soundtrack of {t.tag} "
+                                f"({t.file}), the next audio clip:"
+                            )
+                        )
+                        parts.append(_video_audio_part(audio, t.audio_tag, t.file))
+                    else:
+                        manifest.append(f"  ({t.audio_tag}: {t.file}'s soundtrack could not be read)")
 
         else:  # audio
             parts.append(_text_part(f"audio_reference {t.tag} ({t.file}) - the next audio clip:"))
-            parts.append(_file_audio_part(path, t.tag, t.file))
+            if t.ref.trim is not None:
+                # The raw-file inline would hand the VLM the WHOLE file. A trimmed
+                # reference decodes through load_audio so the VLM hears exactly the
+                # span the pack's audio_N socket emits; the decoded PCM rides the same
+                # WAV encoder the video soundtracks use (and degrades to text the same
+                # way if the encode fails).
+                parts.append(_video_audio_part(media.load_audio(path, trim=t.ref.trim), t.tag, t.file))
+            else:
+                parts.append(_file_audio_part(path, t.tag, t.file))
 
     text = "USER DIRECTION:\n" + direction
     fmt = _target_format_lines(width, height, length_seconds)
     if fmt:
         text += "\n\nTARGET FORMAT:\n" + "\n".join(fmt)
-    text += "\n\nReference manifest:\n" + "\n".join(manifest)
+    # Zero references -> no manifest heading at all. A heading over an empty list
+    # reads as "assets failed to attach"; the system prompt's no-reference rule keys
+    # off the manifest being ABSENT, so the omission is load-bearing, not cosmetic.
+    if manifest:
+        text += "\n\nReference manifest:\n" + "\n".join(manifest)
     return [_text_part(text)] + parts
 
 
@@ -494,8 +518,52 @@ def write_prompt(
         routing = f"job_type: {job_type} -> {resolved} (system prompt: {resolved}.md)"
         debug.append(routing + "\n" + render_payload(payload))
 
+    parts = payload["messages"][1]["content"]
+    with logs.timed(
+        "openrouter", model=model, job_type=resolved, effort=reasoning_effort,
+        parts=len(parts), bytes=_payload_bytes(parts),
+    ) as fields:
+        resp = _post_chat(key, payload)
+        fields["status"] = resp.status_code
+        _record_usage(resp, fields)
+        message = _completion_of(resp)
+        fields["chars"] = len(message)
+    return message
+
+
+def _payload_bytes(parts) -> int:
+    """Roughly what goes on the wire: the base64 media dominates, the text is noise."""
+    total = 0
+    for part in parts:
+        if part.get("type") == "text":
+            total += len(part.get("text", ""))
+        elif part.get("type") == "image_url":
+            total += len(part["image_url"]["url"])
+        elif part.get("type") == "video_url":
+            total += len(part["video_url"]["url"])
+        elif part.get("type") == "input_audio":
+            total += len(part["input_audio"].get("data", ""))
+    return total
+
+
+def _record_usage(resp, fields) -> None:
+    """OpenRouter reports tokens and cost per call when it feels like it - log what is
+    there, never invent what is not."""
     try:
-        resp = requests.post(
+        usage = resp.json().get("usage") or {}
+    except (ValueError, AttributeError):
+        return
+    for key_name in ("prompt_tokens", "completion_tokens", "reasoning_tokens", "cost"):
+        if key_name in usage:
+            fields[key_name] = usage[key_name]
+    details = usage.get("completion_tokens_details") or {}
+    if "reasoning_tokens" in details:
+        fields["reasoning_tokens"] = details["reasoning_tokens"]
+
+
+def _post_chat(key, payload):
+    try:
+        return requests.post(
             _CHAT_URL,
             headers={"Authorization": f"Bearer {key}"},
             json=payload,
@@ -507,6 +575,8 @@ def write_prompt(
         # message. The type name is enough to debug a network failure.
         raise PromptError(f"OpenRouter request failed: {type(e).__name__}") from None
 
+
+def _completion_of(resp) -> str:
     if resp.status_code != 200:
         raise PromptError(f"OpenRouter returned {resp.status_code}: {_short_reason(resp)}")
 

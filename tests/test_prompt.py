@@ -56,17 +56,22 @@ def aud(name):
     return Reference(kind="audio", file=name)
 
 
-def fake_load_image(path):
+def fake_load_image(path, crop=None):
     return np.random.rand(1, 4, 4, 3).astype(np.float32)
 
 
-def fake_load_video_with_audio(path, target_fps=24):
+def fake_video_clip_bytes(path, crop=None, trim=None):
+    """The whole clip as bytes - what the VLM now receives instead of sampled stills."""
+    return b"\x00\x00\x00 ftypmp42 fake", "video/mp4"
+
+
+def fake_load_video_with_audio(path, target_fps=24, crop=None, trim=None):
     frames = np.random.rand(9, 4, 4, 3).astype(np.float32)
     audio = {"waveform": np.random.uniform(-1, 1, size=(1, 2, 480)).astype(np.float32), "sample_rate": 24000}
     return frames, audio
 
 
-def fake_load_video_no_audio(path, target_fps=24):
+def fake_load_video_no_audio(path, target_fps=24, crop=None, trim=None):
     frames = np.random.rand(9, 4, 4, 3).astype(np.float32)
     return frames, None
 
@@ -233,6 +238,7 @@ def test_mixed_set_manifest_matches_assign_tags(monkeypatch, tmp_path):
 
     monkeypatch.setattr(prompt.media, "load_image", fake_load_image, raising=False)
     monkeypatch.setattr(prompt.media, "load_video", fake_load_video_with_audio, raising=False)
+    monkeypatch.setattr(prompt.media, "video_clip_bytes", fake_video_clip_bytes, raising=False)
 
     content = prompt._build_content(refset, str(tmp_path), "handheld, warm light")
     manifest_text = content[0]["text"]
@@ -254,6 +260,7 @@ def test_every_media_part_is_preceded_by_its_own_kind_label(monkeypatch, tmp_pat
 
     monkeypatch.setattr(prompt.media, "load_image", fake_load_image, raising=False)
     monkeypatch.setattr(prompt.media, "load_video", fake_load_video_with_audio, raising=False)
+    monkeypatch.setattr(prompt.media, "video_clip_bytes", fake_video_clip_bytes, raising=False)
 
     content = prompt._build_content(refset, str(tmp_path), "direction")
 
@@ -267,52 +274,60 @@ def test_every_media_part_is_preceded_by_its_own_kind_label(monkeypatch, tmp_pat
     assert f"image_reference {tagged['a.jpg'].tag} (a.jpg)" in joined
     assert f"image_reference {tagged['b.jpg'].tag} (b.jpg)" in joined
     assert f"video_reference {tagged['clip.mp4'].tag} (clip.mp4)" in joined
-    assert f"audio_reference {tagged['clip.mp4'].audio_tag} - the soundtrack" in joined
     assert f"audio_reference {tagged['vo.wav'].tag} (vo.wav)" in joined
+    # the clip's own soundtrack is INSIDE the video part, so it gets a manifest line
+    # rather than a label + a duplicate payload
+    assert f"{tagged['clip.mp4'].audio_tag}: the soundtrack inside" in content[0]["text"]
+    assert f"audio_reference {tagged['clip.mp4'].audio_tag} - the soundtrack" not in joined
 
 
-def test_video_frame_label_sits_directly_before_its_frames(monkeypatch, tmp_path):
+def test_the_video_label_sits_directly_before_its_clip(monkeypatch, tmp_path):
     refset = ReferenceSet([vid("clip.mp4", sound=False)])
-    monkeypatch.setattr(prompt.media, "load_video", fake_load_video_with_audio, raising=False)
+    monkeypatch.setattr(prompt.media, "video_clip_bytes", fake_video_clip_bytes, raising=False)
 
     content = prompt._build_content(refset, str(tmp_path), "direction")
-    # [0] manifest, [1] the video label, [2:8] the six frames
+    # [0] manifest, [1] the video label, [2] the clip itself
     assert content[1]["type"] == "text"
     assert content[1]["text"].startswith("video_reference <Video 1> (clip.mp4)")
-    assert "6 images" in content[1]["text"]
-    assert all(p["type"] == "image_url" for p in content[2:8])
+    assert content[2]["type"] == "video_url"
+    assert len(content) == 3
 
 
-def test_mixed_set_has_six_frame_parts_for_the_video(monkeypatch, tmp_path):
+def test_a_mixed_set_sends_stills_as_images_and_the_clip_as_a_video(monkeypatch, tmp_path):
     (tmp_path / "vo.wav").write_bytes(b"fake wav bytes")
     refset = ReferenceSet([img("a.jpg"), img("b.jpg"), vid("clip.mp4", sound=True), aud("vo.wav")])
 
     monkeypatch.setattr(prompt.media, "load_image", fake_load_image, raising=False)
-    monkeypatch.setattr(prompt.media, "load_video", fake_load_video_with_audio, raising=False)
+    monkeypatch.setattr(prompt.media, "video_clip_bytes", fake_video_clip_bytes, raising=False)
 
     content = prompt._build_content(refset, str(tmp_path), "direction")
-    image_parts = [p for p in content if p.get("type") == "image_url"]
-    # 2 standalone images + 6 sampled video frames
-    assert len(image_parts) == 2 + 6
 
+    # the two stills, and nothing sampled out of the clip
+    assert len([p for p in content if p.get("type") == "image_url"]) == 2
+    assert len([p for p in content if p.get("type") == "video_url"]) == 1
+    # only the STANDALONE wav: the clip's own soundtrack rides inside the video file
     audio_parts = [p for p in content if p.get("type") == "input_audio"]
-    # the video's soundtrack + the standalone wav
-    assert len(audio_parts) == 2
+    assert len(audio_parts) == 1
     assert all(a["input_audio"]["format"] == "wav" for a in audio_parts)
 
 
 def test_video_without_soundtrack_emits_no_audio_part(monkeypatch, tmp_path):
     refset = ReferenceSet([vid("clip.mp4", sound=False)])
     monkeypatch.setattr(prompt.media, "load_video", fake_load_video_with_audio, raising=False)
+    monkeypatch.setattr(prompt.media, "video_clip_bytes", fake_video_clip_bytes, raising=False)
 
     content = prompt._build_content(refset, str(tmp_path), "direction")
     assert not any(p.get("type") == "input_audio" for p in content)
-    assert sum(1 for p in content if p.get("type") == "image_url") == 6
+    assert sum(1 for p in content if p.get("type") == "video_url") == 1
 
 
 def test_video_soundtrack_missing_from_media_degrades_to_text(monkeypatch, tmp_path):
-    refset = ReferenceSet([vid("clip.mp4", sound=True)])
+    # a TRIMMED clip: the re-encoded window is video-only, so its soundtrack is loaded
+    # separately - and this is the path where "could not be read" can still happen
+    refset = ReferenceSet([Reference(kind="video", file="clip.mp4", use_soundtrack=True,
+                                     trim=[1.0, 3.0])])
     monkeypatch.setattr(prompt.media, "load_video", fake_load_video_no_audio, raising=False)
+    monkeypatch.setattr(prompt.media, "video_clip_bytes", fake_video_clip_bytes, raising=False)
 
     content = prompt._build_content(refset, str(tmp_path), "direction")
     assert not any(p.get("type") == "input_audio" for p in content)
@@ -339,6 +354,99 @@ def test_supported_audio_format_is_inlined(tmp_path):
     audio_parts = [p for p in content if p.get("type") == "input_audio"]
     assert len(audio_parts) == 1
     assert audio_parts[0]["input_audio"]["format"] == "mp3"
+
+
+# ---- zero references: the payload is the direction alone -------------------------
+
+
+def test_build_content_with_no_references_is_one_clean_text_part(tmp_path):
+    content = prompt._build_content(ReferenceSet([]), str(tmp_path), "a neon alley chase")
+
+    assert len(content) == 1
+    text = content[0]["text"]
+    assert text.startswith("USER DIRECTION:\na neon alley chase")
+    # no dangling heading over an empty list - the system prompt keys "manifest is
+    # absent" off exactly this
+    assert "Reference manifest" not in text
+    assert "<Picture" not in text and "<Video" not in text and "<Audio" not in text
+
+
+def test_build_content_with_no_references_keeps_the_target_format(tmp_path):
+    content = prompt._build_content(
+        ReferenceSet([]), str(tmp_path), "d", width=1280, height=720, length_seconds=8.0
+    )
+    text = content[0]["text"]
+    assert "TARGET FORMAT:" in text
+    assert "frame: 1280 x 720 (aspect ratio 16:9)" in text
+    assert "Reference manifest" not in text
+
+
+def test_no_reference_auto_resolves_standard_without_a_classifier_call(monkeypatch, tmp_path):
+    """classify_mode's structural gate (needs >=1 video AND >=1 image) makes the
+    zero-reference case a free 'standard' - confirmed, not assumed: exactly one HTTP
+    call happens, and it is the write, not the classifier."""
+    calls = []
+
+    def counting_post(url, headers=None, json=None, timeout=None):  # noqa: A002
+        calls.append(json.get("model"))
+        return FakeResponse(200, {"choices": [{"message": {"content": "p"}}]})
+
+    monkeypatch.setattr(prompt.requests, "post", counting_post)
+    sink = []
+    prompt.write_prompt(
+        references=ReferenceSet([]), input_dir=str(tmp_path), direction="a chase",
+        api_key="k", model="m", job_type="auto", debug=sink,
+    )
+
+    assert calls == ["m"]
+    assert prompt.CLASSIFIER_MODEL not in calls
+    assert sink[0].startswith("job_type: auto -> standard")
+
+
+def test_packaged_system_prompt_covers_the_no_reference_case():
+    """The packaged writer prompt opens with "the target always has reference assets
+    attached" - with the zero-reference path live, it must also say what to do when
+    the manifest is absent."""
+    std = prompt._read_system_prompt("standard")
+    assert "manifest is absent" in std
+
+
+def test_packaged_system_prompt_resolves_the_no_reference_contradictions():
+    """The first live zero-reference run produced a false `[reference generation]`
+    prefix and three meaningless `fully_preserved` lines for invented subjects -
+    because the file offered no legal alternative. Now it must: a task type that
+    means "generated from nothing" (exclusive, never combined), and an explicitly
+    EMPTY retention_analysis, carved out of both the EXACT PAIRING rule and the
+    final checklist's count check so the rules stop contradicting each other."""
+    std = prompt._read_system_prompt("standard")
+    # the new task type exists, is shown as the exact prefix, and is exclusive
+    assert "`pure generation`" in std
+    assert "[pure generation]" in std
+    assert "never combines" in std
+    # the enum count in the not-a-marker rule tracked the addition
+    assert "The six names" not in std
+    # retention_analysis is empty by design with no manifest - stated at the rule...
+    assert "this section is empty by design" in std
+    # ...and at the checklist item that counts labels against lines
+    assert "With no manifest the correct line count is zero." in std
+
+
+def test_reference_carrying_prompt_rules_are_untouched():
+    """The manifest-present register must not move: every pre-existing task type,
+    the pairing mandate, the newly-generated exclusion and the worked example all
+    survive the no-reference amendments verbatim."""
+    std = prompt._read_system_prompt("standard")
+    for task_type in ("keyframe completion", "reference generation", "video editing",
+                      "video continuation", "audio reuse", "audio reference"):
+        assert f"`{task_type}`" in std
+    assert "EXACT PAIRING, BOTH WAYS." in std
+    assert "give each one exactly one line here" in std
+    assert "No entries for newly generated content." in std
+    assert "`newly_generated` does not exist." in std
+    assert "[reference generation + audio reference]" in std  # the worked example
+    for marker in ("fully_preserved", "partially_preserved", "attribute_transfer",
+                   "fully_copy", "partially_copy", "weak_reference"):
+        assert marker in std
 
 
 # ---- TARGET FORMAT block (node width/height/length -> leading text part) --------
@@ -435,12 +543,64 @@ def _decode_part(part):
     return head[len("data:") : head.find(";")], Image.open(io.BytesIO(base64.b64decode(b64)))
 
 
-def _oversized_image(path):
+def _oversized_image(path, crop=None):
     return np.random.rand(1, 1000, 2000, 3).astype(np.float32)
 
 
-def _oversized_video(path, target_fps=24):
+def _oversized_video(path, target_fps=24, crop=None, trim=None):
     return np.random.rand(9, 1000, 2000, 3).astype(np.float32), None
+
+
+# ---- the VLM sees the same crop/trim the pack emits -----------------------------
+
+
+def test_build_content_passes_crop_and_trim_to_the_loaders(monkeypatch, tmp_path):
+    calls = {}
+
+    def li(path, crop=None):
+        calls["image"] = crop
+        return np.random.rand(1, 4, 4, 3).astype(np.float32)
+
+    def lv(path, crop=None, trim=None):
+        calls["video"] = (crop, trim)
+        return b"clip bytes", "video/mp4"
+
+    monkeypatch.setattr(prompt.media, "load_image", li, raising=False)
+    monkeypatch.setattr(prompt.media, "video_clip_bytes", lv, raising=False)
+
+    refset = ReferenceSet([
+        Reference(kind="image", file="a.jpg", crop=[0.1, 0.1, 0.8, 0.8]),
+        Reference(kind="video", file="v.mp4", use_soundtrack=False,
+                  crop=[0, 0, 0.5, 0.5], trim=[2.0, 6.5]),
+    ])
+    prompt._build_content(refset, str(tmp_path), "d")
+
+    assert calls["image"] == [0.1, 0.1, 0.8, 0.8]
+    assert calls["video"] == ([0, 0, 0.5, 0.5], [2.0, 6.5])
+
+
+def test_trimmed_standalone_audio_is_decoded_and_inlined_as_wav(monkeypatch, tmp_path):
+    """The raw-file inline would hand the VLM the WHOLE file; a trimmed reference goes
+    through load_audio so the VLM hears the same span the pack's audio_N socket emits."""
+    calls = {}
+
+    def la(path, trim=None):
+        calls["trim"] = trim
+        return {
+            "waveform": np.random.uniform(-1, 1, size=(1, 1, 480)).astype(np.float32),
+            "sample_rate": 24000,
+        }
+
+    monkeypatch.setattr(prompt.media, "load_audio", la, raising=False)
+    (tmp_path / "vo.mp3").write_bytes(b"whole-file bytes that must NOT be inlined")
+
+    refset = ReferenceSet([Reference(kind="audio", file="vo.mp3", trim=[1.0, 2.0])])
+    content = prompt._build_content(refset, str(tmp_path), "d")
+
+    audio_parts = [p for p in content if p.get("type") == "input_audio"]
+    assert len(audio_parts) == 1
+    assert audio_parts[0]["input_audio"]["format"] == "wav"
+    assert calls["trim"] == [1.0, 2.0]
 
 
 def test_references_go_out_as_jpeg(monkeypatch, tmp_path):
@@ -468,20 +628,6 @@ def test_a_small_reference_is_never_upscaled(monkeypatch, tmp_path):
 
     _, image = _decode_part(content[2])
     assert image.size == (4, 4)
-
-
-def test_sampled_video_frames_get_the_same_cap(monkeypatch, tmp_path):
-    """Six frames per video ride the same encoder as the stills - at 1080p they were the
-    larger half of the payload."""
-    monkeypatch.setattr(prompt.media, "load_video", _oversized_video, raising=False)
-    content = prompt._build_content(ReferenceSet([vid("clip.mp4")]), str(tmp_path), "direction")
-
-    frames = [p for p in content if p.get("type") == "image_url"]
-    assert len(frames) == 6
-    for part in frames:
-        mime, image = _decode_part(part)
-        assert mime == "image/jpeg"
-        assert max(image.size) == prompt.VLM_IMAGE_LONG_EDGE
 
 
 def test_render_payload_reports_the_jpeg_mime(monkeypatch, tmp_path):
@@ -844,3 +990,139 @@ def test_debug_records_the_routing_decision(monkeypatch, tmp_path):
     )
     assert len(sink) == 1, "the node reads debug_sink[0]; exactly one entry"
     assert "job_type: replacement -> replacement" in sink[0]
+
+
+# ---- structured logging -------------------------------------------------------
+
+
+def test_write_prompt_logs_the_call_and_its_latency(monkeypatch, tmp_path, caplog):
+    import logging
+
+    monkeypatch.setattr(
+        prompt.requests, "post",
+        lambda *a, **k: FakeResponse(200, {
+            "choices": [{"message": {"content": "a prompt"}}],
+            "usage": {"prompt_tokens": 1200, "completion_tokens": 300, "cost": 0.0141},
+        }),
+    )
+
+    with caplog.at_level(logging.INFO, logger="MiniMaxRefPack"):
+        prompt.write_prompt(
+            references=ReferenceSet([]), input_dir=str(tmp_path), direction="x",
+            api_key="sk-or-v1-deadbeef", model="m", job_type="standard",
+        )
+
+    lines = [r.getMessage() for r in caplog.records if r.name == "MiniMaxRefPack"]
+    call = next(ln for ln in lines if "event=openrouter" in ln)
+    assert "model=m" in call
+    assert "status=200" in call
+    assert "ms=" in call
+    assert "prompt_tokens=1200" in call
+    assert "completion_tokens=300" in call
+    assert "cost=0.014" in call
+    assert not any("deadbeef" in ln for ln in lines)
+
+
+def test_a_failed_openrouter_call_is_logged_as_a_failure(monkeypatch, tmp_path, caplog):
+    import logging
+
+    monkeypatch.setattr(prompt.requests, "post", lambda *a, **k: FakeResponse(429, {}, text="slow down"))
+
+    with caplog.at_level(logging.INFO, logger="MiniMaxRefPack"):
+        with pytest.raises(prompt.PromptError):
+            prompt.write_prompt(
+                references=ReferenceSet([]), input_dir=str(tmp_path), direction="x",
+                api_key="k", model="m", job_type="standard",
+            )
+
+    lines = [r.getMessage() for r in caplog.records if r.name == "MiniMaxRefPack"]
+    assert any("event=openrouter" in ln and "status=429" in ln for ln in lines)
+
+
+# ---- videos go whole, not as sampled frames -------------------------------------
+
+
+def _fake_video_bytes(monkeypatch, data=b"MP4DATA", mime="video/mp4"):
+    monkeypatch.setattr(prompt.media, "video_clip_bytes",
+                        lambda path, crop=None, trim=None: (data, mime), raising=False)
+
+
+def test_a_video_reference_goes_as_one_video_part(monkeypatch, tmp_path):
+    _fake_video_bytes(monkeypatch)
+    refset = ReferenceSet([Reference(kind="video", file="v.mp4", use_soundtrack=False)])
+
+    parts = prompt._build_content(refset, str(tmp_path), "d")
+
+    videos = [p for p in parts if p["type"] == "video_url"]
+    assert len(videos) == 1
+    assert videos[0]["video_url"]["url"].startswith("data:video/mp4;base64,")
+    # the whole point: no sampled stills any more
+    assert [p for p in parts if p["type"] == "image_url"] == []
+
+
+def test_the_video_part_carries_the_real_bytes(monkeypatch, tmp_path):
+    import base64
+
+    _fake_video_bytes(monkeypatch, data=b"\x00\x01\x02clip")
+    refset = ReferenceSet([Reference(kind="video", file="v.mp4", use_soundtrack=False)])
+
+    parts = prompt._build_content(refset, str(tmp_path), "d")
+    url = next(p for p in parts if p["type"] == "video_url")["video_url"]["url"]
+
+    assert base64.b64decode(url.split(",", 1)[1]) == b"\x00\x01\x02clip"
+
+
+def test_the_manifest_says_a_clip_follows_not_a_frame_count(monkeypatch, tmp_path):
+    _fake_video_bytes(monkeypatch)
+    refset = ReferenceSet([Reference(kind="video", file="v.mp4", use_soundtrack=False)])
+
+    text = prompt._build_content(refset, str(tmp_path), "d")[0]["text"]
+
+    assert "frames of <Video 1>" not in text
+    assert "<Video 1>" in text
+
+
+def test_an_untouched_clip_does_not_send_its_soundtrack_twice(monkeypatch, tmp_path):
+    """The file itself carries its audio - a separate WAV part would be the same sound
+    paid for twice (the live probe billed 250 audio tokens for the video's own track)."""
+    _fake_video_bytes(monkeypatch)
+    monkeypatch.setattr(prompt.media, "load_video", _never_load_video, raising=False)
+    refset = ReferenceSet([Reference(kind="video", file="v.mp4", use_soundtrack=True)])
+
+    parts = prompt._build_content(refset, str(tmp_path), "d")
+
+    assert [p for p in parts if p["type"] == "input_audio"] == []
+    text = parts[0]["text"]
+    assert "<Audio 1>" in text   # the tag still exists, the payload just isn't duplicated
+
+
+def _never_load_video(*a, **k):
+    raise AssertionError("an untouched clip must not be decoded")
+
+
+def test_an_edited_clip_still_sends_its_soundtrack_separately(monkeypatch, tmp_path):
+    """The re-encoded window is video-only, so the sound has to come the old way."""
+    _fake_video_bytes(monkeypatch)
+    monkeypatch.setattr(
+        prompt.media, "load_video",
+        lambda path, target_fps=24, crop=None, trim=None: (None, {"waveform": None, "sample_rate": 48000}),
+        raising=False,
+    )
+    monkeypatch.setattr(prompt, "_video_audio_part",
+                        lambda audio, tag, name: {"type": "input_audio", "input_audio": {"data": "x", "format": "wav"}})
+    refset = ReferenceSet([Reference(kind="video", file="v.mp4", use_soundtrack=True, trim=[1.0, 3.0])])
+
+    parts = prompt._build_content(refset, str(tmp_path), "d")
+
+    assert len([p for p in parts if p["type"] == "input_audio"]) == 1
+    assert len([p for p in parts if p["type"] == "video_url"]) == 1
+
+
+def test_the_logged_payload_size_counts_the_video():
+    """A 5MB clip must not be logged as a 300-byte payload."""
+    parts = [
+        {"type": "text", "text": "x" * 10},
+        {"type": "video_url", "video_url": {"url": "data:video/mp4;base64," + "A" * 1000}},
+    ]
+
+    assert prompt._payload_bytes(parts) == 10 + len("data:video/mp4;base64,") + 1000

@@ -13,8 +13,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 
-from . import media, prompt, refs
+from . import logs, media, prompt, refs
+
+# Default long-edge cap for reference IMAGES. Named rather than inlined because it is
+# the widget default AND the fallback when a workflow saved before the widget existed
+# restores without it - those two must never drift apart.
+DEFAULT_MAX_REFERENCE_EDGE = 2048
 
 
 def _files_signature(reference_set: refs.ReferenceSet, input_dir: str) -> str:
@@ -105,6 +111,14 @@ class MiniMaxH3ReferencePack:
                                "decides, and only runs when there is at least 1 video and "
                                "1 image.",
                 }),
+                "max_reference_edge": ("INT", {
+                    "default": 2048, "min": 0, "max": 8192, "step": 64,
+                    "tooltip": "Downscale a reference IMAGE whose long edge exceeds this "
+                               "(0 = off). Never upscales. MiniMax sizes references off "
+                               "their SHORT edge, so at ref_image_size=max a wide sheet "
+                               "arrives huge and every sampling step pays for it. "
+                               "Reference videos are already capped by the core node.",
+                }),
             },
         }
 
@@ -117,7 +131,8 @@ class MiniMaxH3ReferencePack:
     def IS_CHANGED(
         cls, direction="", openrouter_api_key="", model="", references_json="", system_prompt="",
         width=0, height=0, length_seconds=0.0, use_openrouter=True,
-        reasoning_effort=prompt.DEFAULT_REASONING_EFFORT, job_type="auto", **kwargs
+        reasoning_effort=prompt.DEFAULT_REASONING_EFFORT, job_type="auto",
+        max_reference_edge=DEFAULT_MAX_REFERENCE_EDGE, **kwargs
     ):
         import folder_paths
 
@@ -131,16 +146,18 @@ class MiniMaxH3ReferencePack:
         return "|".join([
             sig, direction, model, references_json, system_prompt,
             str(width), str(height), str(length_seconds), str(use_openrouter),
-            str(reasoning_effort), str(job_type),
+            str(reasoning_effort), str(job_type), str(max_reference_edge),
         ])
 
     def build(
         self, direction="", openrouter_api_key="", model="", references_json="", system_prompt="",
         width=0, height=0, length_seconds=0.0, use_openrouter=True,
         reasoning_effort=prompt.DEFAULT_REASONING_EFFORT, job_type="auto",
+        max_reference_edge=DEFAULT_MAX_REFERENCE_EDGE,
     ):
         import folder_paths
 
+        started = time.perf_counter()
         reference_set = refs.ReferenceSet.from_json(references_json)
         reference_set.validate()  # raises refs.ReferenceError (a ValueError) over cap
 
@@ -151,18 +168,38 @@ class MiniMaxH3ReferencePack:
                 "reference file(s) not found in the ComfyUI input directory: " + ", ".join(missing)
             )
 
+        counts = reference_set.counts()
+        logs.log(
+            "build", images=counts["image"], videos=counts["video"], audios=counts["audio"],
+            cap=max_reference_edge or None, use_openrouter=bool(use_openrouter),
+            model=model, job_type=job_type,
+        )
+
         outputs = refs.empty_outputs()
         for tagged in reference_set.assign_tags():
             path = os.path.join(input_dir, tagged.file)
+            logs.log(
+                "reference", kind=tagged.kind, slot=tagged.slot, tag=tagged.tag,
+                file=tagged.file, crop=tagged.ref.crop, trim=tagged.ref.trim,
+                soundtrack=tagged.audio_tag,
+            )
+            # crop/trim ride on the reference (refs.Reference); the loaders are the one
+            # apply point, so the sockets and the VLM payload can never disagree. They
+            # also ride inside references_json, so IS_CHANGED's key already moves on an
+            # edit - confirmed by test_is_changed_key_moves_when_only_an_edit_changes.
             if tagged.kind == "image":
-                outputs[refs.slot_index(f"image_{tagged.slot}")] = media.load_image(path)
+                outputs[refs.slot_index(f"image_{tagged.slot}")] = media.load_image(
+                    path, crop=tagged.ref.crop, max_edge=max_reference_edge
+                )
             elif tagged.kind == "video":
-                frames, audio = media.load_video(path)
+                frames, audio = media.load_video(path, crop=tagged.ref.crop, trim=tagged.ref.trim)
                 outputs[refs.slot_index(f"video_{tagged.slot}")] = frames
                 if tagged.ref.use_soundtrack and audio is not None:
                     outputs[refs.slot_index(f"video_audio_{tagged.slot}")] = audio
             else:  # audio
-                outputs[refs.slot_index(f"audio_{tagged.slot}")] = media.load_audio(path)
+                outputs[refs.slot_index(f"audio_{tagged.slot}")] = media.load_audio(
+                    path, trim=tagged.ref.trim
+                )
 
         prompt_text = ""
         debug_sink: list[str] = []
@@ -173,6 +210,7 @@ class MiniMaxH3ReferencePack:
             f"width: {width or '(unspecified)'}  height: {height or '(unspecified)'}  "
             f"length_seconds: {length_seconds or '(unspecified)'}",
             f"reasoning_effort: {reasoning_effort}",
+            f"max_reference_edge: {max_reference_edge or 'off'}",
             f"job_type: {job_type}",   # rewritten below once auto has resolved
             f"system_prompt: {'workflow override' if (system_prompt or '').strip() else 'packaged default'}",
             f"references: {len(reference_set.references)} "
@@ -185,9 +223,19 @@ class MiniMaxH3ReferencePack:
             # holds whether or not any references are attached.
             prompt_text = direction
             debug_header.append("")
+            logs.log("prompt_skipped", reason="use_openrouter=false", chars=len(direction))
             debug_header.append("OpenRouter is OFF - no request was made. `direction` passes through verbatim:")
             debug_header.append(direction)
-        elif not reference_set.is_empty():
+        elif reference_set.is_empty() and not (direction or "").strip():
+            # The ONE remaining skip: no references AND nothing typed. A direction
+            # alone is enough to write from (the branch below); an empty set with an
+            # empty direction is not.
+            debug_header.append("")
+            logs.log("prompt_skipped", reason="no references and no direction")
+            debug_header.append("No references and no direction - nothing to write from; no request was made.")
+        else:
+            if reference_set.is_empty():
+                debug_header.append("note: no references attached - the prompt is written from the direction alone")
             try:
                 prompt_text = prompt.write_prompt(
                     references=reference_set,
@@ -210,9 +258,6 @@ class MiniMaxH3ReferencePack:
                 if openrouter_api_key and openrouter_api_key in msg:
                     msg = msg.replace(openrouter_api_key, "***")
                 raise ValueError(f"prompt generation failed: {msg}") from e
-        else:
-            debug_header.append("")
-            debug_header.append("No references attached - no request was made.")
 
         # Hoist the resolved mode into the header. With job_type=auto the header alone
         # would only say "auto", and which register actually ran is the thing worth
@@ -236,6 +281,8 @@ class MiniMaxH3ReferencePack:
 
         outputs[refs.slot_index("prompt")] = prompt_text
         outputs[refs.slot_index("debug")] = debug_text
+        logs.log("build_done", prompt_chars=len(prompt_text),
+                 ms=(time.perf_counter() - started) * 1000.0)
         return tuple(outputs)
 
 

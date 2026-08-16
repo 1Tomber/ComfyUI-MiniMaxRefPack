@@ -13,7 +13,7 @@ import os
 import pytest
 
 from minimax_refpack import routes
-from minimax_refpack.refs import Pack, Reference, ReferenceSet, save_pack
+from minimax_refpack.refs import Reference, ReferenceSet
 
 
 class FakeRequest:
@@ -56,10 +56,14 @@ class FakeFolderPaths:
 class FakeMedia:
     """Stands in for minimax_refpack.media, which is a stub owned by another slice."""
 
+    def __init__(self):
+        self.thumb_calls = []
+
     def probe(self, path):
         return {"kind": "image", "width": 4, "height": 4, "fps": None, "duration": None, "has_audio": False}
 
-    def thumbnail_png(self, path, max_edge=256):
+    def thumbnail_png(self, path, max_edge=256, crop=None, at_seconds=None):
+        self.thumb_calls.append({"path": path, "crop": crop, "at_seconds": at_seconds})
         return b"\x89PNG\r\nfake"
 
 
@@ -81,81 +85,6 @@ def body_json(resp):
 
 
 # ---- pack round trip ---------------------------------------------------------
-
-
-def test_pack_save_list_get_delete_round_trip(input_dir):
-    save_body = {"name": "bryan dorm", "direction": "handheld", "references": [
-        {"kind": "image", "file": "a.jpg"},
-    ]}
-    resp = run(routes.save_pack_route(FakeRequest(body=save_body)))
-    assert resp.status == 200
-    assert body_json(resp) == {"saved": "bryan dorm"}
-
-    resp = run(routes.list_packs(FakeRequest()))
-    assert body_json(resp) == {"packs": ["bryan dorm"]}
-
-    resp = run(routes.get_pack(FakeRequest(match_info={"name": "bryan dorm"})))
-    assert resp.status == 200
-    got = body_json(resp)
-    assert got["name"] == "bryan dorm"
-    assert got["direction"] == "handheld"
-    # "a.jpg" was never created on disk -> it's missing.
-    assert got["missing"] == ["a.jpg"]
-
-    resp = run(routes.delete_pack_route(FakeRequest(match_info={"name": "bryan dorm"})))
-    assert body_json(resp) == {"deleted": True}
-
-    resp = run(routes.list_packs(FakeRequest()))
-    assert body_json(resp) == {"packs": []}
-
-    resp = run(routes.delete_pack_route(FakeRequest(match_info={"name": "bryan dorm"})))
-    assert body_json(resp) == {"deleted": False}
-
-
-def test_missing_list_reports_a_deleted_reference_file(input_dir):
-    open(os.path.join(input_dir, "here.jpg"), "wb").close()
-    save_pack(input_dir, Pack(name="p", references=ReferenceSet([
-        Reference(kind="image", file="here.jpg"),
-        Reference(kind="image", file="gone.jpg"),
-    ])))
-
-    resp = run(routes.get_pack(FakeRequest(match_info={"name": "p"})))
-    assert body_json(resp)["missing"] == ["gone.jpg"]
-
-    os.remove(os.path.join(input_dir, "here.jpg"))
-    resp = run(routes.get_pack(FakeRequest(match_info={"name": "p"})))
-    assert body_json(resp)["missing"] == ["here.jpg", "gone.jpg"]
-
-
-def test_get_pack_404_when_absent(input_dir):
-    resp = run(routes.get_pack(FakeRequest(match_info={"name": "nope"})))
-    assert resp.status == 404
-
-
-def test_save_pack_400_on_bad_name(input_dir):
-    resp = run(routes.save_pack_route(FakeRequest(body={"name": "../escape", "references": []})))
-    assert resp.status == 400
-
-
-def test_save_pack_400_on_bad_refs(input_dir):
-    # exceeds the hard image cap (MAX_IMAGES = 9) - refs.py's validate() rejects it.
-    body = {"name": "ok", "references": [{"kind": "image", "file": f"{i}.jpg"} for i in range(10)]}
-    resp = run(routes.save_pack_route(FakeRequest(body=body)))
-    assert resp.status == 400
-
-
-def test_save_pack_400_on_a_traversal_reference_file(input_dir):
-    body = {"name": "ok", "references": [{"kind": "image", "file": "../../etc/passwd"}]}
-    resp = run(routes.save_pack_route(FakeRequest(body=body)))
-    assert resp.status == 400
-
-
-def test_save_pack_400_on_non_json_body(input_dir):
-    resp = run(routes.save_pack_route(FakeRequest(body=None)))
-    assert resp.status == 400
-
-
-# ---- probe / thumb / files ----------------------------------------------------
 
 
 def test_probe_and_thumb_happy_path(input_dir):
@@ -193,6 +122,52 @@ def test_list_files_400_on_bad_kind(input_dir):
     assert resp.status == 400
 
 
+# ---- thumb crop / t query params -------------------------------------------------
+
+
+def test_thumb_passes_crop_and_time_through(input_dir):
+    open(os.path.join(input_dir, "v.mp4"), "wb").close()
+
+    resp = run(routes.thumb_route(FakeRequest(query={"file": "v.mp4", "crop": "0.1,0.2,0.5,0.5", "t": "2.5"})))
+
+    assert resp.status == 200
+    call = routes.media.thumb_calls[-1]
+    assert call["crop"] == [0.1, 0.2, 0.5, 0.5]
+    assert call["at_seconds"] == 2.5
+
+
+def test_thumb_without_edit_params_is_unchanged(input_dir):
+    open(os.path.join(input_dir, "ok.png"), "wb").close()
+
+    resp = run(routes.thumb_route(FakeRequest(query={"file": "ok.png"})))
+
+    assert resp.status == 200
+    call = routes.media.thumb_calls[-1]
+    assert call["crop"] is None
+    assert call["at_seconds"] is None
+
+
+@pytest.mark.parametrize("bad", [
+    "",                  # explicit but empty
+    "a,b,c,d",           # not numbers
+    "0.1,0.2,0.5",       # wrong arity
+    "0.6,0.5,0.6,0.6",   # past the right edge
+    "-0.1,0,0.5,0.5",    # negative origin
+    "0,0,0,1",           # zero area
+])
+def test_thumb_400_on_a_bad_crop(input_dir, bad):
+    open(os.path.join(input_dir, "ok.png"), "wb").close()
+    resp = run(routes.thumb_route(FakeRequest(query={"file": "ok.png", "crop": bad})))
+    assert resp.status == 400
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "-1", "nan", "inf"])
+def test_thumb_400_on_a_bad_time(input_dir, bad):
+    open(os.path.join(input_dir, "ok.png"), "wb").close()
+    resp = run(routes.thumb_route(FakeRequest(query={"file": "ok.png", "t": bad})))
+    assert resp.status == 400
+
+
 # ---- traversal table ----------------------------------------------------------
 
 TRAVERSAL_ATTEMPTS = ["../../etc/passwd", "/etc/passwd", "..%2f..%2fetc", "subdir/../../x"]
@@ -208,38 +183,24 @@ def test_thumb_refuses_traversal(input_dir, bad):
     assert run(routes.thumb_route(FakeRequest(query={"file": bad}))).status == 404
 
 
-@pytest.mark.parametrize("bad", TRAVERSAL_ATTEMPTS)
-def test_get_pack_refuses_traversal(input_dir, bad):
-    assert run(routes.get_pack(FakeRequest(match_info={"name": bad}))).status == 404
-
-
-@pytest.mark.parametrize("bad", TRAVERSAL_ATTEMPTS)
-def test_delete_pack_refuses_traversal(input_dir, bad):
-    resp = run(routes.delete_pack_route(FakeRequest(match_info={"name": bad})))
-    assert body_json(resp) == {"deleted": False}
-
-
 def test_a_plain_valid_name_is_accepted_by_every_route(input_dir):
     open(os.path.join(input_dir, "ok.png"), "wb").close()
-    save_pack(input_dir, Pack(name="ok", references=ReferenceSet()))
 
     assert run(routes.probe_route(FakeRequest(query={"file": "ok.png"}))).status == 200
     assert run(routes.thumb_route(FakeRequest(query={"file": "ok.png"}))).status == 200
-    assert run(routes.get_pack(FakeRequest(match_info={"name": "ok"}))).status == 200
-    resp = run(routes.delete_pack_route(FakeRequest(match_info={"name": "ok"})))
-    assert body_json(resp) == {"deleted": True}
+
+
+def test_the_pack_store_is_gone():
+    """Configs are files on the user's machine (2026-08-15); the server-side pack store
+    was dead code and was deleted. This pins it — a route added back here would be a
+    second, unused mechanism for saving a reference set."""
+    paths = {path for _method, path, _handler in routes._ROUTES}
+    assert not any("packs" in path for path in paths)
+    assert not hasattr(routes, "save_pack_route")
+    assert not hasattr(routes, "get_pack")
 
 
 # ---- system prompt: read-only default ------------------------------------------
-
-
-def test_system_prompt_route_returns_the_packaged_default():
-    from minimax_refpack import prompt as prompt_module
-
-    resp = run(routes.system_prompt_route(FakeRequest()))
-    assert resp.status == 200
-    with open(prompt_module._SYSTEM_PROMPT_PATH, "r", encoding="utf-8") as f:
-        assert body_json(resp) == {"default": f.read()}
 
 
 def test_no_write_route_exists_for_system_prompt():

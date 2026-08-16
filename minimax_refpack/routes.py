@@ -15,21 +15,13 @@ which mirrors the containment check ComfyUI's own upload route uses:
 
 from __future__ import annotations
 
+import math
 import os
 
 from aiohttp import web
 
-from .refs import (
-    Pack,
-    ReferenceError,
-    ReferenceSet,
-    delete_pack,
-    load_pack,
-    list_pack_names,
-    save_pack,
-    validate_pack_name,
-)
-from . import media, prompt
+from .refs import ReferenceError, validate_crop
+from . import logs, media, prompt
 
 try:
     from server import PromptServer
@@ -67,93 +59,68 @@ def _safe_join(base_dir: str, name: str) -> str | None:
 # directly with a fake request (a stub exposing .query, .match_info, async .json()).
 
 
-async def list_packs(request: web.Request) -> web.Response:
-    input_dir = folder_paths.get_input_directory()
-    return web.json_response({"packs": list_pack_names(input_dir)})
-
-
-async def get_pack(request: web.Request) -> web.Response:
-    name = request.match_info.get("name", "")
-    input_dir = folder_paths.get_input_directory()
-    try:
-        pack = load_pack(input_dir, name)
-    except (ReferenceError, OSError):
-        # ReferenceError = bad name (refs.py validates before touching disk),
-        # OSError = FileNotFoundError from open() when the name is fine but absent.
-        return web.Response(status=404)
-    d = pack.to_dict()
-    d["missing"] = pack.references.resolve(input_dir)
-    return web.json_response(d)
-
-
-async def save_pack_route(request: web.Request) -> web.Response:
-    try:
-        body = await request.json()
-    except Exception:
-        return web.Response(status=400, text="body must be JSON")
-    if not isinstance(body, dict):
-        return web.Response(status=400, text="body must be a JSON object")
-
-    input_dir = folder_paths.get_input_directory()
-    try:
-        name = validate_pack_name(body.get("name") if isinstance(body.get("name"), str) else "")
-        refset = ReferenceSet.from_obj(body.get("references", []))
-        refset.validate()
-    except ReferenceError as e:
-        return web.Response(status=400, text=str(e))
-
-    # Defense in depth: refs.py resolves each reference's filename against the input
-    # dir (missing_files) but doesn't confine it - that's fine there (existence check
-    # only), but this route is the one place an attacker's filename first lands, so
-    # refuse anything that couldn't be a real file in the input dir.
-    for ref in refset.references:
-        if _safe_join(input_dir, ref.file) is None:
-            return web.Response(status=400, text=f"bad reference file: {ref.file!r}")
-
-    # Free-form strings straight from the UI. They are never turned into a path and
-    # never executed - they only repopulate two widgets on load - so they need no
-    # validation beyond being strings.
-    def _str(key: str) -> str:
-        v = body.get(key)
-        return v if isinstance(v, str) else ""
-
-    save_pack(
-        input_dir,
-        Pack(
-            name=name,
-            references=refset,
-            direction=_str("direction"),
-            model=_str("model"),
-            reasoning_effort=_str("reasoning_effort"),
-        ),
-    )
-    return web.json_response({"saved": name})
-
-
-async def delete_pack_route(request: web.Request) -> web.Response:
-    name = request.match_info.get("name", "")
-    input_dir = folder_paths.get_input_directory()
-    try:
-        validate_pack_name(name)
-    except ReferenceError:
-        return web.json_response({"deleted": False})
-    return web.json_response({"deleted": delete_pack(input_dir, name)})
-
-
 async def probe_route(request: web.Request) -> web.Response:
     input_dir = folder_paths.get_input_directory()
-    path = _safe_join(input_dir, request.query.get("file", ""))
+    name = request.query.get("file", "")
+    path = _safe_join(input_dir, name)
     if path is None or not os.path.isfile(path):
+        logs.warn("probe", file=name, status=404)
         return web.Response(status=404)
-    return web.json_response(media.probe(path))
+    info = media.probe(path)
+    logs.debug("probe", file=name, kind=info["kind"], duration=info["duration"],
+               has_audio=info["has_audio"])
+    return web.json_response(info)
+
+
+def _parse_crop_param(raw: str | None) -> list[float] | None:
+    """`crop=x,y,w,h` comma-separated fractions -> validated list; None when absent.
+    Raises ValueError on junk - the route turns that into a 400, never a traceback."""
+    if raw is None:
+        return None
+    try:
+        crop = [float(p) for p in raw.split(",")]
+    except ValueError:
+        raise ValueError(f"crop must be four comma-separated numbers, got {raw!r}") from None
+    try:
+        return validate_crop(crop)
+    except ReferenceError as e:
+        raise ValueError(str(e)) from None
+
+
+def _parse_seconds_param(raw: str | None) -> float | None:
+    """`t=<seconds>` -> float; None when absent. Raises ValueError on junk."""
+    if raw is None:
+        return None
+    try:
+        t = float(raw)
+    except ValueError:
+        raise ValueError(f"t must be a number of seconds, got {raw!r}") from None
+    if not math.isfinite(t) or t < 0:
+        raise ValueError(f"t must be a finite number of seconds >= 0, got {raw!r}")
+    return t
 
 
 async def thumb_route(request: web.Request) -> web.Response:
     input_dir = folder_paths.get_input_directory()
-    path = _safe_join(input_dir, request.query.get("file", ""))
+    name = request.query.get("file", "")
+    path = _safe_join(input_dir, name)
     if path is None or not os.path.isfile(path):
+        # Not chatter: a tile asking for a file the server cannot serve is the exact
+        # shape of the "no preview" bug, and it should be visible without --verbose.
+        logs.warn("thumb", file=name, status=404)
         return web.Response(status=404)
-    return web.Response(body=media.thumbnail_png(path), content_type="image/png")
+    try:
+        crop = _parse_crop_param(request.query.get("crop"))
+        at_seconds = _parse_seconds_param(request.query.get("t"))
+    except ValueError as e:
+        logs.warn("thumb", file=name, status=400, reason=str(e))
+        return web.Response(status=400, text=str(e))
+    # One line per tile per redraw - DEBUG, or a full reference set drowns the console.
+    logs.debug("thumb", file=name, crop=crop, t=at_seconds)
+    return web.Response(
+        body=media.thumbnail_png(path, crop=crop, at_seconds=at_seconds),
+        content_type="image/png",
+    )
 
 
 async def list_files_route(request: web.Request) -> web.Response:
@@ -176,10 +143,6 @@ async def system_prompt_route(request: web.Request) -> web.Response:
 # ---- registration -------------------------------------------------------------
 
 _ROUTES: tuple[tuple[str, str, object], ...] = (
-    ("GET", "/minimax_refpack/packs", list_packs),
-    ("GET", "/minimax_refpack/packs/{name}", get_pack),
-    ("POST", "/minimax_refpack/packs", save_pack_route),
-    ("DELETE", "/minimax_refpack/packs/{name}", delete_pack_route),
     ("GET", "/minimax_refpack/probe", probe_route),
     ("GET", "/minimax_refpack/thumb", thumb_route),
     ("GET", "/minimax_refpack/files", list_files_route),
@@ -187,10 +150,6 @@ _ROUTES: tuple[tuple[str, str, object], ...] = (
 )
 
 if PromptServer is not None and getattr(PromptServer, "instance", None) is not None:
-    _method_fn = {
-        "GET": PromptServer.instance.routes.get,
-        "POST": PromptServer.instance.routes.post,
-        "DELETE": PromptServer.instance.routes.delete,
-    }
+    _method_fn = {"GET": PromptServer.instance.routes.get}
     for _method, _path, _handler in _ROUTES:
         _method_fn[_method](_path)(_handler)

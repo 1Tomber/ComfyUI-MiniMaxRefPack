@@ -14,19 +14,13 @@ from minimax_refpack.refs import (
     MAX_AUDIOS,
     MAX_IMAGES,
     MAX_VIDEOS,
-    Pack,
     Reference,
     ReferenceError,
     ReferenceSet,
-    delete_pack,
     empty_outputs,
-    list_pack_names,
-    load_pack,
     output_names,
     output_types,
-    save_pack,
     slot_index,
-    validate_pack_name,
 )
 
 
@@ -193,47 +187,6 @@ def test_a_directory_is_not_a_file(tmp_path):
     assert ReferenceSet([img("adir.jpg")]).missing_files(str(tmp_path)) == ["adir.jpg"]
 
 
-# ---- packs -----------------------------------------------------------------
-
-
-def test_pack_save_load_delete(tmp_path):
-    p = Pack(name="bryan dorm", references=ReferenceSet([img("a.jpg")]), direction="handheld")
-    save_pack(str(tmp_path), p)
-    assert list_pack_names(str(tmp_path)) == ["bryan dorm"]
-    back = load_pack(str(tmp_path), "bryan dorm")
-    assert back.direction == "handheld"
-    assert back.references.counts()["image"] == 1
-    assert delete_pack(str(tmp_path), "bryan dorm") is True
-    assert list_pack_names(str(tmp_path)) == []
-    assert delete_pack(str(tmp_path), "bryan dorm") is False
-
-
-def test_pack_dir_absent_lists_nothing(tmp_path):
-    assert list_pack_names(str(tmp_path)) == []
-
-
-def test_pack_survives_a_video_with_sound(tmp_path):
-    p = Pack(name="p", references=ReferenceSet([vid("v.mp4", sound=True)]))
-    save_pack(str(tmp_path), p)
-    assert load_pack(str(tmp_path), "p").references.references[0].use_soundtrack is True
-
-
-def test_future_pack_version_is_refused():
-    with pytest.raises(ReferenceError):
-        Pack.from_json(json.dumps({"version": 99, "name": "x", "references": []}))
-
-
-@pytest.mark.parametrize("bad", ["../escape", "a/b", "a\\b", ".hidden", "", "   ", "x" * 65])
-def test_pack_names_that_could_escape_are_refused(bad):
-    with pytest.raises(ReferenceError):
-        validate_pack_name(bad)
-
-
-@pytest.mark.parametrize("good", ["bryan_dorm", "Bryan Dorm 2", "a.b-c"])
-def test_reasonable_pack_names_pass(good):
-    assert validate_pack_name(good) == good
-
-
 # ---- output sockets --------------------------------------------------------
 
 
@@ -285,46 +238,6 @@ def test_empty_outputs_is_all_none_but_the_two_strings():
 # ---- pack settings (model / reasoning effort) --------------------------------
 
 
-def test_pack_round_trips_model_and_reasoning_effort():
-    p = Pack(
-        name="cfg",
-        references=ReferenceSet([Reference(kind="image", file="a.png")]),
-        direction="a steer",
-        model="google/gemini-3-flash-preview",
-        reasoning_effort="high",
-    )
-    back = Pack.from_json(p.to_json())
-    assert back.model == "google/gemini-3-flash-preview"
-    assert back.reasoning_effort == "high"
-    assert back.direction == "a steer"
-
-
-def test_a_pack_saved_before_these_fields_existed_still_loads():
-    """Packs already on disk were written without model/reasoning_effort. Version stays 1,
-    so they must keep loading rather than being rejected by the version gate."""
-    old = json.dumps({
-        "version": 1,
-        "name": "Bitches",
-        "direction": "a standoff",
-        "references": [{"kind": "image", "file": "a.png"}],
-    })
-    pack = Pack.from_json(old)
-    assert pack.model == ""
-    assert pack.reasoning_effort == ""
-    assert pack.direction == "a standoff"
-    assert len(pack.references.references) == 1
-
-
-def test_saved_settings_survive_a_disk_round_trip(tmp_path):
-    p = Pack(
-        name="cfg", references=ReferenceSet([]), direction="d",
-        model="m/1", reasoning_effort="low",
-    )
-    save_pack(str(tmp_path), p)
-    back = load_pack(str(tmp_path), "cfg")
-    assert (back.model, back.reasoning_effort) == ("m/1", "low")
-
-
 def test_video_soundtrack_is_on_by_default():
     """A reference video's sound is part of the reference. Opt out, don't opt in."""
     assert Reference(kind="video", file="v.mp4").use_soundtrack is True
@@ -343,3 +256,80 @@ def test_a_default_video_takes_an_audio_tag():
     tagged = {t.file: t for t in s.assign_tags()}
     assert tagged["v.mp4"].audio_tag == "<Audio 1>"
     assert tagged["vo.wav"].tag == "<Audio 2>"
+
+
+# ---- crop / trim ------------------------------------------------------------
+
+
+def test_crop_and_trim_round_trip():
+    r = Reference.from_dict(
+        {"kind": "video", "file": "v.mp4", "crop": [0.1, 0.2, 0.5, 0.5], "trim": [2.0, 6.5]}
+    )
+    assert r.crop == [0.1, 0.2, 0.5, 0.5]
+    assert r.trim == [2.0, 6.5]
+    d = r.to_dict()
+    assert d["crop"] == [0.1, 0.2, 0.5, 0.5]
+    assert d["trim"] == [2.0, 6.5]
+
+
+def test_crop_and_trim_are_omitted_when_unset():
+    """Pre-edit references_json values and v1 pack files must keep loading AND
+    re-serialising unchanged, so an unedited reference emits no crop/trim keys."""
+    for r in (img("a.jpg"), vid("v.mp4"), aud("s.wav")):
+        d = r.to_dict()
+        assert "crop" not in d
+        assert "trim" not in d
+    old = Reference.from_dict({"kind": "video", "file": "v.mp4"})
+    assert old.crop is None and old.trim is None
+
+
+@pytest.mark.parametrize("bad", [
+    "half",                     # not a list
+    [0.1, 0.2, 0.5],            # wrong arity
+    [0.1, 0.2, 0.5, "h"],       # not numbers
+    [-0.1, 0.0, 0.5, 0.5],      # negative origin
+    [0.0, 0.0, 0.0, 0.5],       # zero area
+    [0.0, 0.0, -0.5, 0.5],      # negative area
+    [0.8, 0.0, 0.5, 0.5],       # x + w past the frame
+    [0.0, 0.8, 0.5, 0.5],       # y + h past the frame
+])
+def test_bad_crops_are_rejected(bad):
+    with pytest.raises(ReferenceError):
+        Reference.from_dict({"kind": "image", "file": "a.jpg", "crop": bad})
+
+
+@pytest.mark.parametrize("bad", [
+    "later", [1.0], [1.0, 2.0, 3.0], ["a", "b"],
+    [-1.0, 2.0],  # negative start
+    [3.0, 3.0],   # end == start
+    [4.0, 2.0],   # end < start
+])
+def test_bad_trims_are_rejected(bad):
+    with pytest.raises(ReferenceError):
+        Reference.from_dict({"kind": "audio", "file": "s.wav", "trim": bad})
+
+
+def test_crop_only_sticks_to_images_and_videos():
+    # mirrors use_soundtrack: an inapplicable field is dropped, not fatal
+    box = [0, 0, 0.5, 0.5]
+    assert Reference.from_dict({"kind": "audio", "file": "s.wav", "crop": box}).crop is None
+    assert Reference.from_dict({"kind": "image", "file": "a.jpg", "crop": box}).crop == box
+    assert Reference.from_dict({"kind": "video", "file": "v.mp4", "crop": box}).crop == box
+
+
+def test_trim_only_sticks_to_videos_and_audio():
+    assert Reference.from_dict({"kind": "image", "file": "a.jpg", "trim": [1.0, 2.0]}).trim is None
+    assert Reference.from_dict({"kind": "video", "file": "v.mp4", "trim": [1.0, 2.0]}).trim == [1.0, 2.0]
+    assert Reference.from_dict({"kind": "audio", "file": "s.wav", "trim": [1.0, 2.0]}).trim == [1.0, 2.0]
+
+
+def test_crop_and_trim_survive_a_references_json_round_trip():
+    """The pack store is gone, but this is the state the node actually restores from."""
+    original = ReferenceSet([
+        Reference(kind="video", file="v.mp4", crop=[0.0, 0.0, 0.5, 0.5], trim=[1.0, 3.0]),
+    ])
+
+    back = ReferenceSet.from_json(original.to_json()).references[0]
+
+    assert back.crop == [0.0, 0.0, 0.5, 0.5]
+    assert back.trim == [1.0, 3.0]

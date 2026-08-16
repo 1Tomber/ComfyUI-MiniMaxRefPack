@@ -64,6 +64,26 @@
  *
  * NOT SURFACED ON THE NODE BODY: the system prompt itself — lives only behind the ⚙
  * modal (openSystemPromptModal), never drawn on the body.
+ *
+ * CROP + TRIM (openEditModal): one modal edits both. Entry points: the scissors chip
+ * in a tile's TOP-LEFT corner (the only free corner — delete owns top-right, ♪ sits
+ * bottom-left above the badge, ▶ is centred) and a double-click anywhere on the tile.
+ * The modal shows the REAL media via /view (fileUrl) — an <img> for stills, a <video>
+ * for clips — with a draggable fraction-space crop rect + corner handles and aspect
+ * presets; video/audio get in/out trim handles on a bar plus 2dp second fields. Each
+ * row ends in a right-aligned Clear button ("Clear crop" / "Clear trim") that resets
+ * that edit — dimmed when there is nothing to clear, so the modal states at a glance
+ * whether the reference carries an edit; clearing the crop also releases the aspect
+ * lock and unhighlights every preset. No preset is highlighted on open — the highlight
+ * means the user chose a lock, not the free default. Save
+ * writes crop ([x,y,w,h] fractions) / trim ([start,end] seconds) onto the reference —
+ * refs.py validates and media.py applies them — and drops the file's thumbCache entry
+ * so the tile redraws from the thumb route with the edit baked in. The scissors chip
+ * inverts to a light chip while an edit is set (same signalling as ♪), the badge grows
+ * a third line ("2.00-6.50s · cropped"), and the click-to-play preview plays only the
+ * trimmed span (seek to the in-point, timeupdate stops it at the out-point). All of it
+ * keeps the module invariants: no per-cell DOM, one shared <video>/<audio> per node,
+ * scheduleDraw coalescing, no requestAnimationFrame loop.
  */
 
 import { app } from "../../scripts/app.js";
@@ -114,6 +134,7 @@ const CL = {
     playR: 14, // play glyph circle radius — r20 buried a third of the thumbnail
     badge1: 18, // tag badge height, one line (11px type)
     badge2: 30, // tag badge height, two lines
+    badge3: 42, // tag badge height, three lines (tag + vid_audio + the crop/trim line)
     // The per-row add affordance: an icon-only square, NOT a toolbar-button clone
     // (UI review #1). Fixed placement — always where the next tile would go, with
     // a 24px gap separating it from the reference group so it doesn't read as
@@ -198,26 +219,169 @@ export function assignTags(refs) {
 }
 
 // ---- references_json <-> working-state conversion --------------------
-// refs.py's Reference shape: {"kind": "image"|"video"|"audio", "file": str, [use_soundtrack]}
+// refs.py's Reference shape:
+//   {"kind": "image"|"video"|"audio", "file": str, [use_soundtrack], [crop], [trim]}
+// crop = [x, y, w, h] fractions (image/video), trim = [start, end] seconds
+// (video/audio) — both omitted when unset, mirroring refs.py's to_dict().
 
-function fromReferencesList(list) {
+function takeEdit(v) {
+    return Array.isArray(v) ? v.slice() : null;
+}
+
+export function fromReferencesList(list) {
     const refs = { images: [], videos: [], audios: [] };
     for (const r of list || []) {
         if (!r || typeof r.file !== "string") continue;
-        if (r.kind === "image") refs.images.push({ file: r.file, missing: !!r.missing });
+        if (r.kind === "image")
+            refs.images.push({ file: r.file, missing: !!r.missing, crop: takeEdit(r.crop) });
         else if (r.kind === "video")
-            refs.videos.push({ file: r.file, use_soundtrack: !!r.use_soundtrack, missing: !!r.missing });
-        else if (r.kind === "audio") refs.audios.push({ file: r.file, missing: !!r.missing });
+            refs.videos.push({
+                file: r.file,
+                use_soundtrack: !!r.use_soundtrack,
+                missing: !!r.missing,
+                crop: takeEdit(r.crop),
+                trim: takeEdit(r.trim),
+            });
+        else if (r.kind === "audio")
+            refs.audios.push({ file: r.file, missing: !!r.missing, trim: takeEdit(r.trim) });
     }
     return refs;
 }
 
-function toReferencesList(refs) {
+export function toReferencesList(refs) {
     const out = [];
-    for (const r of refs.images) out.push({ kind: "image", file: r.file });
-    for (const r of refs.videos) out.push({ kind: "video", file: r.file, use_soundtrack: !!r.use_soundtrack });
-    for (const r of refs.audios) out.push({ kind: "audio", file: r.file });
+    const withEdits = (d, r) => {
+        if (Array.isArray(r.crop)) d.crop = r.crop.slice();
+        if (Array.isArray(r.trim)) d.trim = r.trim.slice();
+        return d;
+    };
+    for (const r of refs.images) out.push(withEdits({ kind: "image", file: r.file }, { crop: r.crop }));
+    for (const r of refs.videos)
+        out.push(withEdits({ kind: "video", file: r.file, use_soundtrack: !!r.use_soundtrack }, r));
+    for (const r of refs.audios) out.push(withEdits({ kind: "audio", file: r.file }, { trim: r.trim }));
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// Crop/trim pure helpers — fraction-space math only, no DOM, so a node harness
+// can exercise them the way pytest exercises refs.py.
+// ---------------------------------------------------------------------------
+
+// The badge's extra line: "2.00-6.50s · cropped" / "2.00-6.50s" / "cropped",
+// or null when the reference is untouched.
+export function editSummary(ref) {
+    const parts = [];
+    if (ref && Array.isArray(ref.trim)) parts.push(`${ref.trim[0].toFixed(2)}-${ref.trim[1].toFixed(2)}s`);
+    if (ref && Array.isArray(ref.crop)) parts.push("cropped");
+    return parts.length ? parts.join(" · ") : null;
+}
+
+function hasEdit(ref) {
+    return !!(ref && (Array.isArray(ref.crop) || Array.isArray(ref.trim)));
+}
+
+function clamp01(v, lo, hi) {
+    return Math.min(Math.max(v, lo), hi);
+}
+
+// What Save actually writes: round to 4 decimals (plenty below one pixel at 8K),
+// clamp into the unit square with w capped at 1-x so refs.py's validate_crop can
+// never reject a rect this produced, and collapse a (near-)full-frame rect to null
+// — no crop at all, so an untouched reference serialises exactly as before.
+export function normalizeCrop(rect) {
+    if (!rect) return null;
+    const r4 = (v) => Math.round(v * 1e4) / 1e4;
+    const x = clamp01(r4(rect[0]), 0, 1);
+    const y = clamp01(r4(rect[1]), 0, 1);
+    const w = Math.min(r4(rect[2]), r4(1 - x));
+    const h = Math.min(r4(rect[3]), r4(1 - y));
+    if (w <= 0 || h <= 0) return null;
+    if (x === 0 && y === 0 && w === 1 && h === 1) return null;
+    return [x, y, w, h];
+}
+
+// What Save writes for the trim: [start, end] rounded to 2dp, or null when the
+// window covers (within the 2dp rounding, 4ms) the whole clip — no trim at all,
+// mirroring normalizeCrop's full-frame collapse. Also the predicate behind the
+// modal's "Clear trim" disabled state: null here means there is nothing to clear.
+export function normalizeTrim(trim, duration) {
+    if (!trim || !duration) return null;
+    const r2 = (v) => Math.round(v * 100) / 100;
+    const s = r2(trim[0]);
+    const e = r2(trim[1]);
+    if (e <= s) return null;
+    if (s <= 0.004 && e >= r2(duration) - 0.004) return null;
+    return [s, e];
+}
+
+// One pointer-drag step over a fraction rect. mode = "move" | "nw"|"ne"|"sw"|"se";
+// dx/dy are pointer deltas as fractions of the media box. `ratio` (a PIXEL w:h,
+// e.g. 16/9) locks the rect's pixel aspect, which in fraction space means
+// hFrac = wFrac * mediaW / (ratio * mediaH). The corner opposite the dragged one
+// is the anchor and never moves.
+export function dragCrop(rect, mode, dx, dy, ratio, mediaW, mediaH) {
+    const MIN = 0.02;
+    const [x, y, w, h] = rect;
+    if (mode === "move") {
+        return [clamp01(x + dx, 0, 1 - w), clamp01(y + dy, 0, 1 - h), w, h];
+    }
+    const ax = mode === "nw" || mode === "sw" ? x + w : x;
+    const ay = mode === "nw" || mode === "ne" ? y + h : y;
+    const cx = clamp01((mode === "nw" || mode === "sw" ? x : x + w) + dx, 0, 1);
+    const cy = clamp01((mode === "nw" || mode === "ne" ? y : y + h) + dy, 0, 1);
+    let nw = Math.max(Math.abs(cx - ax), MIN);
+    let nh = Math.max(Math.abs(cy - ay), MIN);
+    if (ratio && mediaW && mediaH) {
+        nh = (nw * mediaW) / (ratio * mediaH);
+        const maxH = cy >= ay ? 1 - ay : ay; // room on the side being dragged into
+        if (nh > maxH) {
+            nh = maxH;
+            nw = (nh * ratio * mediaH) / mediaW;
+        }
+    }
+    const nx = cx >= ax ? ax : ax - nw;
+    const ny = cy >= ay ? ay : ay - nh;
+    return [clamp01(nx, 0, 1 - nw), clamp01(ny, 0, 1 - nh), nw, nh];
+}
+
+// An aspect-preset click: reshape the current rect around its own centre to the
+// given PIXEL ratio, spilling as little as possible past the frame.
+export function setRectAspect(rect, ratio, mediaW, mediaH) {
+    const [x, y, w, h] = rect;
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    let nw = w;
+    let nh = (w * mediaW) / (ratio * mediaH);
+    if (nh > 1) {
+        nw = nw / nh;
+        nh = 1;
+    }
+    return [clamp01(cx - nw / 2, 0, 1 - nw), clamp01(cy - nh / 2, 0, 1 - nh), nw, nh];
+}
+
+/** Framing for "play the modified video": the crop region blown up to fill the same
+ * footprint the untouched media occupies, so the preview shows what the socket emits
+ * rather than a rectangle drawn over the original.
+ *
+ * `dw`/`dh` are the media's CURRENT displayed size in CSS px. The crop region is
+ * scaled by min(dw/cw, dh/ch) - the largest scale that still fits the footprint - so
+ * the region's own aspect is preserved and the box is never overflowed. The media
+ * itself scales by the same factor and shifts by the crop origin, which is what puts
+ * the region under the wrapper's visible window.
+ */
+export function cropPreviewBox(crop, dw, dh) {
+    const [x, y, w, h] = crop;
+    const cw = dw * w;
+    const ch = dh * h;
+    const scale = Math.min(dw / cw, dh / ch);
+    return {
+        wrapW: cw * scale,
+        wrapH: ch * scale,
+        mediaW: dw * scale,
+        mediaH: dh * scale,
+        left: -x * dw * scale,
+        top: -y * dh * scale,
+    };
 }
 
 function emptyRefs() {
@@ -247,8 +411,14 @@ async function apiUpload(file) {
     return info.name;
 }
 
-function thumbUrl(file) {
-    return `/minimax_refpack/thumb?file=${encodeURIComponent(file)}`;
+// The tile thumb: cropped by the route (media.thumbnail_png), and for a trimmed
+// video taken at the in-point (`t=`) so the tile previews the span that will
+// actually be emitted, not frame 0 of the untrimmed file.
+function thumbUrl(file, ref) {
+    let url = `/minimax_refpack/thumb?file=${encodeURIComponent(file)}`;
+    if (ref && Array.isArray(ref.crop)) url += `&crop=${ref.crop.join(",")}`;
+    if (ref && Array.isArray(ref.trim)) url += `&t=${ref.trim[0]}`;
+    return url;
 }
 
 // Raw file, for the click-to-play previews (thumbUrl is a server-generated still).
@@ -389,6 +559,43 @@ function hideWidget(w) {
 // liveNodes tracks which nodes to repaint when a thumb lands.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Structured logging. Same line shape as the Python side (minimax_refpack/logs.py):
+// `[MiniMaxRefPack] event=<name> key=value`, so one grep covers the browser console
+// and the ComfyUI console, and a bug report from either reads the same way.
+//
+// info = state changes worth seeing by default (uploads, edits, previews, config).
+// debug = per-tile chatter (thumb retries), hidden until the console's Verbose level.
+// warn = something the user will notice going wrong.
+// ---------------------------------------------------------------------------
+
+const LOG_PREFIX = "[MiniMaxRefPack]";
+
+function logValue(value) {
+    if (typeof value === "boolean") return value ? "true" : "false";
+    if (typeof value === "number") {
+        // 3dp, trailing zeros dropped - matches logs.py so the two consoles agree
+        return Number.isInteger(value) ? String(value) : String(Math.round(value * 1000) / 1000);
+    }
+    if (Array.isArray(value)) return `[${value.map(logValue).join(",")}]`;
+    const text = String(value);
+    if (!text) return '""';
+    return /[ "]/.test(text) ? `"${text.replace(/"/g, "'")}"` : text;
+}
+
+export function logLine(event, fields) {
+    let line = `${LOG_PREFIX} event=${event}`;
+    for (const [key, value] of Object.entries(fields || {})) {
+        if (value === undefined || value === null) continue;
+        line += ` ${key}=${logValue(value)}`;
+    }
+    return line;
+}
+
+const mlog = (event, fields) => console.info(logLine(event, fields));
+const mdebug = (event, fields) => console.debug(logLine(event, fields));
+const mwarn = (event, fields) => console.warn(logLine(event, fields));
+
 const thumbCache = new Map(); // file -> { img, state: "loading"|"ok"|"error", tries, reqs, timer }
 const liveNodes = new Set();
 
@@ -407,17 +614,19 @@ function repaintLive() {
 
 // `reqs` is monotonic and only feeds the cache-buster — a retry must not be answered from
 // whatever cached the failure. The first request stays clean so it can be cached normally.
-function requestThumb(entry, file) {
+// `entry.base` carries the crop/trim query the entry was created with; an edit drops the
+// whole entry (dropThumb) rather than mutating it.
+function requestThumb(entry) {
     entry.timer = null;
     entry.reqs += 1;
-    entry.img.src = entry.reqs === 1 ? thumbUrl(file) : `${thumbUrl(file)}&retry=${entry.reqs - 1}`;
+    entry.img.src = entry.reqs === 1 ? entry.base : `${entry.base}&retry=${entry.reqs - 1}`;
 }
 
-function getThumb(file) {
+function getThumb(file, ref) {
     let entry = thumbCache.get(file);
     if (!entry) {
         const img = new Image();
-        entry = { img, state: "loading", tries: 0, reqs: 0, timer: null };
+        entry = { img, file, base: thumbUrl(file, ref), state: "loading", tries: 0, reqs: 0, timer: null };
         img.onload = () => {
             entry.state = "ok";
             entry.tries = 0;
@@ -430,18 +639,31 @@ function getThumb(file) {
                 // Ladder spent (~30s). Say so on the tile — but the entry stays retryable,
                 // see retryFailedThumbs().
                 entry.state = "error";
+                mwarn("thumb_failed", { file: entry.file, tries: entry.tries - 1 });
                 repaintLive();
                 return;
             }
             // Still trying: the tile shows the plain well, not a verdict it may have to
             // take back a second later.
             entry.state = "loading";
-            entry.timer = setTimeout(() => requestThumb(entry, file), delay);
+            mdebug("thumb_retry", { file: entry.file, attempt: entry.tries, in_ms: delay });
+            entry.timer = setTimeout(() => requestThumb(entry), delay);
         };
         thumbCache.set(file, entry);
-        requestThumb(entry, file);
+        requestThumb(entry);
     }
     return entry;
+}
+
+// Saving an edit invalidates the file's cached thumb so the next draw re-fetches
+// through the route with the new crop/t baked into the URL.
+function dropThumb(file) {
+    const entry = thumbCache.get(file);
+    if (!entry) return;
+    if (entry.timer) clearTimeout(entry.timer);
+    entry.img.onload = null;
+    entry.img.onerror = null;
+    thumbCache.delete(file);
 }
 
 // Giving up is not giving up for good. Anything that says the world may have changed — the
@@ -455,7 +677,7 @@ function retryFailedThumbs() {
         if (entry.state !== "error") continue;
         entry.state = "loading";
         entry.tries = 0;
-        requestThumb(entry, file);
+        requestThumb(entry);
         any = true;
     }
     if (any) repaintLive();
@@ -550,10 +772,44 @@ function drawPlayGlyph(ctx, cx, cy, playing) {
     }
 }
 
-// One tile: well, thumbnail/glyph, tag badge, delete, soundtrack state, play glyph,
-// missing treatment, selection stroke. `lines` is the pre-computed badge text (two
-// lines for a video that also owns an <Audio N>); `playState` is null | "play" |
-// "pause" (null = no preview affordance: images, missing refs).
+// The crop/trim entry point: a scissors chip in the tile's top-left — the same quiet
+// dark-circle family as the delete chip (vector, no emoji). Inverts to a light chip
+// while the reference carries an edit, mirroring how ♪ signals on/off.
+function drawEditChip(ctx, x, y, edited) {
+    const dR = CL.del / 2;
+    const cx = x + dR + 3;
+    const cy = y + dR + 3;
+    ctx.fillStyle = edited ? C.text : "rgba(0, 0, 0, 0.65)";
+    ctx.beginPath();
+    ctx.arc(cx, cy, dR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = edited ? "#000" : "#555";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(cx, cy, dR - 0.5, 0, Math.PI * 2);
+    ctx.stroke();
+    // Scissors: two crossing blades up, two finger loops down.
+    const g = edited ? "#000" : "#fff";
+    ctx.strokeStyle = g;
+    ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    ctx.moveTo(cx - 2.2, cy + 1.6);
+    ctx.lineTo(cx + 4, cy - 4.2);
+    ctx.moveTo(cx + 2.2, cy + 1.6);
+    ctx.lineTo(cx - 4, cy - 4.2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx - 3.1, cy + 3.1, 1.7, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx + 3.1, cy + 3.1, 1.7, 0, Math.PI * 2);
+    ctx.stroke();
+}
+
+// One tile: well, thumbnail/glyph, tag badge, delete, edit chip, soundtrack state,
+// play glyph, missing treatment, selection stroke. `lines` is the pre-computed badge
+// text (up to three: tag, a video's <Audio N>, the crop/trim summary); `playState` is
+// null | "play" | "pause" (null = no preview affordance: images, missing refs).
 function drawTile(ctx, kind, ref, lines, x, y, selected, soundState, badgeH, playState) {
     const T = CL.tile;
 
@@ -568,7 +824,7 @@ function drawTile(ctx, kind, ref, lines, x, y, selected, soundState, badgeH, pla
         // Speaker in the upper half; the play glyph takes the lower half.
         drawSpeaker(ctx, x + T / 2, y + 34, 18, ref.missing ? C.textDim : C.textFaint);
     } else {
-        const entry = getThumb(ref.file);
+        const entry = getThumb(ref.file, ref);
         if (entry.state === "ok") {
             if (ref.missing) ctx.globalAlpha = 0.6;
             drawCover(ctx, entry.img, x, y, T, T);
@@ -628,6 +884,10 @@ function drawTile(ctx, kind, ref, lines, x, y, selected, soundState, badgeH, pla
     ctx.moveTo(dcx + 4, dcy - 4);
     ctx.lineTo(dcx - 4, dcy + 4);
     ctx.stroke();
+
+    // Crop/trim entry point — top-left, the one corner nothing else owns. A missing
+    // file has no media to show in the editor, so it gets no chip.
+    if (!ref.missing) drawEditChip(ctx, x, y, hasEdit(ref));
 
     if (soundState) {
         const S = CL.sound;
@@ -792,7 +1052,10 @@ function draw(node) {
             const lines = kind === "video" && t.audioTag
                 ? [t.tag, `vid_audio ${t.audioTag}`]
                 : [t.tag];
-            const badgeH = lines.length > 1 ? CL.badge2 : CL.badge1;
+            // An edited reference states its edit on the badge: "2.00-6.50s · cropped".
+            const summary = editSummary(ref);
+            if (summary) lines.push(summary);
+            const badgeH = [CL.badge1, CL.badge2, CL.badge3][lines.length - 1];
             const selected =
                 node._mmrpSelected && node._mmrpSelected.kind === kind && node._mmrpSelected.index === i;
 
@@ -820,8 +1083,20 @@ function draw(node) {
             drawTile(ctx, kind, ref, lines, tx, tileY, selected, soundState, badgeH, playState);
 
             // Hit regions, most specific last — hitTest scans in reverse so the
-            // play/delete/soundtrack affordances win over the tile containing them.
+            // play/delete/soundtrack/edit affordances win over the tile containing them.
             regions.push({ type: "tile", kind, index: i, file: ref.file, x: tx, y: tileY, w: CL.tile, h: CL.tile });
+            if (!ref.missing) {
+                regions.push({
+                    type: "edit",
+                    kind,
+                    index: i,
+                    file: ref.file,
+                    x: tx + 3,
+                    y: tileY + 3,
+                    w: CL.del,
+                    h: CL.del,
+                });
+            }
             if (soundState === "on" || soundState === "off") {
                 regions.push({
                     type: "sound",
@@ -893,7 +1168,7 @@ function getMousePos(canvas, e) {
     };
 }
 
-function hitTest(node, x, y) {
+export function hitTest(node, x, y) {
     const hit = node._mmrpHit;
     if (!hit) return null;
     for (let i = hit.regions.length - 1; i >= 0; i--) {
@@ -920,6 +1195,8 @@ function onCanvasMouseDown(node, e) {
         toggleSoundtrack(node, hit.file);
     } else if (hit.type === "play") {
         togglePreview(node, hit);
+    } else if (hit.type === "edit") {
+        openEditModal(node, hit.kind, hit.index);
     } else if (hit.type === "add") {
         node._mmrpBody.fileInputs[hit.kind].click();
     } else {
@@ -928,11 +1205,23 @@ function onCanvasMouseDown(node, e) {
     }
 }
 
+// Double-clicking a tile opens the crop/trim editor too — same modal as the chip.
+// The affordance chips keep their own single-click meanings.
+function onCanvasDblClick(node, e) {
+    const pos = getMousePos(node._mmrpBody.canvas, e);
+    const hit = hitTest(node, pos.x, pos.y);
+    if (!hit || (hit.type !== "tile" && hit.type !== "edit")) return;
+    const ref = node._mmrpRefs[`${hit.kind}s`][hit.index];
+    if (!ref || ref.missing) return;
+    openEditModal(node, hit.kind, hit.index);
+}
+
 function toggleSoundtrack(node, file) {
     if (probeResults.get(file) !== true) return; // pending/silent/unknown — not toggleable
     const next = cloneRefs(node._mmrpRefs);
     const target = next.videos.find((v) => v.file === file);
     if (target) target.use_soundtrack = !target.use_soundtrack;
+    if (target) mlog("soundtrack", { file, on: target.use_soundtrack });
     applyRefs(node, next);
 }
 
@@ -964,9 +1253,16 @@ function togglePreview(node, hit) {
         return;
     }
     stopPreview(node);
+    // A trimmed reference previews ONLY its span: seek to the in-point here, stop at
+    // the out-point in the shared elements' timeupdate handlers (buildCustomBlock).
+    // Setting currentTime before metadata sets the default playback start position
+    // (per the HTML spec), and the timeupdate handler re-seeks if a browser drops it.
+    const ref = node._mmrpRefs[`${hit.kind}s`][hit.index];
+    const trim = ref && Array.isArray(ref.trim) ? ref.trim : null;
     if (hit.kind === "video") {
         const v = body.previewVideo;
         v.src = fileUrl(hit.file);
+        if (trim) v.currentTime = trim[0];
         // Same coordinate space as the canvas — the block is the offsetParent for
         // both, and ComfyUI's zoom transform applies to the overlay automatically.
         v.style.left = `${body.canvas.offsetLeft + hit.tileX}px`;
@@ -976,9 +1272,10 @@ function togglePreview(node, hit) {
     } else {
         const a = body.previewAudio;
         a.src = fileUrl(hit.file);
+        if (trim) a.currentTime = trim[0];
         a.play().catch(() => stopPreview(node));
     }
-    node._mmrpPlaying = { kind: hit.kind, file: hit.file };
+    node._mmrpPlaying = { kind: hit.kind, file: hit.file, trim };
     scheduleDraw(node);
 }
 
@@ -1050,21 +1347,27 @@ async function addFiles(node, kind, files) {
     if (take.length < all.length) {
         alert(`Only ${room} ${kind} slot${room === 1 ? "" : "s"} left — skipped ${all.length - take.length} file(s).`);
     }
+    mlog("upload", { kind, files: take.length });
+    const uploadStarted = performance.now();
     for (const file of take) {
         try {
             const name = await apiUpload(file);
+            mlog("uploaded", { kind, file: name, bytes: file.size });
             // soundtrack ON by default; the probe turns it back off for a silent clip
             arr.push(kind === "video" ? { file: name, use_soundtrack: true } : { file: name });
         } catch (e) {
+            mwarn("upload_failed", { kind, file: file.name, error: e.message });
             alert(`Upload failed for ${file.name}: ${e.message}`);
         }
     }
+    mlog("upload_done", { kind, files: take.length, ms: performance.now() - uploadStarted });
     applyRefs(node, refs);
 }
 
 function removeRef(node, kind, index) {
     const refs = cloneRefs(node._mmrpRefs);
-    refs[`${kind}s`].splice(index, 1);
+    const [gone] = refs[`${kind}s`].splice(index, 1);
+    mlog("reference_removed", { kind, file: gone && gone.file });
     if (node._mmrpSelected && node._mmrpSelected.kind === kind) {
         if (node._mmrpSelected.index === index) node._mmrpSelected = null;
         else if (node._mmrpSelected.index > index) node._mmrpSelected.index -= 1;
@@ -1157,6 +1460,7 @@ function buildCustomBlock(node) {
     canvas.className = "mmrp-canvas";
     canvas.style.height = `${CANVAS_ROWS.height}px`; // fixed, set once
     canvas.addEventListener("mousedown", (e) => onCanvasMouseDown(node, e));
+    canvas.addEventListener("dblclick", (e) => onCanvasDblClick(node, e));
     // Keep litegraph's node context menu off the tiles (matches the reference's
     // per-item contextmenu swallow).
     canvas.addEventListener("contextmenu", (e) => e.stopPropagation());
@@ -1180,6 +1484,17 @@ function buildCustomBlock(node) {
     const previewAudio = document.createElement("audio");
     previewAudio.addEventListener("ended", () => stopPreview(node));
     container.appendChild(previewAudio);
+
+    // Trim enforcement for the shared preview pair: stop at the out-point, and
+    // re-seek to the in-point if the pre-metadata seek in togglePreview was dropped.
+    const keepToTrim = (el) => () => {
+        const p = node._mmrpPlaying;
+        if (!p || !p.trim) return;
+        if (el.currentTime >= p.trim[1]) stopPreview(node);
+        else if (el.currentTime < p.trim[0] - 0.25) el.currentTime = p.trim[0];
+    };
+    previewVideo.addEventListener("timeupdate", keepToTrim(previewVideo));
+    previewAudio.addEventListener("timeupdate", keepToTrim(previewAudio));
 
     // Per spec: "just a large text area" — one plain DOM textarea on the grey
     // node body, no wrapper, no overlay label, no unfocused dimming (the dimming
@@ -1405,6 +1720,486 @@ function openLoadConfigPanel(node, anchorBtn) {
     };
     document.body.appendChild(picker);
     picker.click();
+}
+
+// ---------------------------------------------------------------------------
+// Crop/trim editor — ONE modal for both edits, same overlay pattern as the system
+// prompt modal. Crop lives on image and video, trim on video and audio; the modal
+// shows whichever applies. Everything is edited in fraction/second space and only
+// committed on Save; Cancel (or clicking the backdrop) discards.
+// ---------------------------------------------------------------------------
+
+const ASPECT_PRESETS = [
+    ["1:1", 1],
+    ["16:9", 16 / 9],
+    ["9:16", 9 / 16],
+];
+
+function openEditModal(node, kind, index) {
+    const ref = node._mmrpRefs[`${kind}s`][index];
+    if (!ref || ref.missing) return;
+    mlog("edit_open", { kind, file: ref.file, crop: ref.crop, trim: ref.trim });
+    const wantsCrop = kind !== "audio";
+    const wantsTrim = kind !== "image";
+
+    let crop = Array.isArray(ref.crop) ? ref.crop.slice() : [0, 0, 1, 1];
+    let trim = Array.isArray(ref.trim) ? ref.trim.slice() : null; // null until duration known
+    let duration = null;
+    let ratio = null; // aspect lock; null = free
+    let mediaW = 0;
+    let mediaH = 0;
+    const r2 = (v) => Math.round(v * 100) / 100;
+
+    // The two Clear buttons dim when there is nothing to clear, so the modal shows
+    // at a glance whether this reference currently carries an edit. Live state, the
+    // same predicates Save uses — dragging a rect out enables Clear crop instantly.
+    let clearCropBtn = null;
+    let clearTrimBtn = null;
+    const syncClears = () => {
+        if (clearCropBtn) clearCropBtn.disabled = normalizeCrop(crop) === null;
+        if (clearTrimBtn) clearTrimBtn.disabled = normalizeTrim(trim, duration) === null;
+    };
+
+    const overlay = document.createElement("div");
+    overlay.className = "mmrp-overlay";
+    overlay.onclick = (e) => {
+        if (e.target === overlay) overlay.remove();
+    };
+
+    const modal = document.createElement("div");
+    modal.className = "mmrp-modal mmrp-edit-modal";
+    overlay.appendChild(modal);
+
+    const header = document.createElement("div");
+    header.className = "mmrp-modal-header";
+    header.textContent = `Edit — ${ref.file}`;
+    modal.appendChild(header);
+
+    // ---- the media, real pixels via the stock /view route ----
+    const stage = document.createElement("div");
+    stage.className = "mmrp-edit-stage";
+    let media;
+    if (kind === "image") {
+        media = document.createElement("img");
+    } else if (kind === "video") {
+        media = document.createElement("video");
+        media.muted = true;
+        media.playsInline = true;
+        media.preload = "auto";
+    } else {
+        media = document.createElement("audio");
+        media.controls = true;
+        media.preload = "metadata";
+    }
+    media.src = fileUrl(ref.file);
+    // The media lives in a wrapper so "Play edit" can reframe it (the wrapper becomes
+    // the crop's window; the media is scaled and shifted inside it). Untouched, the
+    // wrapper shrink-wraps the media and nothing about the layout changes.
+    const mediaWrap = document.createElement("div");
+    mediaWrap.className = "mmrp-edit-media-wrap";
+    mediaWrap.appendChild(media);
+    stage.appendChild(mediaWrap);
+    modal.appendChild(stage);
+
+    let cropLayer = null;   // set below when the media can be cropped
+
+    // ---- crop rect + corner handles (image/video) ----
+    let syncCropRect = () => {};
+    if (wantsCrop) {
+        const layer = document.createElement("div");
+        layer.className = "mmrp-crop-layer";
+        const rectEl = document.createElement("div");
+        rectEl.className = "mmrp-crop-rect";
+        layer.appendChild(rectEl);
+        const handles = {};
+        for (const corner of ["nw", "ne", "sw", "se"]) {
+            const h = document.createElement("div");
+            h.className = `mmrp-crop-handle mmrp-crop-${corner}`;
+            rectEl.appendChild(h);
+            handles[corner] = h;
+        }
+        stage.appendChild(layer);
+        cropLayer = layer;
+
+        syncCropRect = () => {
+            rectEl.style.left = `${crop[0] * 100}%`;
+            rectEl.style.top = `${crop[1] * 100}%`;
+            rectEl.style.width = `${crop[2] * 100}%`;
+            rectEl.style.height = `${crop[3] * 100}%`;
+            syncClears();
+        };
+        syncCropRect();
+
+        // Pointer deltas in fractions of the layer box; dragCrop does the math.
+        const startDrag = (e, mode) => {
+            stopPlayback();
+            e.preventDefault();
+            e.stopPropagation();
+            const box = layer.getBoundingClientRect();
+            if (!box.width || !box.height) return;
+            const from = { x: e.clientX, y: e.clientY, crop: crop.slice() };
+            const move = (ev) => {
+                const dx = (ev.clientX - from.x) / box.width;
+                const dy = (ev.clientY - from.y) / box.height;
+                crop = dragCrop(from.crop, mode, dx, dy, ratio, mediaW, mediaH);
+                syncCropRect();
+            };
+            const up = () => {
+                window.removeEventListener("mousemove", move);
+                window.removeEventListener("mouseup", up);
+            };
+            window.addEventListener("mousemove", move);
+            window.addEventListener("mouseup", up);
+        };
+        rectEl.addEventListener("mousedown", (e) => startDrag(e, "move"));
+        for (const corner of ["nw", "ne", "sw", "se"]) {
+            handles[corner].addEventListener("mousedown", (e) => startDrag(e, corner));
+        }
+    }
+
+    // ---- aspect presets (crop only): free / the node's width:height / fixed ratios ----
+    if (wantsCrop) {
+        const row = document.createElement("div");
+        row.className = "mmrp-aspect-row";
+        const label = document.createElement("span");
+        label.className = "mmrp-edit-label";
+        label.textContent = "Crop";
+        row.appendChild(label);
+
+        const presets = [["Free", null]];
+        const wWidget = widgetByName(node, "width");
+        const hWidget = widgetByName(node, "height");
+        const nodeW = wWidget ? Number(wWidget.value) : 0;
+        const nodeH = hWidget ? Number(hWidget.value) : 0;
+        if (nodeW > 0 && nodeH > 0) presets.push([`${nodeW}:${nodeH}`, nodeW / nodeH]);
+        presets.push(...ASPECT_PRESETS);
+
+        const buttons = [];
+        for (const [text, r] of presets) {
+            const btn = document.createElement("button");
+            btn.className = "mmrp-btn";
+            btn.textContent = text;
+            btn.onclick = () => {
+                stopPlayback();
+                ratio = r;
+                for (const b of buttons) b.classList.toggle("mmrp-active", b === btn);
+                if (r) {
+                    crop = setRectAspect(crop, r, mediaW, mediaH);
+                    syncCropRect();
+                }
+            };
+            row.appendChild(btn);
+            buttons.push(btn);
+        }
+        // Nothing is highlighted on open. Free IS the starting behaviour (ratio = null),
+        // but showing it selected reads as a choice the user made, and then "Clear crop"
+        // has nothing left to visibly clear. The highlight means "you picked a lock".
+
+        // Right-aligned, paired with the trim row's Clear trim: back to the whole
+        // frame, aspect lock released and every preset unhighlighted. Save then deletes
+        // the saved crop, exactly like a hand-dragged full-frame rect would
+        // (normalizeCrop -> null).
+        clearCropBtn = document.createElement("button");
+        clearCropBtn.className = "mmrp-btn mmrp-clear-btn";
+        clearCropBtn.textContent = "Clear crop";
+        clearCropBtn.onclick = () => {
+            stopPlayback();
+            mlog("edit_cleared", { file: ref.file, what: "crop" });
+            crop = [0, 0, 1, 1];
+            ratio = null;
+            for (const b of buttons) b.classList.remove("mmrp-active");
+            syncCropRect();
+        };
+        row.appendChild(clearCropBtn);
+        modal.appendChild(row);
+    }
+
+    // ---- trim bar + 2dp second fields (video/audio) ----
+    let syncTrim = () => {};
+    if (wantsTrim) {
+        const row = document.createElement("div");
+        row.className = "mmrp-trim-row";
+        const label = document.createElement("span");
+        label.className = "mmrp-edit-label";
+        label.textContent = "Trim";
+        row.appendChild(label);
+
+        const inNum = document.createElement("input");
+        const outNum = document.createElement("input");
+        for (const el of [inNum, outNum]) {
+            el.className = "mmrp-trim-num";
+            el.type = "number";
+            el.step = "0.01";
+            el.min = "0";
+            el.disabled = true;
+            // Keep graph hotkeys away from typing, same as the save-name box.
+            el.addEventListener("keydown", (e) => e.stopPropagation());
+        }
+
+        const bar = document.createElement("div");
+        bar.className = "mmrp-trim-bar";
+        const span = document.createElement("div");
+        span.className = "mmrp-trim-span";
+        const inHandle = document.createElement("div");
+        inHandle.className = "mmrp-trim-handle";
+        const outHandle = document.createElement("div");
+        outHandle.className = "mmrp-trim-handle";
+        bar.appendChild(span);
+        bar.appendChild(inHandle);
+        bar.appendChild(outHandle);
+
+        const durLabel = document.createElement("span");
+        durLabel.className = "mmrp-edit-label";
+        durLabel.textContent = "…";
+
+        // "Clear crop"'s pair: back to the whole clip, so Save deletes the saved
+        // trim (normalizeTrim collapses a full-span window to null).
+        clearTrimBtn = document.createElement("button");
+        clearTrimBtn.className = "mmrp-btn mmrp-clear-btn";
+        clearTrimBtn.textContent = "Clear trim";
+
+        row.appendChild(inNum);
+        row.appendChild(bar);
+        row.appendChild(outNum);
+        row.appendChild(durLabel);
+        row.appendChild(clearTrimBtn);
+        modal.appendChild(row);
+
+        syncTrim = () => {
+            if (!duration || !trim) return;
+            inNum.value = trim[0].toFixed(2);
+            outNum.value = trim[1].toFixed(2);
+            span.style.left = `${(trim[0] / duration) * 100}%`;
+            span.style.width = `${((trim[1] - trim[0]) / duration) * 100}%`;
+            inHandle.style.left = `calc(${(trim[0] / duration) * 100}% - 5px)`;
+            outHandle.style.left = `calc(${(trim[1] / duration) * 100}% - 5px)`;
+            syncClears();
+        };
+
+        const setTrim = (start, end, seekTo) => {
+            if (!duration) return;
+            // in stays >= 0.05s before out; both stay inside the clip
+            start = clamp01(r2(start), 0, Math.max(0, r2(duration) - 0.05));
+            end = clamp01(r2(end), start + 0.05, r2(duration));
+            trim = [start, end];
+            syncTrim();
+            // scrub the modal's own video so the user sees the frame they chose
+            if (kind === "video" && seekTo !== undefined) media.currentTime = seekTo;
+        };
+
+        const dragHandle = (which) => (e) => {
+            stopPlayback();
+            e.preventDefault();
+            const box = bar.getBoundingClientRect();
+            if (!box.width || !duration) return;
+            const move = (ev) => {
+                const t = clamp01((ev.clientX - box.left) / box.width, 0, 1) * duration;
+                if (which === "in") setTrim(t, trim[1], t);
+                else setTrim(trim[0], t, t);
+            };
+            const up = () => {
+                window.removeEventListener("mousemove", move);
+                window.removeEventListener("mouseup", up);
+            };
+            window.addEventListener("mousemove", move);
+            window.addEventListener("mouseup", up);
+        };
+        inHandle.addEventListener("mousedown", dragHandle("in"));
+        outHandle.addEventListener("mousedown", dragHandle("out"));
+
+        inNum.addEventListener("change", () => stopPlayback() || setTrim(parseFloat(inNum.value) || 0, trim ? trim[1] : 0, parseFloat(inNum.value) || 0));
+        outNum.addEventListener("change", () => stopPlayback() || setTrim(trim ? trim[0] : 0, parseFloat(outNum.value) || 0));
+        clearTrimBtn.onclick = () => {
+            mlog("edit_cleared", { file: ref.file, what: "trim" });
+            stopPlayback();
+            setTrim(0, duration || 0);
+        };
+
+        media.addEventListener("loadedmetadata", () => {
+            duration = media.duration;
+            durLabel.textContent = `/ ${r2(duration).toFixed(2)}s`;
+            inNum.disabled = false;
+            outNum.disabled = false;
+            if (!trim) trim = [0, r2(duration)];
+            // a saved trim on a since-replaced, shorter file still clamps sanely
+            setTrim(trim[0], trim[1], kind === "video" ? trim[0] : undefined);
+        });
+    }
+
+    // ---- play the original / play the edit (video, audio) -------------------------
+    // The tile's ▶ plays the reference; this plays what the SOCKET will carry. "Play
+    // edit" seeks to the in-point, stops at the out-point, and (for video) reframes the
+    // media so the crop fills the window - the rect overlay is hidden while it runs,
+    // because the media underneath it has moved.
+    let stopPlayback = () => {};
+    if (kind !== "image") {
+        const row = document.createElement("div");
+        row.className = "mmrp-play-row";
+        const label = document.createElement("span");
+        label.className = "mmrp-edit-label";
+        label.textContent = "Preview";
+        row.appendChild(label);
+
+        const origBtn = document.createElement("button");
+        origBtn.className = "mmrp-btn";
+        const editBtn = document.createElement("button");
+        editBtn.className = "mmrp-btn";
+        const ORIG = "Play original";
+        const EDIT = wantsCrop ? "Play edit" : "Play trim";
+        origBtn.textContent = ORIG;
+        editBtn.textContent = EDIT;
+        row.appendChild(origBtn);
+        row.appendChild(editBtn);
+        modal.appendChild(row);
+
+        let mode = null;      // null | "original" | "edit"
+        let stopAt = null;
+        let raf = null;       // out-point watchdog; timeupdate alone fires every ~250ms,
+                              // which overshoots the out-point by a visible quarter second.
+                              // This is NOT the canvas draw loop the header rules out - it
+                              // exists only while the modal's own media is playing.
+
+        const frame = (on) => {
+            if (!wantsCrop) return;
+            if (on) {
+                const box = media.getBoundingClientRect();
+                if (!box.width || !box.height) return;
+                const f = cropPreviewBox(crop, box.width, box.height);
+                mediaWrap.style.width = `${f.wrapW}px`;
+                mediaWrap.style.height = `${f.wrapH}px`;
+                Object.assign(media.style, {
+                    position: "absolute",
+                    maxWidth: "none",
+                    maxHeight: "none",
+                    width: `${f.mediaW}px`,
+                    height: `${f.mediaH}px`,
+                    left: `${f.left}px`,
+                    top: `${f.top}px`,
+                });
+                if (cropLayer) cropLayer.style.display = "none";
+            } else {
+                mediaWrap.style.width = "";
+                mediaWrap.style.height = "";
+                for (const k of ["position", "maxWidth", "maxHeight", "width", "height", "left", "top"]) {
+                    media.style[k] = "";
+                }
+                if (cropLayer) cropLayer.style.display = "";
+            }
+        };
+
+        const sync = () => {
+            origBtn.textContent = mode === "original" ? "Stop" : ORIG;
+            editBtn.textContent = mode === "edit" ? "Stop" : EDIT;
+        };
+
+        stopPlayback = () => {
+            if (!mode) return;
+            if (raf !== null) {
+                cancelAnimationFrame(raf);
+                raf = null;
+            }
+            media.pause();
+            mode = null;
+            stopAt = null;
+            if (kind === "video") media.muted = true;
+            frame(false);
+            sync();
+        };
+
+        const start = (next) => {
+            if (mode === next) {
+                stopPlayback();
+                return;
+            }
+            frame(false);
+            mode = next;
+            if (next === "edit") {
+                frame(true);
+                media.currentTime = trim ? trim[0] : 0;
+                stopAt = trim ? trim[1] : null;
+            } else {
+                media.currentTime = 0;
+                stopAt = null;
+            }
+            media.muted = false;   // the point of pressing play is to hear it too
+            mlog("preview", { file: ref.file, mode: next,
+                              from: next === "edit" && trim ? trim[0] : 0,
+                              to: next === "edit" && trim ? trim[1] : null });
+            media.play().catch(() => stopPlayback());
+            const tick = () => {
+                if (!mode) return;
+                if (stopAt !== null && media.currentTime >= stopAt) {
+                    stopPlayback();
+                    return;
+                }
+                raf = requestAnimationFrame(tick);
+            };
+            raf = requestAnimationFrame(tick);
+            sync();
+        };
+
+        origBtn.onclick = () => start("original");
+        editBtn.onclick = () => start("edit");
+        media.addEventListener("timeupdate", () => {
+            if (stopAt !== null && media.currentTime >= stopAt) stopPlayback();
+        });
+        media.addEventListener("ended", () => stopPlayback());
+    }
+
+    // For an image, size math only needs the natural dimensions.
+    if (kind === "image") {
+        media.addEventListener("load", () => {
+            mediaW = media.naturalWidth;
+            mediaH = media.naturalHeight;
+        });
+    } else if (kind === "video") {
+        media.addEventListener("loadedmetadata", () => {
+            mediaW = media.videoWidth;
+            mediaH = media.videoHeight;
+        });
+    }
+
+    // Initial disabled state for the Clear pair — the sync calls above ran before
+    // the buttons existed. (Clear trim re-syncs again on loadedmetadata.)
+    syncClears();
+
+    // ---- footer ----
+    const footer = document.createElement("div");
+    footer.className = "mmrp-modal-footer";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "mmrp-btn";
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.onclick = () => overlay.remove();
+
+    const saveBtn = document.createElement("button");
+    saveBtn.className = "mmrp-btn mmrp-btn-primary";
+    saveBtn.textContent = "Save";
+    saveBtn.onclick = () => {
+        const next = cloneRefs(node._mmrpRefs);
+        const target = next[`${kind}s`][index];
+
+        const nc = wantsCrop ? normalizeCrop(crop) : null;
+        if (nc) target.crop = nc;
+        else delete target.crop;
+
+        // the full clip is "no trim" — serialise nothing, like refs.py omits it
+        const nt = wantsTrim ? normalizeTrim(trim, duration) : null;
+        if (nt) target.trim = nt;
+        else delete target.trim;
+
+        mlog("edit_saved", { kind, file: ref.file, crop: nt === null && nc === null ? null : nc,
+                             trim: nt, cleared: nc === null && nt === null });
+        dropThumb(ref.file); // the tile re-fetches through the route with the edit
+        overlay.remove();
+        applyRefs(node, next);
+    };
+
+    footer.appendChild(cancelBtn);
+    footer.appendChild(saveBtn);
+    modal.appendChild(footer);
+
+    document.body.appendChild(overlay);
 }
 
 // ---------------------------------------------------------------------------

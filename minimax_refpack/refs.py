@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Literal
 
@@ -35,14 +34,46 @@ MAX_BY_KIND: dict[str, int] = {"image": MAX_IMAGES, "video": MAX_VIDEOS, "audio"
 
 KINDS: tuple[Kind, ...] = ("image", "video", "audio")
 
-PACK_DIR = "minimax_ref_packs"
-PACK_VERSION = 1
-
-_SAFE_PACK_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
-
 
 class ReferenceError(ValueError):
     """A reference set that MiniMax could not accept."""
+
+
+def validate_crop(crop: Any) -> list[float]:
+    """[x, y, w, h] as FRACTIONS of the source frame -> validated float list.
+
+    Fractions, not pixels, deliberately: the same filename gets re-uploaded at a
+    different resolution (nodes.py's _files_signature exists because of exactly that),
+    and a pixel rect would then silently point at the wrong region. Raises
+    ReferenceError unless the rect has positive area and sits inside the unit square.
+    """
+    if (
+        not isinstance(crop, (list, tuple)) or len(crop) != 4
+        or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in crop)
+    ):
+        raise ReferenceError(f"crop must be [x, y, w, h] fractions of the source, got {crop!r}")
+    x, y, w, h = (float(v) for v in crop)
+    if w <= 0.0 or h <= 0.0:
+        raise ReferenceError(f"crop has no area: {crop!r}")
+    # The 1e-9 absorbs float noise from a UI that rounds to 4 decimals, nothing more.
+    if x < 0.0 or y < 0.0 or x + w > 1.0 + 1e-9 or y + h > 1.0 + 1e-9:
+        raise ReferenceError(f"crop must sit inside 0..1 on both axes: {crop!r}")
+    return [x, y, w, h]
+
+
+def validate_trim(trim: Any) -> list[float]:
+    """[start_seconds, end_seconds] -> validated float list. 0 <= start < end."""
+    if (
+        not isinstance(trim, (list, tuple)) or len(trim) != 2
+        or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in trim)
+    ):
+        raise ReferenceError(f"trim must be [start_seconds, end_seconds], got {trim!r}")
+    start, end = (float(v) for v in trim)
+    if start < 0.0:
+        raise ReferenceError(f"trim start must be >= 0, got {start}")
+    if end <= start:
+        raise ReferenceError(f"trim end must come after its start, got {trim!r}")
+    return [start, end]
 
 
 @dataclass
@@ -55,11 +86,22 @@ class Reference:
     # ON by default - a reference video's sound is part of the reference, and a silent
     # clip is handled downstream (the probe clears the flag when there is no audio track).
     use_soundtrack: bool = True
+    # Optional edits, applied at load time (media.py). crop = [x, y, w, h] fractions of
+    # the source (see validate_crop for why not pixels); image and video only.
+    # trim = [start_seconds, end_seconds]; video and audio only. None = untouched, and
+    # both are OMITTED from to_dict() when unset so pre-edit references_json values and
+    # v1 pack files keep loading and re-serialising unchanged (PACK_VERSION stays 1).
+    crop: list[float] | None = None
+    trim: list[float] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"kind": self.kind, "file": self.file}
         if self.kind == "video":
             d["use_soundtrack"] = bool(self.use_soundtrack)
+        if self.crop is not None:
+            d["crop"] = list(self.crop)
+        if self.trim is not None:
+            d["trim"] = list(self.trim)
         return d
 
     @classmethod
@@ -70,10 +112,15 @@ class Reference:
         file = d.get("file")
         if not isinstance(file, str) or not file.strip():
             raise ReferenceError("reference is missing a file name")
+        crop = d.get("crop")
+        trim = d.get("trim")
         return cls(
             kind=kind,
             file=file.strip(),
             use_soundtrack=bool(d.get("use_soundtrack", True)) if kind == "video" else False,
+            # like use_soundtrack, an inapplicable field is dropped rather than fatal
+            crop=validate_crop(crop) if crop is not None and kind in ("image", "video") else None,
+            trim=validate_trim(trim) if trim is not None and kind in ("video", "audio") else None,
         )
 
 
@@ -204,115 +251,6 @@ class ReferenceSet:
         for t in self.assign_tags():
             out[t.file] = t.tag if t.audio_tag is None else f"{t.tag} {t.audio_tag}"
         return out
-
-
-# ---- packs -----------------------------------------------------------------
-
-
-@dataclass
-class Pack:
-    """A saved reference set. Lives at <input>/minimax_ref_packs/<name>.json."""
-
-    name: str
-    references: ReferenceSet
-    direction: str = ""
-    # Settings the pack was written with. Optional and defaulted to "" rather than
-    # versioned in, so packs saved before these existed still load - PACK_VERSION is a
-    # hard gate (from_dict rejects a mismatch outright), and bumping it would strand
-    # every pack already on disk for the sake of two additive fields.
-    model: str = ""
-    reasoning_effort: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "version": PACK_VERSION,
-            "name": self.name,
-            "direction": self.direction,
-            "model": self.model,
-            "reasoning_effort": self.reasoning_effort,
-            "references": [r.to_dict() for r in self.references.references],
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "Pack":
-        if not isinstance(d, dict):
-            raise ReferenceError("pack file is not a JSON object")
-        version = d.get("version")
-        if version != PACK_VERSION:
-            raise ReferenceError(
-                f"pack version {version!r} is not supported (this build reads v{PACK_VERSION})"
-            )
-        name = d.get("name")
-        if not isinstance(name, str) or not name.strip():
-            raise ReferenceError("pack is missing a name")
-        return cls(
-            name=name.strip(),
-            references=ReferenceSet.from_obj(d.get("references", [])),
-            direction=d.get("direction") or "",
-            model=d.get("model") or "",
-            reasoning_effort=d.get("reasoning_effort") or "",
-        )
-
-    @classmethod
-    def from_json(cls, raw: str) -> "Pack":
-        try:
-            return cls.from_dict(json.loads(raw))
-        except json.JSONDecodeError as e:
-            raise ReferenceError(f"pack file is not valid JSON: {e}") from e
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict(), indent=2)
-
-
-def validate_pack_name(name: str) -> str:
-    """Reject anything that could escape the pack directory or confuse the filesystem."""
-    name = (name or "").strip()
-    if not _SAFE_PACK_NAME.match(name):
-        raise ReferenceError(
-            "pack name must be 1-64 characters of letters, digits, space, dot, dash or underscore"
-        )
-    if name.startswith(".") or "/" in name or "\\" in name or ".." in name:
-        raise ReferenceError("invalid pack name")
-    return name
-
-
-def packs_dir(input_dir: str) -> str:
-    return os.path.join(input_dir, PACK_DIR)
-
-
-def pack_path(input_dir: str, name: str) -> str:
-    return os.path.join(packs_dir(input_dir), validate_pack_name(name) + ".json")
-
-
-def list_pack_names(input_dir: str) -> list[str]:
-    d = packs_dir(input_dir)
-    if not os.path.isdir(d):
-        return []
-    names = [f[:-5] for f in os.listdir(d) if f.endswith(".json")]
-    return sorted(names, key=str.lower)
-
-
-def load_pack(input_dir: str, name: str) -> Pack:
-    with open(pack_path(input_dir, name), "r", encoding="utf-8") as f:
-        return Pack.from_json(f.read())
-
-
-def save_pack(input_dir: str, pack: Pack) -> str:
-    path = pack_path(input_dir, pack.name)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".partial"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(pack.to_json())
-    os.replace(tmp, path)
-    return path
-
-
-def delete_pack(input_dir: str, name: str) -> bool:
-    path = pack_path(input_dir, name)
-    if os.path.isfile(path):
-        os.remove(path)
-        return True
-    return False
 
 
 # ---- output socket names ---------------------------------------------------
