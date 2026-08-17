@@ -18,6 +18,7 @@ to a hardcoded list, so the widget ORDER is stable either way.
 
 import json
 import pathlib
+import re
 
 import pytest
 
@@ -30,6 +31,14 @@ WORKFLOW_DIR = REPO_ROOT / "example_workflows"
 # to offer "Install Missing Custom Nodes"; without it the user gets an unresolvable
 # pack name and a dead end.
 REGISTRY_ID = "comfyui-minimaxrefpack"
+
+
+def _package_version() -> str:
+    """The version pyproject declares, which is what `comfy node publish` uploads."""
+    text = (REPO_ROOT / "pyproject.toml").read_text()
+    match = re.search(r'^version = "([^"]+)"', text, re.M)
+    assert match, "no version in pyproject.toml"
+    return match.group(1)
 
 WORKFLOWS = sorted(WORKFLOW_DIR.glob("*.json"))
 
@@ -103,3 +112,67 @@ def test_the_node_declares_its_registry_pack(path):
             "is published and installable."
         )
         assert properties.get("ver"), f"{path.name}: properties.ver is missing"
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_the_workflows_version_stamp_tracks_the_release(path):
+    """`properties.ver` must equal the version being published, on every release.
+
+    This is a chore that will otherwise be forgotten, so it is a test rather than a
+    habit. ComfyUI stamps this field from whatever the AUTHOR had installed, and a dev
+    checkout stamps a git SHA: the file handed over on 2026-08-17 carried
+    760cc261e7bc... which is 0.2.1, three releases stale. Shipping that means "Install
+    Missing Custom Nodes" resolves against an old git ref instead of the published
+    version, which is a quieter version of the "Unknown pack" bug 0.3.1 shipped with.
+    """
+    expected = _package_version()
+    for node in _pack_nodes(path):
+        properties = node.get("properties") or {}
+        assert properties.get("ver") == expected, (
+            f"{path.name}: properties.ver is {properties.get('ver')!r} but pyproject "
+            f"declares {expected!r}. Bump the workflow's ver when you bump the release."
+        )
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_the_workflows_claim_registry_provenance_not_a_git_checkout(path):
+    """`aux_id` is what ComfyUI stamps for a git-installed pack. A shipped workflow is
+    installed from the registry, so it carries `cnr_id` alone; having both invites the
+    frontend to resolve the wrong one."""
+    for node in _pack_nodes(path):
+        properties = node.get("properties") or {}
+        assert "aux_id" not in properties, (
+            f"{path.name}: properties carries aux_id={properties.get('aux_id')!r}, which "
+            "means this was saved from a dev checkout rather than a registry install"
+        )
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_no_link_points_at_a_node_that_is_not_there(path):
+    """Deleting a node by hand can leave a link behind, which breaks the graph on load."""
+    graph = json.loads(path.read_text())
+    ids = {n["id"] for n in graph.get("nodes", [])}
+    dangling = [l for l in graph.get("links", []) if l[1] not in ids or l[3] not in ids]
+    assert not dangling, f"{path.name}: {len(dangling)} link(s) reference a missing node"
+
+
+# Preview nodes cache their last result INTO the saved graph. Whatever the author last
+# generated therefore ships with the workflow. On 2026-08-17 that was 2,910 characters of
+# explicit generated prose sitting in a Display Any node, which would have gone to a
+# public repo and the ComfyUI registry listing. The direction field had already been
+# cleaned by hand; this one was invisible because nobody thinks of a display as content.
+PREVIEW_NODES = ("Display Any (rgthree)", "PreviewAny", "ShowText|pysssss", "Note")
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_preview_nodes_ship_empty(path):
+    graph = json.loads(path.read_text())
+    for node in graph.get("nodes", []):
+        if node.get("type") not in PREVIEW_NODES:
+            continue
+        for value in node.get("widgets_values") or []:
+            assert not (isinstance(value, str) and value.strip()), (
+                f"{path.name}: {node['type']} carries {len(value)} chars of a previous "
+                "run. Clear it before shipping: whatever you last generated goes public "
+                "with the workflow."
+            )
