@@ -2,7 +2,7 @@
 
 One node that manages every reference for **MiniMax H3 Reference to Video**, writes the prompt for you, and saves the whole setup to a file you can carry between installs.
 
-![The MiniMax References Manager node](assets/node.png)
+![The MiniMax References Manager node, running against a local server](assets/node.png)
 
 ## Features
 
