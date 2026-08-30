@@ -796,3 +796,25 @@ def test_a_free_angle_turns_the_same_way_the_quarter_turns_do():
         f"top-right {top_right:.1f} should hold the white block after a clockwise turn, "
         f"top-left has {top_left:.1f} - the angle is going the wrong way"
     )
+
+
+def test_the_thumbnail_applies_the_exif_rotation_like_the_socket_does(tmp_path):
+    """The tile and the crop editor both render through thumbnail_png, and the sockets
+    render through load_image. If only one of them honours EXIF orientation, a phone photo
+    shows one frame and emits another - so a crop drawn on the tile selects a region the
+    user never saw. That is the exact mismatch the orient-then-crop order exists to
+    prevent, one step earlier in the pipeline."""
+    from PIL import Image
+    import io as _io
+
+    # 40x20 landscape pixels tagged orientation 6 = "rotate 90 CW to display" -> 20x40.
+    src = tmp_path / "phone.jpg"
+    img = Image.new("RGB", (40, 20), (10, 20, 30))
+    exif = img.getexif()
+    exif[274] = 6
+    img.save(src, "JPEG", exif=exif)
+
+    with Image.open(_io.BytesIO(media.thumbnail_png(str(src), max_edge=512))) as thumb:
+        assert thumb.size == (20, 40), (
+            "the thumbnail must be upright, matching what load_image puts on the socket"
+        )

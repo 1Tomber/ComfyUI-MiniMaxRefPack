@@ -547,7 +547,14 @@ def _build_content(
             data, mime = media.video_clip_bytes(path, crop=t.ref.crop, trim=t.ref.trim,
                                                 flip=t.ref.flip, rotate=t.ref.rotate,
                                                 rotate_expand=t.ref.rotate_expand)
-            edited = t.ref.crop is not None or t.ref.trim is not None
+            # "Did the FILE'S OWN BYTES go on the wire?" - which is what decides whether
+            # its soundtrack is already in there. Orientation belongs in this test for the
+            # same reason crop and trim do: media.video_clip_bytes re-encodes an oriented
+            # clip through _transcode_window, and that is VIDEO ONLY. Leaving rotate/flip
+            # out meant a rotated clip sent silent video while the manifest still told the
+            # model "the soundtrack is inside <Video N>" - so <Audio N> was declared from
+            # nothing and the sound was simply lost.
+            edited = t.ref.crop is not None or t.ref.trim is not None or t.ref.oriented
             parts.append(
                 _text_part(f"video_reference {t.tag} ({t.file}) - the next video, whole:")
             )

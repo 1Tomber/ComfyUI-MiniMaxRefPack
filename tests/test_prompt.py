@@ -1270,3 +1270,36 @@ def test_subject_numbers_are_passed_through_as_chosen(tmp_path, monkeypatch):
     text = _grouping_text(_content(refs, tmp_path))
     assert "<Subject 5> = <Picture 2>" in text
     assert "<Subject 2>" not in text, "picking 1 and 5 must not be renumbered to 1 and 2"
+
+def test_an_oriented_clip_sends_its_soundtrack_separately(tmp_path, monkeypatch):
+    """media.video_clip_bytes re-encodes an oriented clip, and that path is VIDEO ONLY.
+    So the soundtrack is no longer inside the bytes and has to be sent as its own part -
+    otherwise the sound is silently dropped AND the manifest tells the model it is in
+    there, defining <Audio N> from nothing."""
+    monkeypatch.setattr(prompt.media, "load_image", fake_load_image, raising=False)
+    monkeypatch.setattr(prompt.media, "load_video", fake_load_video_with_audio, raising=False)
+    monkeypatch.setattr(prompt.media, "video_clip_bytes", fake_video_clip_bytes, raising=False)
+    (tmp_path / "v.mp4").write_bytes(b"x")
+
+    refs = ReferenceSet([Reference(kind="video", file="v.mp4", use_soundtrack=True, rotate=90)])
+    content = prompt._build_content(refs, str(tmp_path), "d")
+    text = content[0]["text"]
+
+    assert not any("soundtrack inside" in p.get("text", "") for p in content), \
+        "the manifest must not claim the sound is inside a re-encoded clip"
+    assert "soundtrack inside" not in text
+    assert any(p.get("type") == "input_audio" for p in content), \
+        "the soundtrack must ride as its own part once the clip is re-encoded"
+
+
+def test_an_untouched_clip_still_keeps_its_soundtrack_inside_the_file(tmp_path, monkeypatch):
+    """The other half: sending the WAV too would bill the same sound twice."""
+    monkeypatch.setattr(prompt.media, "load_image", fake_load_image, raising=False)
+    monkeypatch.setattr(prompt.media, "load_video", fake_load_video_with_audio, raising=False)
+    monkeypatch.setattr(prompt.media, "video_clip_bytes", fake_video_clip_bytes, raising=False)
+    (tmp_path / "v.mp4").write_bytes(b"x")
+
+    refs = ReferenceSet([Reference(kind="video", file="v.mp4", use_soundtrack=True)])
+    content = prompt._build_content(refs, str(tmp_path), "d")
+    assert "soundtrack inside" in content[0]["text"]
+    assert not any(p.get("type") == "input_audio" for p in content)
