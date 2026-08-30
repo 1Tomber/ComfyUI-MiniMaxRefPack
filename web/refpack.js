@@ -441,6 +441,28 @@ export function mirrorCropRect(rect, axis) {
     return rect;
 }
 
+// The SCREEN axis the user clicked, translated into the SOURCE axis that produces it.
+//
+// The pipeline is exif -> flip -> rotate -> crop, so `flip` is stored in the SOURCE frame
+// while the mirror buttons and the crop rect both live in the DISPLAYED one. Those frames
+// only agree at 0 and 180. At 90 and 270 they are transposed, so clicking "mirror
+// left-right" stored a source `h` flip that shows up on screen as a TOP-BOTTOM mirror -
+// the wrong visual - while the crop rect was reflected left-right, which is the wrong
+// axis for the pixels that actually moved. The box then covered different pixels than the
+// ones inside it when it was drawn.
+//
+// Verified against the real media._orient_pil for all four quarter turns: the axis swaps
+// exactly when the nearest quarter turn is odd.
+//
+// Off the quarter turns there is no exact answer - a source-axis flip composed with an
+// arbitrary rotation is a mirror about a slanted line, which is neither h nor v on screen
+// - so the nearest quarter turn is used, which is exact wherever exactness exists.
+export function sourceFlipAxis(axis, rotate) {
+    const quarter = (((Math.round((Number(rotate) || 0) / 90) % 4) + 4) % 4);
+    if (quarter % 2 === 0) return axis;
+    return axis === "h" ? "v" : "h";
+}
+
 // Toggle one mirror axis on or off, normalising to refs.py's spelling ("h"/"v"/"hv").
 export function toggleFlipAxis(flip, axis) {
     const has = { h: false, v: false };
@@ -2186,8 +2208,10 @@ function openEditModal(node, kind, index) {
             b.title = title;
             b.onclick = () => {
                 stopPlayback();
-                flip = toggleFlipAxis(flip, axis);
-                // Mirroring reflects the rect across the same axis, for the same reason.
+                // `axis` is what the user SEES; flip is stored in the source frame,
+                // and those differ by a transpose at 90 and 270. The rect stays on the
+                // clicked axis because the crop is applied after the rotation.
+                flip = toggleFlipAxis(flip, sourceFlipAxis(axis, rotate));
                 crop = mirrorCropRect(crop, axis);
                 applyOrientation();
                 syncCropRect();
