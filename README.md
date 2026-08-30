@@ -176,6 +176,21 @@ Two things it does that are easy to miss:
   re-encoded first, because the sockets emit the rotated frames and showing the model the
   unrotated original would let it describe a video you are not generating.
 
+**Any angle, not just quarter turns.** The slider beside the buttons rotates freely and
+snaps to 0/90/180/270 within a few degrees — snapping matters because a quarter turn is
+*lossless* (the pixels are re-indexed, not resampled) while any other angle re-renders
+every frame of a clip, so a slider parked on 89.6° would cost a full re-encode and look
+identical.
+
+**Fit inside** decides what happens to the corners. Off (the default), the whole rotated
+frame is kept and the empty corners are filled black. On, the result is bound to the
+source's extent and the overhang is cropped away.
+
+One thing a free angle deliberately does *not* do: rotate your crop rect with it. A
+quarter turn maps a rect exactly; an arbitrary angle leaves it no longer axis-aligned,
+and quietly substituting its bounding box would select pixels you never chose. The rect
+stays where it is in the rotated frame — which is where the editor draws it.
+
 ## The tag rule
 
 Worth reading once, because the numbering is what your prompt text refers to and it is

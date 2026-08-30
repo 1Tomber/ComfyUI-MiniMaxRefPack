@@ -820,6 +820,21 @@ export function mirrorCropRect(rect, axis) {
     return rect;
 }
 
+// A slider position -> the angle actually stored.
+//
+// Snapping matters for a reason beyond tidiness: a quarter turn is LOSSLESS (transpose /
+// strides) while anything else resamples every frame. A slider parked on 89.6 would cost
+// a full re-render of a clip and look identical, so the snap is what keeps the cheap path
+// reachable by hand. `tolerance` is 0 when the user asks for a free angle explicitly.
+export function snapAngle(value, tolerance = 3) {
+    const raw = ((Number(value) % 360) + 360) % 360;
+    if (!tolerance) return raw;
+    for (const stop of [0, 90, 180, 270, 360]) {
+        if (Math.abs(raw - stop) <= tolerance) return stop % 360;
+    }
+    return raw;
+}
+
 // Toggle one mirror axis on or off, normalising to refs.py's spelling ("h"/"v"/"hv").
 export function toggleFlipAxis(flip, axis) {
     const has = { h: false, v: false };
@@ -2772,7 +2787,9 @@ function openEditModal(node, kind, index) {
     let crop = Array.isArray(ref.crop) ? ref.crop.slice() : [0, 0, 1, 1];
     let rotate = Number.isFinite(ref.rotate) ? ref.rotate : 0;
     let flip = ref.flip || null;
+    let expand = ref.rotate_expand !== false;
     let clearRotateBtn = null;
+    let syncAngleRef = () => {};
     let trim = Array.isArray(ref.trim) ? ref.trim.slice() : null; // null until duration known
     let duration = null;
     let ratio = null; // aspect lock; null = free
@@ -2809,6 +2826,10 @@ function openEditModal(node, kind, index) {
             const fit = Math.min(1, mediaH / mediaW, mediaW / mediaH) || 1;
             mediaWrap.style.transform += ` scale(${fit})`;
         }
+        // "Fit inside" clips the overhang to the source's extent, which is what the
+        // server does with rotate_expand: false. Showing the overhang while the node
+        // would drop it is the same class of lie as cropping before rotating.
+        mediaWrap.style.clipPath = (!expand && rotate) ? "inset(0)" : "";
     };
 
     const overlay = document.createElement("div");
@@ -2850,7 +2871,7 @@ function openEditModal(node, kind, index) {
     mediaWrap.className = "mmrp-edit-media-wrap";
     // A reference that already carries an orientation must open showing it, or the first
     // thing the modal does is misrepresent the reference.
-    setTimeout(() => applyOrientation(), 0);
+    setTimeout(() => { applyOrientation(); syncAngleRef(); }, 0);
     mediaWrap.appendChild(media);
     stage.appendChild(mediaWrap);
     modal.appendChild(stage);
@@ -2989,6 +3010,7 @@ function openEditModal(node, kind, index) {
             // by "turn it", and it is exact for a quarter turn.
             crop = rotateCropRect(crop, delta);
             applyOrientation();
+            syncAngleRef();
             syncCropRect();
             syncClears();
         };
@@ -3019,6 +3041,60 @@ function openEditModal(node, kind, index) {
             orow.appendChild(b);
         }
 
+        // Free angle. The quarter-turn buttons stay: they are two clicks for the case
+        // that is both common and lossless, and dragging to exactly 90 is fiddly.
+        const angle = document.createElement("input");
+        angle.type = "range";
+        angle.className = "mmrp-angle";
+        angle.min = "-180";
+        angle.max = "180";
+        angle.step = "0.5";
+        angle.title = "Free rotation. Snaps to the quarter turns, which are lossless.";
+        const angleOut = document.createElement("span");
+        angleOut.className = "mmrp-angle-out";
+        const syncAngle = () => {
+            angleOut.textContent = `${rotate ? (rotate > 180 ? rotate - 360 : rotate).toFixed(1) : "0.0"}°`;
+            const shown = rotate > 180 ? rotate - 360 : rotate;
+            if (Number(angle.value) !== shown) angle.value = String(shown);
+            // Only a free angle can spill outside the source, so the fit toggle is dead
+            // weight on a quarter turn and says so rather than sitting there inert.
+            const free = !!rotate && Math.abs((rotate % 90)) > 1e-6;
+            fitBox.disabled = !free;
+            fitRow.classList.toggle("mmrp-dim", !free);
+        };
+        angle.oninput = () => {
+            stopPlayback();
+            // The crop rect is NOT rotated with a free angle. A quarter turn maps the
+            // rect exactly; an arbitrary angle does not - the rotated rect is no longer
+            // axis-aligned, and silently substituting its bounding box would quietly
+            // select pixels the user never chose. The rect stays where it is, in the
+            // rotated frame, which is where the editor draws it.
+            rotate = snapAngle(angle.value);
+            applyOrientation();
+            syncAngle();
+            syncClears();
+        };
+        syncAngleRef = syncAngle;
+        orow.appendChild(angle);
+        orow.appendChild(angleOut);
+
+        const fitRow = document.createElement("label");
+        fitRow.className = "mmrp-fit";
+        const fitBox = document.createElement("input");
+        fitBox.type = "checkbox";
+        fitBox.checked = ref.rotate_expand === false;
+        fitBox.onchange = () => {
+            stopPlayback();
+            expand = !fitBox.checked;
+            applyOrientation();
+        };
+        fitRow.appendChild(fitBox);
+        fitRow.appendChild(document.createTextNode(" Fit inside"));
+        fitRow.title =
+            "Off: keep the whole rotated frame and fill the corners black. " +
+            "On: bind the result to the source's extent, cropping the overhang.";
+        orow.appendChild(fitRow);
+
         clearRotateBtn = document.createElement("button");
         clearRotateBtn.className = "mmrp-btn mmrp-clear-btn";
         clearRotateBtn.textContent = "Clear rotation";
@@ -3027,7 +3103,9 @@ function openEditModal(node, kind, index) {
             mlog("edit_cleared", { file: ref.file, what: "rotation" });
             rotate = 0;
             flip = null;
+            expand = true;
             applyOrientation();
+            syncAngleRef();
             syncCropRect();
             syncClears();
         };
@@ -3317,7 +3395,9 @@ function openEditModal(node, kind, index) {
         else delete target.rotate;
         if (wantsCrop && flip) target.flip = flip;
         else delete target.flip;
-        if (!nr) delete target.rotate_expand;
+        // Only meaningful alongside a rotation, and only when it differs from the default.
+        if (nr && !expand) target.rotate_expand = false;
+        else delete target.rotate_expand;
 
         mlog("edit_saved", { kind, file: ref.file, crop: nt === null && nc === null ? null : nc,
                              trim: nt, rotate: nr || null, flip: flip || null,
