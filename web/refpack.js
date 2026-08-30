@@ -486,18 +486,30 @@ export function fromReferencesList(list) {
     // directions whitelist, so a field missing from here is dropped between the widget and
     // the working state - which presents as "the edit did not save" rather than as an
     // error, and is worth naming in one place for that reason.
-    const extras = (r) => ({
-            // Sorted and de-duplicated on the way IN, mirroring refs.validate_subjects.
-            // Without it a hand-edited or older value renders as "2 1" on the pill while
-            // the server uses [1, 2] - the UI and the payload disagreeing about the same
-            // reference, which is the exact failure the tag rule's JS mirror exists to
-            // avoid elsewhere.
-            ...(Array.isArray(r.subjects) && r.subjects.length
-                ? { subjects: [...new Set(r.subjects.filter((n) => Number.isInteger(n)
-                                                            && n >= 1 && n <= 9))]
-                        .sort((a, b) => a - b) }
-                : {}),
-    });
+    // Sorted and de-duplicated on the way IN, mirroring refs.validate_subjects. Without
+    // it a hand-edited or older value renders as "2 1" on the pill while the server uses
+    // [1, 2] - the UI and the payload disagreeing about the same reference, which is the
+    // exact failure the tag rule's JS mirror exists to avoid elsewhere.
+    //
+    // A number OUTSIDE 1..9 is a different matter, and it used to vanish in silence.
+    // refs.validate_subjects RAISES for it, so a references_json written by hand with
+    // subjects: [1, 10] renders as perfectly fine here and then fails the whole node the
+    // moment it is queued - and the first edit rewrites the widget without the bad value,
+    // taking the evidence with it. Dropping is still right, because keeping it would mean
+    // the browser accepting what the server refuses; doing it quietly is not.
+    const extras = (r) => {
+        if (!Array.isArray(r.subjects) || !r.subjects.length) return {};
+        const kept = r.subjects.filter((n) => Number.isInteger(n) && n >= 1 && n <= 9);
+        const dropped = r.subjects.filter((n) => !kept.includes(n));
+        if (dropped.length) {
+            console.warn(
+                `[MiniMaxRefPack] ignoring subjects ${JSON.stringify(dropped)} on ` +
+                `${r.file}: refs.py accepts whole numbers 1-9 only, so they were dropped ` +
+                "rather than sent"
+            );
+        }
+        return kept.length ? { subjects: [...new Set(kept)].sort((a, b) => a - b) } : {};
+    };
     for (const r of list || []) {
         if (!r || typeof r.file !== "string") continue;
         if (r.kind === "image")
