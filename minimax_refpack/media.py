@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import mimetypes
+import os
 
 from . import logs
 
@@ -206,12 +207,36 @@ def _widen_to(lo: int, hi: int, minimum: int, limit: int) -> tuple[int, int]:
     return max(0, hi - minimum), hi
 
 
-def _slice_audio(audio: dict, trim) -> dict:
+def _slice_audio(audio: dict, trim, path: str = "") -> dict:
     """Slice a {"waveform","sample_rate"} dict to [start, end) seconds. Returns a NEW
-    dict - callers may still hold the unsliced original."""
+    dict - callers may still hold the unsliced original.
+
+    Bounds-checked, because the same situation on the video side raises and names the file
+    and the window (see load_video's minimum-frames guard) while this silently returned a
+    ZERO-SAMPLE waveform. Nothing downstream notices: the socket emits it, the timed log
+    records ok=true, and _waveform_to_wav_b64 happily encodes a valid empty wav for the
+    model. The user is told nothing at all, about audio that is simply not there.
+    """
     sr = audio["sample_rate"]
     start, end = trim
-    return {"waveform": audio["waveform"][..., int(start * sr):int(end * sr)], "sample_rate": sr}
+    waveform = audio["waveform"]
+    shape = getattr(waveform, "shape", None)
+    total = int(shape[-1]) if shape else None
+    length = (total / sr) if (total is not None and sr) else None
+
+    if length is not None and start >= length:
+        raise ValueError(
+            f"reference audio {path!r} trimmed to {start:.2f}-{end:.2f}s starts past the "
+            f"end of the clip ({length:.2f}s) - the trim would emit no audio at all"
+        )
+    if length is not None and end > length + 1e-9:
+        # A window that merely overruns the end still has real samples in it, so it is
+        # honoured rather than refused - but not in silence, because "my trim said 6s and
+        # I got 2" is otherwise indistinguishable from a decoder problem.
+        logs.log("audio_trim_clipped", file=os.path.basename(path) if path else None,
+                 requested_end=round(end, 3), clip_seconds=round(length, 3))
+
+    return {"waveform": waveform[..., int(start * sr):int(end * sr)], "sample_rate": sr}
 
 
 def _guess_kind(path: str) -> str:
@@ -290,7 +315,7 @@ def load_audio(path: str, trim=None) -> dict:
         waveform, sample_rate = _audio_load_fn()(path)
         audio = {"waveform": waveform.unsqueeze(0), "sample_rate": sample_rate}
         if trim is not None:
-            audio = _slice_audio(audio, trim)
+            audio = _slice_audio(audio, trim, path)
         fields["sample_rate"] = sample_rate
         return audio
 
@@ -358,7 +383,7 @@ def _decode_video(path, target_fps, crop, trim, fields, flip=None, rotate=None,
         left, top, right, bottom = _crop_box(crop, out.shape[2], out.shape[1])
         out = out[:, top:bottom, left:right, :]
     if trim is not None and audio is not None:
-        audio = _slice_audio(audio, trim)
+        audio = _slice_audio(audio, trim, path)
     fields["frames"] = len(indices)
     fields["audio"] = audio is not None
     return out, audio

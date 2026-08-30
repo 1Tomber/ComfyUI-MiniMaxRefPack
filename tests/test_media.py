@@ -946,3 +946,65 @@ def test_thumbnail_png_is_unchanged_when_the_stream_starts_at_zero(monkeypatch):
     assert fake.seeks == [(180000, fake.stream)]
     with Image.open(BytesIO(out)) as thumb:
         assert thumb.getpixel((5, 5)) == (0, 0, 255)
+
+# ---- a trim that runs past the end of the audio --------------------------------------
+
+
+def _audio(seconds, sr=1000):
+    import numpy as np
+
+    return {"waveform": np.zeros((1, 1, int(seconds * sr)), dtype=np.float32),
+            "sample_rate": sr}
+
+
+def test_a_trim_entirely_past_the_end_is_refused():
+    """It used to return a ZERO-SAMPLE waveform in silence, and nothing downstream
+    noticed: the socket emits it, the timed log records ok=true, and the wav encoder
+    happily produces a valid empty file for the model. The video side raises and names the
+    file for the same situation - this now matches it."""
+    with pytest.raises(ValueError) as excinfo:
+        media._slice_audio(_audio(1.0), [2.0, 3.0], "vo.wav")
+    message = str(excinfo.value)
+    assert "vo.wav" in message, "the message has to name the file"
+    assert "2.00-3.00" in message, "and the window that was asked for"
+    assert "1.00" in message, "and the length it actually has"
+
+
+def test_a_trim_that_only_overruns_the_end_is_honoured():
+    """There are real samples in that window, so refusing would be worse than clipping.
+    What it must not do is clip in silence - see the log assertion below."""
+    out = media._slice_audio(_audio(1.0), [0.5, 5.0], "vo.wav")
+    assert out["waveform"].shape[-1] == 500
+
+
+def test_clipping_the_end_is_recorded(caplog):
+    """"My trim said 5s and I got 0.5" is otherwise indistinguishable from a decoder
+    problem, and this is the only place that knows which it was."""
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="MiniMaxRefPack"):
+        media._slice_audio(_audio(1.0), [0.5, 5.0], "vo.wav")
+    assert any("audio_trim_clipped" in r.getMessage() for r in caplog.records), (
+        "a clipped trim must leave a trace"
+    )
+
+
+@pytest.mark.parametrize("trim,expected", [
+    ([0.0, 1.0], 1000),      # exactly the clip
+    ([0.25, 0.75], 500),     # well inside
+    ([0.0, 0.001], 1),       # the smallest real window
+])
+def test_a_trim_inside_the_clip_is_unaffected(trim, expected):
+    """The guard must not have become a refusal of anything near the boundary."""
+    assert media._slice_audio(_audio(1.0), trim, "vo.wav")["waveform"].shape[-1] == expected
+
+
+def test_a_waveform_that_cannot_report_its_length_is_left_alone():
+    """Not every stand-in for a tensor exposes .shape - the loaders are swappable, and a
+    guard that cannot measure must not start refusing valid work."""
+    class Opaque:
+        def __getitem__(self, key):
+            return "sliced"
+
+    out = media._slice_audio({"waveform": Opaque(), "sample_rate": 1000}, [9.0, 10.0])
+    assert out["waveform"] == "sliced"
