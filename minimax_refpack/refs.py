@@ -293,6 +293,28 @@ def output_types() -> tuple[str, ...]:
     return tuple(types)
 
 
+# The one custom socket type this pack defines. A single link of this type carries the
+# whole media set, so the compact node needs one outgoing wire where the original needs
+# eighteen. ComfyUI matches link types by string, so a name nothing else uses is the whole
+# of the safety here.
+PACK_TYPE = "MMRP_PACK"
+
+
+def media_output_names() -> tuple[str, ...]:
+    """The 18 media sockets, without `prompt` and `debug`.
+
+    What the pack carries, and what the unpacker re-emits. prompt and debug stay their own
+    outputs on the compact node: the prompt usually goes somewhere other than the
+    generation node, and debug almost always goes to a text preview, so bundling them
+    would just mean unpacking them again next door.
+    """
+    return output_names()[: -len(_STRING_OUTPUTS)]
+
+
+def media_output_types() -> tuple[str, ...]:
+    return output_types()[: -len(_STRING_OUTPUTS)]
+
+
 def slot_index(name: str) -> int:
     """Index of an output socket by name, for building the 20-tuple."""
     return output_names().index(name)

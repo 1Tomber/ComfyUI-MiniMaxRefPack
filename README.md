@@ -19,6 +19,31 @@ One node that manages every reference for **MiniMax H3 Reference to Video**, wri
 - **Honest about what it sent.** A local server takes text and images but not video or audio, so a clip goes as sampled frames with no sound. The node says so on the canvas, in the log and in `debug`, and it tells the prompt writer not to describe motion or voices it never received.
 - **Prompt passthrough.** Set `prompt_provider` to `none` and your direction text goes straight to the `prompt` output with no API call.
 
+## One wire instead of eighteen
+
+Wiring the manager into `MiniMax H3 Reference to Video` means eighteen links running the
+width of your graph. **MiniMax References Manager (Compact)** is the same node with the
+media on a single `pack` output; **MiniMax References Unpack** fans it back out. Put the
+unpacker next to the generation node and the long run is one link, with the eighteen short
+ones between two adjacent nodes.
+
+```
+[References Manager (Compact)] ──pack──────────────▶ [Unpack] ═══▶ [MiniMax H3 Ref2Video]
+                               └─prompt──────────────────────────▶
+```
+
+`prompt` and `debug` stay their own outputs on the compact node, because the prompt often
+goes somewhere other than the generation node and `debug` goes to a text preview — putting
+them in the pack would only mean unpacking them again next door.
+
+It is a **separate node**, not a change to the original. ComfyUI stores a link by its
+output *slot index*, so dropping eighteen sockets from the existing node would silently
+re-point every link in every saved workflow. Both share one implementation — same widgets,
+same UI, same everything but the output shape — so there is nothing to keep in step.
+
+`pack` has its own link type, so it cannot be wired into an `IMAGE` or `AUDIO` input by
+mistake.
+
 ## Do I need an API key?
 
 No. `prompt_provider` picks who writes the prompt, and two of its three settings need no account at all.

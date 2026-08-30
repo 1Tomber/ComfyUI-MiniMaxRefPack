@@ -252,7 +252,15 @@ class MiniMaxH3ReferencePack:
             str(api_base), str(local_model_slug),
         ])
 
-    def build(
+    def build(self, **kwargs):
+        """The original node's shape: all 20 sockets, one per reference slot.
+
+        Both node classes share `_build_outputs` below and differ only in how they present
+        its result - there is one implementation of what this node DOES.
+        """
+        return tuple(self._build_outputs(**kwargs))
+
+    def _build_outputs(
         self, direction="", openrouter_api_key="", openrouter_model="", references_json="",
         system_prompt="", width=0, height=0, length_seconds=0.0,
         prompt_provider=endpoint.DEFAULT_PROVIDER,
@@ -406,10 +414,82 @@ class MiniMaxH3ReferencePack:
         outputs[refs.slot_index("debug")] = debug_text
         logs.log("build_done", prompt_chars=len(prompt_text),
                  ms=(time.perf_counter() - started) * 1000.0)
-        return tuple(outputs)
+        return outputs
 
 
-NODE_CLASS_MAPPINGS = {"MiniMaxH3ReferencePack": MiniMaxH3ReferencePack}
+class MiniMaxH3ReferencePackCompact(MiniMaxH3ReferencePack):
+    """The same manager, emitting the media as ONE socket instead of eighteen.
+
+    Wire `pack` into MiniMaxH3ReferenceUnpack, sit that next to the generation node, and
+    the long run across the graph is a single link rather than eighteen. `prompt` and
+    `debug` stay their own outputs: the prompt usually goes somewhere other than the
+    generation node and debug goes to a text preview, so bundling them would only mean
+    unpacking them again next door.
+
+    A SEPARATE CLASS rather than a change to the original, because ComfyUI stores a link by
+    its output SLOT INDEX. Dropping eighteen sockets from the existing node would silently
+    re-point every link in every saved workflow; a new class key is invisible to them. It
+    inherits everything - widgets, IS_CHANGED, the whole build - so there is one
+    implementation to maintain, not two.
+    """
+
+    RETURN_TYPES = (refs.PACK_TYPE, "STRING", "STRING")
+    RETURN_NAMES = ("pack", "prompt", "debug")
+    FUNCTION = "build_compact"
+
+    def build_compact(self, **kwargs):
+        outputs = self._build_outputs(**kwargs)
+        # Keyed by socket name, not positional: the unpacker reads it by name, so the two
+        # cannot drift the way two parallel lists would.
+        media = {name: outputs[refs.slot_index(name)] for name in refs.media_output_names()}
+        return (media, outputs[refs.slot_index("prompt")], outputs[refs.slot_index("debug")])
+
+
+class MiniMaxH3ReferenceUnpack:
+    """Fans a `pack` back out to the 18 reference sockets, to sit beside the target node.
+
+    Deliberately trivial and stateless. It exists to move the eighteen wires from "across
+    the graph" to "between two adjacent nodes", nothing more.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "pack": (refs.PACK_TYPE, {
+                    "tooltip": "The `pack` output of MiniMax References Manager (Compact).",
+                }),
+            },
+        }
+
+    RETURN_TYPES = refs.media_output_types()
+    RETURN_NAMES = refs.media_output_names()
+    FUNCTION = "unpack"
+    CATEGORY = "MiniMax H3"
+    DESCRIPTION = ("Fans the packed reference set back out to MiniMax H3's 18 reference "
+                   "sockets. Put it next to the generation node.")
+
+    def unpack(self, pack):
+        # A missing key emits None, which is what an empty slot has always been - the
+        # target node skips None per reference group. So a pack from an older or partial
+        # producer degrades to "fewer references" rather than failing to queue.
+        if not isinstance(pack, dict):
+            raise ValueError(
+                "pack input is not a reference pack: wire it to the `pack` output of "
+                "MiniMax References Manager (Compact)."
+            )
+        return tuple(pack.get(name) for name in refs.media_output_names())
+
+
+NODE_CLASS_MAPPINGS = {
+    "MiniMaxH3ReferencePack": MiniMaxH3ReferencePack,
+    "MiniMaxH3ReferencePackCompact": MiniMaxH3ReferencePackCompact,
+    "MiniMaxH3ReferenceUnpack": MiniMaxH3ReferenceUnpack,
+}
 # The class key stays MiniMaxH3ReferencePack forever — it is what saved workflows
 # reference. Only the human-facing label changes.
-NODE_DISPLAY_NAME_MAPPINGS = {"MiniMaxH3ReferencePack": "MiniMax References Manager"}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "MiniMaxH3ReferencePack": "MiniMax References Manager",
+    "MiniMaxH3ReferencePackCompact": "MiniMax References Manager (Compact)",
+    "MiniMaxH3ReferenceUnpack": "MiniMax References Unpack",
+}

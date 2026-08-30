@@ -88,7 +88,12 @@
 
 import { app } from "../../scripts/app.js";
 
-const NODE_NAME = "MiniMaxH3ReferencePack";
+// Both manager variants get this whole UI. They are the same node with different output
+// shapes - the compact one emits the media as a single `pack` socket - so the canvas, the
+// modals and every widget are identical, and gating on one name would leave the compact
+// variant a bare widget stack.
+const NODE_NAMES = ["MiniMaxH3ReferencePack", "MiniMaxH3ReferencePackCompact"];
+const NODE_NAME = NODE_NAMES[0];
 
 // ---------------------------------------------------------------------------
 // 0.3.1 -> 0.3.2 widget migration.
@@ -2748,7 +2753,7 @@ app.registerExtension({
     name: "MiniMaxRefPack.RefManager",
 
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== NODE_NAME) return;
+        if (!NODE_NAMES.includes(nodeData.name)) return;
 
         const origOnNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
