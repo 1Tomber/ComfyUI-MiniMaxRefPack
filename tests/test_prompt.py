@@ -1133,3 +1133,68 @@ def test_the_logged_payload_size_counts_the_video():
     ]
 
     assert prompt._payload_bytes(parts) == 10 + len("data:video/mp4;base64,") + 1000
+
+
+# ---- the debug render has to describe what was actually sent -------------------------
+
+
+def _render_with(parts):
+    return prompt.render_payload({
+        "model": "google/gemini-3-flash",
+        "messages": [{"role": "user", "content": parts}],
+    })
+
+
+def test_a_video_part_is_described_not_dismissed():
+    """video_url is what _video_part emits for every video on the OpenRouter path - the
+    pack's headline feature - and it fell through to "(unrecognized part type)".
+
+    The debug socket's contract is that the reader sees the shape that was actually sent,
+    so the one part type most worth checking was the one it would not describe: no mime,
+    no size, no data-URI prefix. And it is the part most likely to be the problem, being
+    by far the largest thing on the wire.
+    """
+    out = _render_with([
+        {"type": "video_url", "video_url": {"url": "data:video/mp4;base64," + "A" * 400}},
+    ])
+    assert "(unrecognized part type)" not in out
+    assert "video/mp4" in out
+    assert "~300 bytes" in out
+    assert "data:video/mp4;base64,<BASE64_STRING>" in out, "the base64 is still stubbed out"
+    assert "A" * 400 not in out, "the payload itself must never be printed"
+
+
+def test_a_video_part_is_described_the_same_way_an_image_is():
+    """They are the same shape of value, so they get the same description - a debug render
+    nobody cross-checks is exactly where two spellings of one thing go unnoticed."""
+    image = _render_with([{"type": "image_url",
+                           "image_url": {"url": "data:image/png;base64," + "A" * 400}}])
+    video = _render_with([{"type": "video_url",
+                           "video_url": {"url": "data:video/mp4;base64," + "A" * 400}}])
+    assert image.replace("image_url", "X").replace("image/png", "Y") == \
+        video.replace("video_url", "X").replace("video/mp4", "Y")
+
+
+def test_a_genuinely_unknown_part_is_still_reported_as_unknown():
+    """The point was never to stop saying "unrecognized" - it was that video was not
+    unrecognized. A new type nobody has taught this about must still say so."""
+    out = _render_with([{"type": "some_future_type", "whatever": 1}])
+    assert "(unrecognized part type)" in out
+    assert "some_future_type" in out
+
+
+def test_a_video_part_without_a_data_url_does_not_crash():
+    """A remote URL is a legal part; the render must degrade rather than raise, because it
+    only ever runs while someone is trying to understand a failure."""
+    out = _render_with([{"type": "video_url",
+                         "video_url": {"url": "https://example.com/clip.mp4"}}])
+    assert "video_url" in out
+    out_empty = _render_with([{"type": "video_url", "video_url": {}}])
+    assert "video_url" in out_empty
+
+
+def test_the_model_appears_once_in_the_header():
+    """The header is what people paste into issue reports; a duplicated line reads as a
+    payload that carried it twice."""
+    out = _render_with([{"type": "text", "text": "hi"}])
+    assert out.count("model: google/gemini-3-flash") == 1
