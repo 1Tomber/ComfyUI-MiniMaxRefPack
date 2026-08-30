@@ -70,6 +70,36 @@ def _model_for(provider: str, openrouter_model: str, local_model_slug: str) -> s
     return openrouter_model or ""
 
 
+def _local_debug_lines(local_ttl, local_server, local_extra_body, api_base) -> list[str]:
+    """The `local` block of the debug header.
+
+    A function rather than an inline comprehension because the expression that builds the
+    TTL line does not fit on one line, and an f-string replacement field may not span a
+    line break before Python 3.12 (PEP 701). This package declares requires-python >= 3.10,
+    and a SyntaxError is not an ImportError - __init__.py's fallback cannot catch it - so
+    getting that wrong takes the whole node pack down on 3.10 and 3.11 rather than
+    degrading. tests/test_packaging.py compiles the package under the declared minimum to
+    keep it that way.
+    """
+    field, flavor = endpoint.ttl_field_for(local_server, api_base)
+    if int(local_ttl) < 0:
+        ttl_line = f"local_ttl: {local_ttl} (off, no idle-unload field sent)"
+    elif field:
+        ttl_line = f"local_ttl: {local_ttl} seconds, as {field}"
+    else:
+        # Saying nothing here is how a TTL that silently did nothing looks like one that
+        # worked, right up until the model is still holding VRAM.
+        ttl_line = (
+            f"local_ttl: {local_ttl} seconds, but this server takes no idle-unload "
+            f"field, so the value is dropped"
+        )
+    return [
+        ttl_line,
+        f"local_server: {local_server} -> {flavor}",
+        f"local_extra_body: {local_extra_body.strip() or '(empty)'}",
+    ]
+
+
 def _files_signature(reference_set: refs.ReferenceSet, input_dir: str) -> str:
     """mtime+size of every referenced file, folded into one hash.
 
@@ -383,14 +413,8 @@ class MiniMaxH3ReferencePack:
             f"job_type: {job_type}",   # rewritten below once auto has resolved
             # Only on local, because these four do nothing anywhere else and a header full
             # of inapplicable settings is how a debug output stops being read.
-            *([] if provider != "local" else [
-                f"local_ttl: {local_ttl}"
-                + (" (off, no idle-unload field sent)" if int(local_ttl) < 0 else
-                   f" seconds, as {endpoint.ttl_field_for(local_server, api_base)[0] or 'NOTHING - '
-                   'this server takes no idle-unload field, so the value is dropped'}"),
-                f"local_server: {local_server} -> {endpoint.ttl_field_for(local_server, api_base)[1]}",
-                f"local_extra_body: {local_extra_body.strip() or '(empty)'}",
-            ]),
+            *([] if provider != "local" else _local_debug_lines(
+                local_ttl, local_server, local_extra_body, api_base)),
             f"system_prompt: {'workflow override' if (system_prompt or '').strip() else 'packaged default'}",
             f"references: {len(reference_set.references)} "
             f"({', '.join(f'{t.tag} {t.file}' for t in reference_set.assign_tags()) or 'none'})",

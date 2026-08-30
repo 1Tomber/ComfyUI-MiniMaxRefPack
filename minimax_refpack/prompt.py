@@ -645,10 +645,17 @@ def render_payload(payload: dict, ep=None) -> str:
     """
     ep = ep or _DEFAULT_ENDPOINT
     lines: list[str] = [f"POST {ep.chat_url}", f"model: {payload.get('model')}"]
-    for extra in ("reasoning", "temperature", "max_tokens"):
-        if extra in payload:
-            lines.append(f"{extra}: {payload[extra]}")
-    if "reasoning" not in payload:
+    # Every top-level field except `messages`, which the index below renders instead.
+    #
+    # Named allow-lists were what this used, and they went stale the moment the endpoint
+    # learned to send anything new: with a local server the payload carried
+    # `reasoning_effort` and `ttl`, and the render still printed "reasoning: (not sent to
+    # this endpoint)". This output's whole contract is that it cannot drift from what went
+    # over the wire, so it enumerates the payload rather than a list of what it expects to
+    # find there.
+    for key in sorted(k for k in payload if k != "messages"):
+        lines.append(f"{key}: {payload[key]}")
+    if not any(k.startswith("reasoning") for k in payload):
         lines.append("reasoning: (not sent to this endpoint)")
 
     # The index. Counts what actually goes on the wire, per message.
