@@ -26,8 +26,9 @@
  *             reload without costing a widget slot
  *
  * A height drag is therefore read as "make the prompt this much taller"
- * (absorbHeightIntoPrompt), because everything else in the block has the height it
- * needs rather than the height someone picked.
+ * (absorbPointerIntoPrompt), because everything else in the block has the height it
+ * needs rather than the height someone picked. It reads the POINTER, not the height the
+ * frontend passes - see that function for why the passed height cannot carry intent.
  *
  * WHAT SURVIVED THE REWRITE, and matters more than the pin did: there is still NO
  * SCROLLING. Nothing is clipped, nothing hides behind a scrollbar, the section just gets
@@ -1658,7 +1659,6 @@ function parseRefsValue(widget, node) {
         // an extra key survives every round trip untouched.
         if (parsed && Number.isFinite(parsed.prompt_h)) {
             node._mmrpPromptH = parsed.prompt_h;
-            node._mmrpPromptRaw = parsed.prompt_h;
         }
         return fromReferencesList((parsed && parsed.references) || []);
     } catch (e) {
@@ -3048,55 +3048,76 @@ function isSizePair(size) {
     return !!size && typeof size.length === "number" && size.length >= 2;
 }
 
-function absorbHeightIntoPrompt(node, requestedH) {
-    if (!Number.isFinite(requestedH)) return;
-    // Nothing before the node has settled. At creation node.size[1] is still litegraph's
-    // default, so an early call would hand the prompt box a delta of over a thousand
-    // pixels. Measured on a fresh node before this guard: 1164px tall instead of 110.
+// How much taller the user has dragged, read from the POINTER rather than from the height
+// the frontend passes.
+//
+// The passed height is a DERIVED quantity, not a signal. 1.51.9's drag computes it as
+// "size at mousedown plus total pointer delta" and then clamps it up to computeSize() on
+// both axes - so dragging the node NARROWER wraps a tile onto a new line, raises the
+// minimum height, and passes that new minimum, with the pointer never having moved
+// vertically at all. A clamped frame and a deliberate drag to the floor are byte
+// identical, and no amount of reasoning about the number separates them. Four successive
+// fixes tried to; each one leaked somewhere new.
+//
+// The pointer cannot be confused this way. eDown is the pointerdown event and the drag is
+// ABSOLUTE from it - the frontend rebuilds its rectangle from a snapshot taken at
+// mousedown on every frame and never re-anchors - so dy is the user's whole vertical
+// intent, immune to the clamp, to tiles wrapping, and to content growing at any point
+// during the drag. It also makes this idempotent: every setSize caller during a drag
+// derives the SAME prompt height from the same pointer, so "which caller is this?" stops
+// being a question the code has to answer.
+//
+// Verified against a port of the 1.51.9 drag algorithm driving the real functions in this
+// file, over fifteen scenarios including both N corners, cancellation, two nodes dragged
+// independently, and content growing both between mousedown and the first move and in the
+// middle of a drag.
+function absorbPointerIntoPrompt(node, size) {
+    // Nothing before the node has settled: at creation node.size[1] is still litegraph's
+    // default, and promptHeightOf would anchor against a layout that does not exist yet.
     if (!node._mmrpSizeReady) return;
-    // Clamped to the floor first. The frontend clamps an interactive drag to computeSize()
-    // before it gets here, but nothing clamps a programmatic setSize - and an unclamped
-    // value drove _mmrpPromptRaw hundreds of pixels negative, after which the box would
-    // not grow again until the whole debt had been dragged back.
-    const floor = minNodeHeight(node);
-    requestedH = Math.max(requestedH, floor);
 
-    // ANCHORED TO THE START OF THE DRAG, not to the previous frame.
-    //
-    // The frontend's drag is ABSOLUTE: every mousemove passes the size the node had when
-    // the drag began plus the pointer's total movement. Measuring against the previous
-    // frame therefore breaks as soon as the derived height moves under it - narrowing the
-    // node wraps a tile onto a new line, the media grows, and the next frame's difference
-    // comes out negative, collapsing the prompt to its 44px floor mid-drag. That is the
-    // exact failure the delta was introduced to fix, reappearing one level down.
-    //
-    // Against the anchor, the prompt is always "where it started, plus how far the pointer
-    // has moved" - independent of anything the content did in between.
+    const canvas = app.canvas;
+    const pointer = canvas && canvas.pointer;
+    const dir = pointer && pointer.resizeDirection;
+    const y0 = pointer && pointer.eDown && pointer.eDown.canvasY;
+    // eMove rather than graph_mouse: CanvasPointer.move() is gated on the PRIMARY pointer
+    // and sets eMove immediately before dispatching onDrag, while graph_mouse is written
+    // by every pointermove including non-primary ones - a stray touch would corrupt it
+    // between two frames of a drag. Before the first move there is no eMove and dy is 0.
+    const yNow = pointer && (pointer.eMove ? pointer.eMove.canvasY : y0);
+    // A frontend without these gets no height drag rather than a wrong one: the width
+    // still resizes and the prompt simply stops being draggable. Degrades, never corrupts.
+    if (typeof dir !== "string" || !Number.isFinite(y0) || !Number.isFinite(yNow)) return;
+
     let anchor = node._mmrpDragAnchor;
     if (!anchor) {
         anchor = node._mmrpDragAnchor = {
-            height: (node.size && node.size[1]) || 0,
-            prompt: Number.isFinite(node._mmrpPromptRaw)
-                ? node._mmrpPromptRaw
-                : promptHeightOf(node),
+            prompt: promptHeightOf(node),
+            // N-corner drags keep the node's BOTTOM edge still and move its top. The
+            // frontend does that itself by rewriting the rectangle's y - including on the
+            // clamped frames, where it uses the drag-start bottom explicitly - so y plus
+            // height equals the drag-start bottom on EVERY frame. That invariant is what
+            // makes the bottom recoverable from any frame at all, which is why this can be
+            // captured lazily. But since this wrapper replaces the height with the derived
+            // one, it has to re-pin the bottom itself further down, or the node slides.
+            bottom: dir.includes("N") && isSizePair(size) && Number.isFinite(size[1])
+                ? node.pos[1] + size[1]
+                : null,
         };
     }
-    // A height that is merely the FLOOR, when the floor has risen above where the drag
-    // started, is the clamp talking rather than the user.
-    //
-    // The frontend clamps a drag up to computeSize() on BOTH axes. So dragging the node
-    // NARROWER wraps a tile onto a new line, the minimum height rises, and the height it
-    // passes becomes that new minimum - while the pointer never moved vertically at all.
-    // Absorbing it read a width-only drag as "grow the prompt", and the growth persisted:
-    // measured 110 -> 181, written into references_json and surviving reload.
-    //
-    // A genuine drag down to the floor is not caught by this, because there the floor is
-    // at or below where the drag started; only content growing mid-drag pushes it above.
-    if (requestedH <= floor && floor > anchor.height) return;
-    const raw = anchor.prompt + (requestedH - anchor.height);
-    if (raw === node._mmrpPromptRaw) return;
-    node._mmrpPromptRaw = raw;
-    node._mmrpPromptH = Math.max(CONTENT.minPromptH, Math.round(raw));
+
+    const dy = yNow - y0;
+    // SE/SW grow downward with the pointer; NE/NW grow upward, so the sign flips.
+    const signedDy = dir.includes("N") ? -dy : dir.includes("S") ? dy : 0;
+    const next = Math.max(CONTENT.minPromptH, Math.round(anchor.prompt + signedDy));
+    // Compared against the EFFECTIVE height, not the stored field. Merely grabbing the
+    // handle produces a frame with dy 0, whose `next` is the height the box already has -
+    // but on a node that has never been dragged the field is undefined, so comparing
+    // against it wrote the default back and persisted a prompt_h into references_json for
+    // a node nobody resized. Harmless in value, but it stopped an untouched envelope from
+    // being byte-identical after a stray click on the corner.
+    if (next === promptHeightOf(node)) return;
+    node._mmrpPromptH = next;
     syncPromptHeight(node);
     schedulePersistPromptH(node);
 }
@@ -3163,14 +3184,21 @@ function installSizeGuards(node) {
         // Reading it in onResize instead was an identity: onResize only ever sees what
         // this function already wrote.
         // The anchor lives only for the duration of one drag.
-        if (!isUserResizing(this)) this._mmrpDragAnchor = null;
-        if (!this._mmrpInternalResize && isUserResizing(this) && isSizePair(size)) {
-            absorbHeightIntoPrompt(this, size[1]);
-        }
+        const resizing = isUserResizing(this);
+        if (!resizing) this._mmrpDragAnchor = null;
+        else if (!this._mmrpInternalResize) absorbPointerIntoPrompt(this, size);
         if (isSizePair(size) && Number.isFinite(size[0])) {
             this.size[0] = Math.max(size[0], minNodeWidth(this));
         }
         const f = nodeSize(this);
+        // Re-pin the bottom edge on an N-corner drag. The frontend anchors it by rewriting
+        // the rectangle's y from the height IT chose; this wrapper then replaces that
+        // height with the derived one, which would leave the node drifting downward by the
+        // difference on every frame. Measured before this line: 137px on a narrow-only NW
+        // drag that wrapped a row, and 734px dragged well below the floor.
+        if (resizing && this._mmrpDragAnchor && this._mmrpDragAnchor.bottom != null) {
+            this.pos[1] = this._mmrpDragAnchor.bottom - f[1];
+        }
         // Written back into the caller's own object so the drag sees the clamp...
         if (isSizePair(size)) {
             size[0] = f[0];
