@@ -236,6 +236,32 @@ function remapWidgetValues(values) {
     }
     return out;
 }
+
+// Everything a migrating load should assign: the saved values re-placed by name, PLUS
+// every other current widget put back to its default.
+//
+// The second half is the part that was missing. configure() applies widgets_values
+// positionally before any of this runs, so re-placing by name only repairs the slots the
+// old layout actually names - every widget added since keeps whatever landed in it.
+// Loading a 0.3.1 graph left api_base holding 8 (that is length_seconds) and
+// local_model_slug holding true (the old use_openrouter boolean). Both then serialise
+// into every later save, and api_base is read verbatim the moment the provider is
+// switched to local, so a graph that never had one ends up pointing at "8".
+//
+// A widget the saved graph could not have had a value for belongs at its default, not at
+// its neighbour's. Returns null when the array is not a layout we recognise, which means
+// "leave everything alone" rather than "reset everything".
+function migrationPlan(values, currentNames, defaults) {
+    const byName = remapWidgetValues(values);
+    if (!byName) return null;
+    const plan = { ...byName };
+    for (const name of currentNames || []) {
+        if (Object.prototype.hasOwnProperty.call(plan, name)) continue;
+        if (!Object.prototype.hasOwnProperty.call(defaults || {}, name)) continue;
+        plan[name] = defaults[name];
+    }
+    return plan;
+}
 // <<< MMRP-MIGRATE
 const KINDS = ["image", "video", "audio"];
 const CAPS = { image: 9, video: 3, audio: 3 };
@@ -4437,6 +4463,17 @@ app.registerExtension({
             renderNodeBody(node);
             syncReferencesWidget(node);
 
+            // The widgets' own defaults, captured while they still hold them. nodeCreated
+            // runs BEFORE configure() applies widgets_values, so this is the last moment
+            // they are pristine - and the migration below needs somewhere to put back a
+            // widget that the old layout had nothing to say about.
+            node._mmrpWidgetDefaults = {};
+            for (const w of node.widgets || []) {
+                if (w && w.name && typeof w.value !== "function") {
+                    node._mmrpWidgetDefaults[w.name] = w.value;
+                }
+            }
+
             const origOnConfigure = node.onConfigure;
             node.onConfigure = function (info) {
                 const out = origOnConfigure ? origOnConfigure.apply(this, arguments) : undefined;
@@ -4450,9 +4487,13 @@ app.registerExtension({
                 // current layout, so positional restore has already put every one of its
                 // values in the right widget - remapping it would be a no-op that still
                 // logged "migrated_layout" and made a workflow needing nothing look like
-                // one that had been repaired.
+                // one that had been repaired. A shorter array also leaves the widgets
+                // appended since at their defaults, which is where they belong.
                 if (byName && !isPrefixOfCurrent(detectLayout(saved))) {
-                    for (const [name, value] of Object.entries(byName)) {
+                    const names = (this.widgets || [])
+                        .map((w) => w && w.name).filter(Boolean);
+                    const plan = migrationPlan(saved, names, this._mmrpWidgetDefaults);
+                    for (const [name, value] of Object.entries(plan || byName)) {
                         setWidget(this, name, value);
                     }
                     console.log(
