@@ -21,6 +21,8 @@ from minimax_refpack.refs import (
     output_names,
     output_types,
     slot_index,
+    validate_flip,
+    validate_rotate,
 )
 
 
@@ -333,3 +335,79 @@ def test_crop_and_trim_survive_a_references_json_round_trip():
 
     assert back.crop == [0.0, 0.0, 0.5, 0.5]
     assert back.trim == [1.0, 3.0]
+
+
+# ---- orientation: rotate and flip -------------------------------------------------
+
+
+@pytest.mark.parametrize("value,expected", [
+    (90, 90.0), (180, 180.0), (270, 270.0), (0, 0.0),
+    (360, 0.0),      # a full turn is no turn
+    (-90, 270.0),    # anticlockwise arrives as its clockwise equivalent
+    (450, 90.0),     # and so does more than a full turn
+    (12.5, 12.5),    # free angles are accepted; the quarter turns are just lossless
+])
+def test_rotate_normalises_into_one_turn(value, expected):
+    assert validate_rotate(value) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("bad", ["90", None, True, float("nan"), float("inf"), [90]])
+def test_rotate_refuses_anything_that_is_not_a_finite_number(bad):
+    with pytest.raises(ReferenceError):
+        validate_rotate(bad)
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("h", "h"), ("v", "v"), ("hv", "hv"),
+    ("HV", "hv"), (" h ", "h"),
+    ("vh", "hv"),   # the axes commute, so this is the same thing spelled backwards
+])
+def test_flip_normalises(value, expected):
+    assert validate_flip(value) == expected
+
+
+@pytest.mark.parametrize("bad", ["x", "", None, 1, "hh"])
+def test_flip_refuses_anything_else(bad):
+    with pytest.raises(ReferenceError):
+        validate_flip(bad)
+
+
+def test_an_unoriented_reference_serialises_exactly_as_it_used_to():
+    """The compatibility guarantee. A references_json value or a v1 pack file written
+    before rotation existed must round-trip byte-identical, which is what lets
+    PACK_VERSION stay at 1."""
+    d = Reference(kind="image", file="a.png").to_dict()
+    assert d == {"kind": "image", "file": "a.png"}
+    assert "rotate" not in d and "flip" not in d and "rotate_expand" not in d
+
+
+def test_rotate_expand_only_rides_along_with_a_rotation():
+    """On its own it means nothing, and writing it would change the serialisation of
+    every unrotated reference for no reason."""
+    assert "rotate_expand" not in Reference(kind="image", file="a.png",
+                                            rotate_expand=False).to_dict()
+    assert Reference(kind="image", file="a.png", rotate=90,
+                     rotate_expand=False).to_dict()["rotate_expand"] is False
+
+
+def test_orientation_round_trips():
+    ref = Reference.from_dict({"kind": "video", "file": "v.mp4", "rotate": 90,
+                               "flip": "h", "rotate_expand": False})
+    assert (ref.rotate, ref.flip, ref.rotate_expand) == (90.0, "h", False)
+    assert Reference.from_dict(ref.to_dict()).to_dict() == ref.to_dict()
+
+
+def test_orientation_is_dropped_for_audio_rather_than_being_fatal():
+    """Same treatment crop gets on an audio reference: an inapplicable field is ignored,
+    not an error, so a hand-edited or older config still loads."""
+    ref = Reference.from_dict({"kind": "audio", "file": "a.wav", "rotate": 90, "flip": "h"})
+    assert ref.rotate is None and ref.flip is None
+
+
+def test_oriented_reports_whether_anything_will_move():
+    assert not Reference(kind="image", file="a.png").oriented
+    assert Reference(kind="image", file="a.png", rotate=90).oriented
+    assert Reference(kind="image", file="a.png", flip="h").oriented
+    # A full turn normalises to 0, so it is genuinely not oriented.
+    assert not Reference(kind="image", file="a.png",
+                         rotate=validate_rotate(360)).oriented

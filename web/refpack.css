@@ -491,3 +491,20 @@
 .mmrp-clear-btn {
     margin-left: auto;
 }
+
+/* The orientation row's buttons reuse the aspect-preset chip, so a quarter turn and an
+   aspect lock look like what they are: two settings of the same kind, side by side. The
+   glyphs are wider than a "16:9" label, hence the floor. */
+.mmrp-edit-row .mmrp-aspect-btn {
+    min-width: 34px;
+    text-align: center;
+}
+
+/* The media rotates INSIDE its wrapper; the crop layer is a sibling, so the rect stays
+   axis-aligned in the rotated frame's coordinates — which is the space refs.py stores it
+   in and media.py applies it in. Transitioning makes a quarter turn readable as a turn
+   rather than a jump cut. */
+.mmrp-edit-media-wrap {
+    transition: transform 0.15s ease;
+    transform-origin: center center;
+}

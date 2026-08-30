@@ -605,7 +605,7 @@ def test_containers_openrouter_accepts_pass_straight_through(tmp_path, suffix, m
 def test_a_container_openrouter_does_not_accept_is_re_encoded(tmp_path, monkeypatch):
     called = {}
 
-    def fake_transcode(path, crop, trim):
+    def fake_transcode(path, crop, trim, flip=None, rotate=None, rotate_expand=True):
         called["args"] = (path, crop, trim)
         return b"mp4"
 
@@ -627,7 +627,7 @@ def test_a_container_openrouter_does_not_accept_is_re_encoded(tmp_path, monkeypa
 def test_an_edited_clip_is_re_encoded_so_the_vlm_sees_the_edit(tmp_path, monkeypatch, crop, trim):
     seen = {}
 
-    def fake_transcode(path, c, t):
+    def fake_transcode(path, c, t, flip=None, rotate=None, rotate_expand=True):
         seen["args"] = (c, t)
         return b"mp4"
 
@@ -639,3 +639,160 @@ def test_an_edited_clip_is_re_encoded_so_the_vlm_sees_the_edit(tmp_path, monkeyp
 
     assert data == b"mp4" and mime == "video/mp4"
     assert seen["args"] == (crop, trim)
+
+
+# ---- orientation: flip then rotate then crop ---------------------------------------
+#
+# The ORDER is the contract. The crop rect is drawn on the frame the editor shows, and
+# the editor shows the ORIENTED frame, so cropping first selects a different region than
+# the user boxed. semmlerino hit exactly this on a portrait phone clip and wrote it down:
+# the preview showed one region and the node emitted another.
+
+
+def _rgb(w, h, colour=(10, 20, 30)):
+    from PIL import Image
+    return Image.new("RGB", (w, h), colour)
+
+
+@pytest.mark.parametrize("rotate,expected", [
+    (0, (40, 20)), (90, (20, 40)), (180, (40, 20)), (270, (20, 40)),
+])
+def test_a_quarter_turn_swaps_the_axes(rotate, expected):
+    out = media._orient_pil(_rgb(40, 20), None, rotate)
+    assert (out.width, out.height) == expected
+
+
+def test_a_quarter_turn_is_lossless_and_goes_the_way_the_buttons_do():
+    """Clockwise, because that is what the on-screen arrow means. A pixel at the TOP-LEFT
+    must land at the TOP-RIGHT after one clockwise turn - the opposite would be PIL's own
+    counter-clockwise convention leaking through."""
+    from PIL import Image
+    img = Image.new("RGB", (2, 1), (0, 0, 0))
+    img.putpixel((0, 0), (255, 0, 0))          # top-left is red
+    out = media._orient_pil(img, None, 90)
+    assert out.size == (1, 2)
+    assert out.getpixel((0, 0)) == (255, 0, 0)  # ...now the top of a 1x2 strip
+
+
+@pytest.mark.parametrize("flip,probe,expected", [
+    ("h", (1, 0), (255, 0, 0)),   # mirrored left-right
+    ("v", (0, 1), (255, 0, 0)),   # mirrored top-bottom
+    ("hv", (1, 1), (255, 0, 0)),  # both
+])
+def test_flips_mirror_the_expected_axis(flip, probe, expected):
+    from PIL import Image
+    img = Image.new("RGB", (2, 2), (0, 0, 0))
+    img.putpixel((0, 0), (255, 0, 0))
+    out = media._orient_pil(img, flip, None)
+    assert out.getpixel(probe) == expected
+
+
+def test_flip_happens_before_rotation():
+    """They do not commute, so the order has to be pinned rather than assumed. Red starts
+    top-left; flip h puts it top-right; rotating 90 clockwise puts it bottom-right."""
+    from PIL import Image
+    img = Image.new("RGB", (2, 2), (0, 0, 0))
+    img.putpixel((0, 0), (255, 0, 0))
+    out = media._orient_pil(img, "h", 90)
+    assert out.getpixel((1, 1)) == (255, 0, 0)
+
+
+@pytest.mark.parametrize("rotate,expected", [
+    (0, 0), (90, 1), (180, 2), (270, 3), (360, 0), (-90, 3),
+    (89.9, None), (45, None), (1, None),
+])
+def test_quarter_turns_are_recognised_and_free_angles_are_not(rotate, expected):
+    """A slider parked on 89.9 is a free angle and must resample, or the emitted frame
+    would not match the preview the user approved."""
+    assert media._quarter_turns(rotate) == expected
+
+
+def test_a_free_angle_expands_and_fills_the_corners_black():
+    out = media._orient_pil(_rgb(40, 20, (10, 20, 30)), None, 45, expand=True)
+    assert out.width > 40 and out.height > 20
+    assert out.getpixel((0, 0)) == (0, 0, 0), "a corner outside the source must be black"
+
+
+def test_a_free_angle_can_be_bound_to_the_source_extent_instead():
+    out = media._orient_pil(_rgb(40, 20), None, 45, expand=False)
+    assert (out.width, out.height) == (40, 20)
+
+
+def test_an_unoriented_call_returns_the_very_same_object():
+    """Nothing to do must cost nothing - it is the common case on every reference."""
+    img = _rgb(4, 4)
+    assert media._orient_pil(img, None, None) is img
+    assert media._orient_pil(img, None, 0) is img
+
+
+def test_the_array_and_pil_paths_agree_on_a_quarter_turn():
+    """Video frames go through numpy and stills through PIL. Two implementations of one
+    transform have to produce the same pixels, or a clip and a still of the same frame
+    would disagree."""
+    import numpy as np
+    from PIL import Image
+    arr = np.arange(4 * 6 * 3, dtype="uint8").reshape(4, 6, 3)
+    via_np = media._orient_array(arr, "h", 90)
+    via_pil = np.array(media._orient_pil(Image.fromarray(arr), "h", 90))
+    assert np.array_equal(via_np, via_pil)
+
+
+def test_an_oriented_clip_never_takes_the_raw_bytes_fast_path(tmp_path, monkeypatch):
+    """The trap this guards is silent. video_clip_bytes hands the VLM the FILE'S OWN
+    BYTES when a clip is untouched, which is right and fast - but the sockets emit the
+    ROTATED frames. Send the untouched file and the model is shown a different video from
+    the one being generated with, and nothing downstream compares the two, so it never
+    surfaces as an error."""
+    clip = tmp_path / "v.mp4"
+    clip.write_bytes(b"\x00\x00\x00 ftypmp42 original")
+    seen = {}
+
+    def fake_transcode(path, crop, trim, flip=None, rotate=None, rotate_expand=True):
+        seen.update(path=path, crop=crop, trim=trim, flip=flip, rotate=rotate)
+        return b"re-encoded"
+
+    monkeypatch.setattr(media, "_transcode_window", fake_transcode)
+
+    # untouched: the fast path is correct and must survive
+    data, mime = media.video_clip_bytes(str(clip))
+    assert data == b"\x00\x00\x00 ftypmp42 original" and mime == "video/mp4"
+    assert not seen
+
+    for kwargs in ({"rotate": 90}, {"flip": "h"}, {"rotate": 90, "flip": "v"}):
+        seen.clear()
+        data, mime = media.video_clip_bytes(str(clip), **kwargs)
+        assert data == b"re-encoded", f"{kwargs} must force a re-encode"
+        assert mime == "video/mp4"
+
+    # a full turn normalises to 0 upstream, so it is not an orientation at all
+    seen.clear()
+    data, _ = media.video_clip_bytes(str(clip), rotate=0)
+    assert data == b"\x00\x00\x00 ftypmp42 original"
+    assert not seen
+
+
+def test_a_free_angle_turns_the_same_way_the_quarter_turns_do():
+    """Perturbation-driven: negating the angle inside img.rotate left every other test
+    green, because the quarter turns go through transpose and never reach it. PIL rotates
+    COUNTER-clockwise and this node's angles are clockwise, so the negation is load
+    bearing and only this exercises it.
+
+    A filled quadrant rather than a single pixel, because a free angle resamples and a
+    lone bright pixel would be smeared into its neighbours."""
+    import numpy as np
+    from PIL import Image
+
+    img = Image.new("RGB", (40, 40), (0, 0, 0))
+    for x in range(20):
+        for y in range(20):
+            img.putpixel((x, y), (255, 255, 255))  # white = TOP-LEFT quadrant
+
+    out = np.array(media._orient_pil(img, None, 89.9, expand=False).convert("L"))
+    h, w = out.shape
+    top_left = out[: h // 2, : w // 2].mean()
+    top_right = out[: h // 2, w // 2:].mean()
+    # Turned clockwise, the top-left quadrant swings to the TOP-RIGHT.
+    assert top_right > top_left, (
+        f"top-right {top_right:.1f} should hold the white block after a clockwise turn, "
+        f"top-left has {top_left:.1f} - the angle is going the wrong way"
+    )

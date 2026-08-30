@@ -294,6 +294,7 @@ class MiniMaxH3ReferencePack:
             logs.log(
                 "reference", kind=tagged.kind, slot=tagged.slot, tag=tagged.tag,
                 file=tagged.file, crop=tagged.ref.crop, trim=tagged.ref.trim,
+                rotate=tagged.ref.rotate, flip=tagged.ref.flip,
                 soundtrack=tagged.audio_tag,
             )
             # crop/trim ride on the reference (refs.Reference); the loaders are the one
@@ -302,10 +303,16 @@ class MiniMaxH3ReferencePack:
             # edit - confirmed by test_is_changed_key_moves_when_only_an_edit_changes.
             if tagged.kind == "image":
                 outputs[refs.slot_index(f"image_{tagged.slot}")] = media.load_image(
-                    path, crop=tagged.ref.crop, max_edge=max_reference_edge
+                    path, crop=tagged.ref.crop, max_edge=max_reference_edge,
+                    flip=tagged.ref.flip, rotate=tagged.ref.rotate,
+                    rotate_expand=tagged.ref.rotate_expand,
                 )
             elif tagged.kind == "video":
-                frames, audio = media.load_video(path, crop=tagged.ref.crop, trim=tagged.ref.trim)
+                frames, audio = media.load_video(
+                    path, crop=tagged.ref.crop, trim=tagged.ref.trim,
+                    flip=tagged.ref.flip, rotate=tagged.ref.rotate,
+                    rotate_expand=tagged.ref.rotate_expand,
+                )
                 outputs[refs.slot_index(f"video_{tagged.slot}")] = frames
                 if tagged.ref.use_soundtrack and audio is not None:
                     outputs[refs.slot_index(f"video_audio_{tagged.slot}")] = audio

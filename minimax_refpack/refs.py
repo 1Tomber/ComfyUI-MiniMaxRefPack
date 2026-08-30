@@ -76,6 +76,39 @@ def validate_trim(trim: Any) -> list[float]:
     return [start, end]
 
 
+FLIPS = ("h", "v", "hv")
+
+
+def validate_rotate(rotate: Any) -> float:
+    """Degrees CLOCKWISE, normalised into [0, 360).
+
+    Clockwise because that is what the on-screen buttons do and what every phone photo
+    app calls it; PIL rotates counter-clockwise, so media.py negates once, at the one
+    place it applies. Any finite angle is accepted - the quarter turns are just the ones
+    that happen to be lossless.
+    """
+    if isinstance(rotate, bool) or not isinstance(rotate, (int, float)):
+        raise ReferenceError(f"rotate must be a number of degrees, got {rotate!r}")
+    value = float(rotate)
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ReferenceError(f"rotate must be a finite number of degrees, got {rotate!r}")
+    return value % 360.0
+
+
+def validate_flip(flip: Any) -> str:
+    """"h" / "v" / "hv" - mirror horizontally, vertically, or both."""
+    if not isinstance(flip, str):
+        raise ReferenceError(f"flip must be one of {FLIPS}, got {flip!r}")
+    text = flip.strip().lower()
+    # "vh" means the same thing as "hv" and there is no reason to refuse it; both axes
+    # commute, so it normalises rather than erroring.
+    if text == "vh":
+        text = "hv"
+    if text not in FLIPS:
+        raise ReferenceError(f"flip must be one of {FLIPS}, got {flip!r}")
+    return text
+
+
 @dataclass
 class Reference:
     """One reference asset, named by its filename inside the ComfyUI input directory."""
@@ -93,6 +126,22 @@ class Reference:
     # v1 pack files keep loading and re-serialising unchanged (PACK_VERSION stays 1).
     crop: list[float] | None = None
     trim: list[float] | None = None
+    # Orientation, image and video only. Applied BEFORE the crop (see media.py), so the
+    # crop rect is expressed in the frame the editor showed - any other order makes the
+    # editor lie about what it is selecting.
+    #   rotate        degrees clockwise, 0..360. Multiples of 90 are lossless.
+    #   flip          "h" / "v" / "hv", applied BEFORE the rotation.
+    #   rotate_expand True keeps the whole rotated frame and fills the corners black;
+    #                 False binds the result to the source's extent. Only meaningful for
+    #                 an angle that is not a multiple of 90.
+    rotate: float | None = None
+    flip: str | None = None
+    rotate_expand: bool = True
+
+    @property
+    def oriented(self) -> bool:
+        """True when this reference is not in its source orientation."""
+        return bool(self.flip) or bool(self.rotate)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"kind": self.kind, "file": self.file}
@@ -102,6 +151,14 @@ class Reference:
             d["crop"] = list(self.crop)
         if self.trim is not None:
             d["trim"] = list(self.trim)
+        # Omitted when unset, exactly like crop/trim: a pre-rotation references_json value
+        # and a v1 pack file both keep round-tripping byte-identical, so PACK_VERSION
+        # stays 1. rotate_expand only rides along when there is a rotation to expand.
+        if self.rotate:
+            d["rotate"] = float(self.rotate)
+            d["rotate_expand"] = bool(self.rotate_expand)
+        if self.flip:
+            d["flip"] = self.flip
         return d
 
     @classmethod
@@ -114,13 +171,19 @@ class Reference:
             raise ReferenceError("reference is missing a file name")
         crop = d.get("crop")
         trim = d.get("trim")
+        rotate = d.get("rotate")
+        flip = d.get("flip")
+        visual = kind in ("image", "video")
         return cls(
             kind=kind,
             file=file.strip(),
             use_soundtrack=bool(d.get("use_soundtrack", True)) if kind == "video" else False,
             # like use_soundtrack, an inapplicable field is dropped rather than fatal
-            crop=validate_crop(crop) if crop is not None and kind in ("image", "video") else None,
+            crop=validate_crop(crop) if crop is not None and visual else None,
             trim=validate_trim(trim) if trim is not None and kind in ("video", "audio") else None,
+            rotate=validate_rotate(rotate) if rotate is not None and visual else None,
+            flip=validate_flip(flip) if flip is not None and visual else None,
+            rotate_expand=bool(d.get("rotate_expand", True)),
         )
 
 

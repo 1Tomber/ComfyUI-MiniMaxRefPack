@@ -380,12 +380,57 @@ export function editSummary(ref) {
     const parts = [];
     if (ref && Array.isArray(ref.trim)) parts.push(`${ref.trim[0].toFixed(2)}-${ref.trim[1].toFixed(2)}s`);
     if (ref && Array.isArray(ref.crop)) parts.push("cropped");
+    // Rotation says its angle, because 90 and 270 look alike on a thumbnail and the
+    // difference is the whole point. A flip has nothing to state but itself.
+    if (ref && ref.rotate) parts.push(`${Math.round(ref.rotate)}°`);
+    if (ref && ref.flip) parts.push(ref.flip === "hv" ? "flipped ↔↕" : ref.flip === "h" ? "flipped ↔" : "flipped ↕");
     return parts.length ? parts.join(" · ") : null;
 }
 
 function hasEdit(ref) {
-    return !!(ref && (Array.isArray(ref.crop) || Array.isArray(ref.trim)));
+    return !!(ref && (Array.isArray(ref.crop) || Array.isArray(ref.trim)
+                      || ref.rotate || ref.flip));
 }
+
+// >>> MMRP-ORIENT
+// Turning the CROP RECT with the frame.
+//
+// A crop is fractions of the frame, so rotating the media without rotating the rect
+// silently re-points it: [0,0,0.5,1] means "the left half", and after a quarter turn the
+// left half is somewhere else. Moving the rect with the frame keeps the same PIXELS
+// selected, which is what "turn it" means, and for a quarter turn it is exact.
+//
+// delta is a multiple of 90, clockwise.
+export function rotateCropRect(rect, delta) {
+    if (!Array.isArray(rect) || rect.length !== 4) return rect;
+    let [x, y, w, h] = rect;
+    let turns = ((Math.round(delta / 90) % 4) + 4) % 4;
+    while (turns--) {
+        // One clockwise quarter turn in fraction space: the axes swap, and the new x is
+        // measured from the old BOTTOM edge.
+        [x, y, w, h] = [1 - y - h, x, h, w];
+    }
+    return [x, y, w, h];
+}
+
+// Mirror the rect across the same axis the media was mirrored on.
+export function mirrorCropRect(rect, axis) {
+    if (!Array.isArray(rect) || rect.length !== 4) return rect;
+    const [x, y, w, h] = rect;
+    if (axis === "h") return [1 - x - w, y, w, h];
+    if (axis === "v") return [x, 1 - y - h, w, h];
+    return rect;
+}
+
+// Toggle one mirror axis on or off, normalising to refs.py's spelling ("h"/"v"/"hv").
+export function toggleFlipAxis(flip, axis) {
+    const has = { h: false, v: false };
+    for (const ch of String(flip || "")) if (ch in has) has[ch] = true;
+    has[axis] = !has[axis];
+    const out = (has.h ? "h" : "") + (has.v ? "v" : "");
+    return out || null;
+}
+// <<< MMRP-ORIENT
 
 function clamp01(v, lo, hi) {
     return Math.min(Math.max(v, lo), hi);
@@ -523,6 +568,13 @@ async function apiUpload(file) {
 // actually be emitted, not frame 0 of the untrimmed file.
 function thumbUrl(file, ref) {
     let url = `/minimax_refpack/thumb?file=${encodeURIComponent(file)}`;
+    // Orientation goes FIRST in the query for no functional reason, but crop is applied
+    // after it server-side and reading them in that order matches media.py's order.
+    if (ref && ref.flip) url += `&flip=${encodeURIComponent(ref.flip)}`;
+    if (ref && ref.rotate) url += `&rotate=${ref.rotate}`;
+    if (ref && ref.rotate === undefined ? false : ref && ref.rotate_expand === false) {
+        url += "&expand=0";
+    }
     if (ref && Array.isArray(ref.crop)) url += `&crop=${ref.crop.join(",")}`;
     if (ref && Array.isArray(ref.trim)) url += `&t=${ref.trim[0]}`;
     return url;
@@ -1876,6 +1928,9 @@ function openEditModal(node, kind, index) {
     const wantsTrim = kind !== "image";
 
     let crop = Array.isArray(ref.crop) ? ref.crop.slice() : [0, 0, 1, 1];
+    let rotate = Number.isFinite(ref.rotate) ? ref.rotate : 0;
+    let flip = ref.flip || null;
+    let clearRotateBtn = null;
     let trim = Array.isArray(ref.trim) ? ref.trim.slice() : null; // null until duration known
     let duration = null;
     let ratio = null; // aspect lock; null = free
@@ -1891,6 +1946,27 @@ function openEditModal(node, kind, index) {
     const syncClears = () => {
         if (clearCropBtn) clearCropBtn.disabled = normalizeCrop(crop) === null;
         if (clearTrimBtn) clearTrimBtn.disabled = normalizeTrim(trim, duration) === null;
+        if (clearRotateBtn) clearRotateBtn.disabled = !rotate && !flip;
+    };
+
+    // Show the orientation by transforming the MEDIA inside its wrapper. The crop layer
+    // is a sibling of the wrapper, not a child, so the rect stays axis-aligned in the
+    // rotated frame's coordinates - which is exactly the space refs.py stores it in and
+    // media.py applies it in.
+    const applyOrientation = () => {
+        if (!mediaWrap) return;
+        const parts = [];
+        if (rotate) parts.push(`rotate(${rotate}deg)`);
+        if (flip) parts.push(`scale(${flip.includes("h") ? -1 : 1}, ${flip.includes("v") ? -1 : 1})`);
+        mediaWrap.style.transform = parts.join(" ");
+        // A quarter turn swaps the media's aspect inside a wrapper sized for the other
+        // one; scaling it to fit keeps the whole frame visible rather than letting the
+        // long edge overflow the stage.
+        const quarter = Math.abs((rotate % 180) - 90) < 1e-6;
+        if (quarter && mediaW && mediaH) {
+            const fit = Math.min(1, mediaH / mediaW, mediaW / mediaH) || 1;
+            mediaWrap.style.transform += ` scale(${fit})`;
+        }
     };
 
     const overlay = document.createElement("div");
@@ -1930,6 +2006,9 @@ function openEditModal(node, kind, index) {
     // wrapper shrink-wraps the media and nothing about the layout changes.
     const mediaWrap = document.createElement("div");
     mediaWrap.className = "mmrp-edit-media-wrap";
+    // A reference that already carries an orientation must open showing it, or the first
+    // thing the modal does is misrepresent the reference.
+    setTimeout(() => applyOrientation(), 0);
     mediaWrap.appendChild(media);
     stage.appendChild(mediaWrap);
     modal.appendChild(stage);
@@ -2045,6 +2124,73 @@ function openEditModal(node, kind, index) {
         };
         row.appendChild(clearCropBtn);
         modal.appendChild(row);
+
+        // ---- orientation: quarter turns and mirrors ----
+        //
+        // Above the crop rect in the stage, and applied to the PREVIEW by the same CSS
+        // transform, so the rect the user drags is drawn on the oriented frame - which is
+        // the frame media.py crops. Getting that pairing wrong is the documented failure:
+        // the preview shows one region and the node emits another.
+        const orow = document.createElement("div");
+        orow.className = "mmrp-edit-row";
+        const olabel = document.createElement("span");
+        olabel.className = "mmrp-edit-label";
+        olabel.textContent = "Rotate";
+        orow.appendChild(olabel);
+
+        const turn = (delta) => {
+            stopPlayback();
+            rotate = (((rotate + delta) % 360) + 360) % 360;
+            // A crop drawn on the old orientation does not survive a quarter turn: its
+            // fractions mean something different once the axes swap. Rotating the RECT
+            // with the frame keeps the same pixels selected, which is what the user means
+            // by "turn it", and it is exact for a quarter turn.
+            crop = rotateCropRect(crop, delta);
+            applyOrientation();
+            syncCropRect();
+            syncClears();
+        };
+        for (const [glyph, delta, title] of [["↺", -90, "Rotate 90° anticlockwise"],
+                                             ["↻", 90, "Rotate 90° clockwise"]]) {
+            const b = document.createElement("button");
+            b.className = "mmrp-btn mmrp-aspect-btn";
+            b.textContent = glyph;
+            b.title = title;
+            b.onclick = () => turn(delta);
+            orow.appendChild(b);
+        }
+        for (const [glyph, axis, title] of [["↔", "h", "Mirror left-right"],
+                                            ["↕", "v", "Mirror top-bottom"]]) {
+            const b = document.createElement("button");
+            b.className = "mmrp-btn mmrp-aspect-btn";
+            b.textContent = glyph;
+            b.title = title;
+            b.onclick = () => {
+                stopPlayback();
+                flip = toggleFlipAxis(flip, axis);
+                // Mirroring reflects the rect across the same axis, for the same reason.
+                crop = mirrorCropRect(crop, axis);
+                applyOrientation();
+                syncCropRect();
+                syncClears();
+            };
+            orow.appendChild(b);
+        }
+
+        clearRotateBtn = document.createElement("button");
+        clearRotateBtn.className = "mmrp-btn mmrp-clear-btn";
+        clearRotateBtn.textContent = "Clear rotation";
+        clearRotateBtn.onclick = () => {
+            stopPlayback();
+            mlog("edit_cleared", { file: ref.file, what: "rotation" });
+            rotate = 0;
+            flip = null;
+            applyOrientation();
+            syncCropRect();
+            syncClears();
+        };
+        orow.appendChild(clearRotateBtn);
+        modal.appendChild(orow);
     }
 
     // ---- trim bar + 2dp second fields (video/audio) ----
@@ -2321,8 +2467,19 @@ function openEditModal(node, kind, index) {
         if (nt) target.trim = nt;
         else delete target.trim;
 
+        // Orientation, serialised the same way: written when set, DELETED when not, so an
+        // untouched reference keeps producing the byte-identical references_json older
+        // builds wrote.
+        const nr = wantsCrop && rotate ? ((rotate % 360) + 360) % 360 : 0;
+        if (nr) target.rotate = nr;
+        else delete target.rotate;
+        if (wantsCrop && flip) target.flip = flip;
+        else delete target.flip;
+        if (!nr) delete target.rotate_expand;
+
         mlog("edit_saved", { kind, file: ref.file, crop: nt === null && nc === null ? null : nc,
-                             trim: nt, cleared: nc === null && nt === null });
+                             trim: nt, rotate: nr || null, flip: flip || null,
+                             cleared: nc === null && nt === null && !nr && !flip });
         dropThumb(ref.file); // the tile re-fetches through the route with the edit
         overlay.remove();
         applyRefs(node, next);

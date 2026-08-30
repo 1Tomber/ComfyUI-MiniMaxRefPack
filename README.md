@@ -95,6 +95,22 @@ On `prompt_provider: local` the environment is never read. Only a key typed into
 | `system_prompt` | The full instructions the model is given, editable in the settings modal and saved with the workflow. Blank uses the packaged default. Rewrite it if you want prompts in your own style. |
 | `max_reference_edge` | Downscales a reference **image** whose long edge is bigger than this, `0` turns it off. Never upscales. Reference videos are already capped by the core node. |
 
+## Rotating and mirroring a reference
+
+The crop/trim editor (the scissors chip on a tile) has a **Rotate** row: ↺ ↻ for quarter
+turns and ↔ ↕ for mirrors. A phone clip that arrives sideways is two clicks from being
+right, and the turns are lossless — no resampling, the pixels are just re-indexed.
+
+Two things it does that are easy to miss:
+
+- **The crop rect turns with the frame.** A crop is stored as fractions, so turning the
+  media without turning the rect would silently select a different region. Rotating both
+  keeps the same pixels chosen.
+- **A rotated clip stops taking the fast path to the prompt writer.** An untouched video
+  is sent to the VLM as its own file bytes, which is right and quick. A rotated one is
+  re-encoded first, because the sockets emit the rotated frames and showing the model the
+  unrotated original would let it describe a video you are not generating.
+
 ## The tag rule
 
 1. reference images, in order, become `<Picture 1..n>`
