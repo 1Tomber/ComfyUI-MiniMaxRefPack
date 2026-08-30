@@ -325,6 +325,77 @@ export function assignTags(refs) {
     return tagged;
 }
 
+// ---------------------------------------------------------------------------
+// Keeping the tags in the prompt pointing at the reference the user meant.
+//
+// The tags are not decoration - they are the contract between the direction text and the
+// sockets, and they are POSITIONAL. Delete <Picture 2> of three and the third image
+// becomes <Picture 2>; turn a video's soundtrack off and EVERY <Audio N> after it
+// renumbers, because a soundtrack claims its audio tag before its own video tag
+// (refs.py assign_tags). Either way a direction that said "<Picture 2> wears the jacket"
+// silently starts describing a different image, and nothing in the UI says so.
+//
+// The block between the markers is extracted and run under node by tests/test_retag.py,
+// the same way MMRP-MIGRATE is. Keep it free of imports and DOM.
+// >>> MMRP-RETAG
+
+// Flat "<Kind N>" -> "<Kind M>" map between two tag assignments, keyed by file. A file
+// that is gone from `after` contributes nothing: its tag has no successor, so mentions of
+// it are left alone rather than being pointed at whatever inherited the number.
+export function tagRemap(before, after) {
+    const map = {};
+    for (const kind of ["images", "videos", "audios"]) {
+        for (const wasTagged of before[kind]) {
+            const now = after[kind].find((t) => t.ref.file === wasTagged.ref.file);
+            if (!now) continue;
+            if (now.tag !== wasTagged.tag) map[wasTagged.tag] = now.tag;
+            // A video's soundtrack tag renumbers independently of its <Video N>.
+            if (wasTagged.audioTag && now.audioTag && now.audioTag !== wasTagged.audioTag) {
+                map[wasTagged.audioTag] = now.audioTag;
+            }
+        }
+    }
+    return map;
+}
+
+// Apply that map to the direction text in ONE pass.
+//
+// One pass is the whole point, not an optimisation. Rewriting tag by tag chains: with
+// {1->2, 2->1} a sequential replace turns every <Picture 1> into <Picture 2> and then
+// every <Picture 2> - including the ones just written - back into <Picture 1>, so a swap
+// collapses to a no-op. Matching each tag once and looking its replacement up makes the
+// substitution simultaneous by construction.
+//
+// <Subject N> is deliberately NOT matched. Those are assigned by the user, not derived
+// from position, so they never renumber and rewriting them would be corruption.
+export function retag(text, map) {
+    if (!text || !map || !Object.keys(map).length) return text;
+    return text.replace(/<(Picture|Video|Audio) (\d+)>/g, (whole) => map[whole] || whole);
+}
+// <<< MMRP-RETAG
+
+// Run a mutation and carry the direction text with it. `mutate` returns the new refs.
+// Off => the refs still change, the text simply is not touched.
+function withRetag(node, mutate) {
+    const before = assignTags(node._mmrpRefs);
+    const next = mutate();
+    if (retagEnabled(node)) {
+        const map = tagRemap(before, assignTags(next));
+        const w = widgetByName(node, "direction");
+        const current = (w && w.value) || "";
+        const updated = retag(current, map);
+        if (updated !== current) {
+            if (w) {
+                w.value = updated;
+                if (w.callback) w.callback(updated);
+            }
+            if (node._mmrpBody) node._mmrpBody.directionInput.value = updated;
+            mlog("retagged", { changes: Object.keys(map).length });
+        }
+    }
+    applyRefs(node, next);
+}
+
 // ---- references_json <-> working-state conversion --------------------
 // refs.py's Reference shape:
 //   {"kind": "image"|"video"|"audio", "file": str, [use_soundtrack], [crop], [trim]}
@@ -1339,11 +1410,13 @@ function onCanvasDblClick(node, e) {
 
 function toggleSoundtrack(node, file) {
     if (probeResults.get(file) !== true) return; // pending/silent/unknown — not toggleable
-    const next = cloneRefs(node._mmrpRefs);
-    const target = next.videos.find((v) => v.file === file);
-    if (target) target.use_soundtrack = !target.use_soundtrack;
-    if (target) mlog("soundtrack", { file, on: target.use_soundtrack });
-    applyRefs(node, next);
+    withRetag(node, () => {
+        const next = cloneRefs(node._mmrpRefs);
+        const target = next.videos.find((v) => v.file === file);
+        if (target) target.use_soundtrack = !target.use_soundtrack;
+        if (target) mlog("soundtrack", { file, on: target.use_soundtrack });
+        return next;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1419,12 +1492,18 @@ function widgetByName(node, name) {
 //
 // A reference set we cannot read is recoverable — the user re-adds the files. A workflow
 // that will not open is not. So: parse defensively, fall back to empty, warn once.
-function parseRefsValue(widget) {
+function parseRefsValue(widget, node) {
     if (!widget) return emptyRefs();
     const raw = widget.value;
     if (typeof raw !== "string" || !raw.trim()) return emptyRefs();
     try {
         const parsed = JSON.parse(raw);
+        // The retag preference rides in the envelope beside the references rather than in
+        // a widget of its own: widgets_values is positional, so a widget would be another
+        // slot to migrate forever for what is a UI preference. refs.py reads this object's
+        // `references` key and Python never writes the widget back, so an extra key
+        // survives every round trip untouched.
+        if (node && parsed && typeof parsed.retag === "boolean") node._mmrpRetag = parsed.retag;
         return fromReferencesList((parsed && parsed.references) || []);
     } catch (e) {
         console.warn(
@@ -1447,7 +1526,17 @@ function syncReferencesWidget(node) {
         const src = flat[i];
         return src && src.missing ? { ...r, missing: true } : r;
     });
-    w.value = JSON.stringify({ references: list });
+    const envelope = { references: list };
+    // Only written once the user has actually turned it off, so a workflow that left the
+    // default alone stays byte-identical to what earlier builds wrote.
+    if (node._mmrpRetag === false) envelope.retag = false;
+    w.value = JSON.stringify(envelope);
+}
+
+// ON by default: tags going stale is the bug, so not fixing them has to be the choice
+// someone makes rather than the one they get.
+function retagEnabled(node) {
+    return node._mmrpRetag !== false;
 }
 
 function applyRefs(node, refs) {
@@ -1486,14 +1575,16 @@ async function addFiles(node, kind, files) {
 }
 
 function removeRef(node, kind, index) {
-    const refs = cloneRefs(node._mmrpRefs);
-    const [gone] = refs[`${kind}s`].splice(index, 1);
-    mlog("reference_removed", { kind, file: gone && gone.file });
     if (node._mmrpSelected && node._mmrpSelected.kind === kind) {
         if (node._mmrpSelected.index === index) node._mmrpSelected = null;
         else if (node._mmrpSelected.index > index) node._mmrpSelected.index -= 1;
     }
-    applyRefs(node, refs);
+    withRetag(node, () => {
+        const refs = cloneRefs(node._mmrpRefs);
+        const [gone] = refs[`${kind}s`].splice(index, 1);
+        mlog("reference_removed", { kind, file: gone && gone.file });
+        return refs;
+    });
 }
 
 // The DOM-side reaction to a state change: button disabled states, probes, repaint.
@@ -2616,6 +2707,26 @@ function openSystemPromptModal(node) {
         }
     };
 
+    // The settings modal is where the node's per-workflow preferences live, and this is
+    // one. It sits above the footer rather than in it: the footer's buttons all act on the
+    // textarea, and a checkbox that does not is confusing among them.
+    const retagRow = document.createElement("label");
+    retagRow.className = "mmrp-modal-check";
+    const retagBox = document.createElement("input");
+    retagBox.type = "checkbox";
+    retagBox.checked = retagEnabled(node);
+    retagBox.onchange = () => {
+        node._mmrpRetag = retagBox.checked;
+        syncReferencesWidget(node);
+    };
+    retagRow.appendChild(retagBox);
+    retagRow.appendChild(document.createTextNode(
+        " Keep reference tags in the prompt up to date. Deleting a reference or toggling a "
+        + "video's soundtrack renumbers the tags after it; with this on, the prompt text is "
+        + "rewritten to match so <Picture 2> keeps meaning the image you wrote it about."
+    ));
+    modal.appendChild(retagRow);
+
     const resetBtn = document.createElement("button");
     resetBtn.className = "mmrp-btn";
     resetBtn.textContent = "Reset";
@@ -2757,7 +2868,7 @@ app.registerExtension({
             const node = this;
 
             const refsWidget = widgetByName(node, "references_json");
-            node._mmrpRefs = parseRefsValue(refsWidget);
+            node._mmrpRefs = parseRefsValue(refsWidget, node);
             const ivRefs = hideWidget(refsWidget);
 
             const directionWidget = widgetByName(node, "direction");
@@ -2822,7 +2933,7 @@ app.registerExtension({
                 syncLocalBtn(this);
                 const rw = widgetByName(this, "references_json");
                 stopPreview(this);
-                this._mmrpRefs = parseRefsValue(rw);
+                this._mmrpRefs = parseRefsValue(rw, this);
                 const dw = widgetByName(this, "direction");
                 if (this._mmrpBody) this._mmrpBody.directionInput.value = dw ? dw.value || "" : "";
                 this._mmrpSelected = null;
