@@ -147,6 +147,11 @@ class CanvasPointer {
         this.dragStarted = true;
         this.onDragStart?.(this, e);
         delete this.onDragStart;
+        // MEASURED IN A REAL BROWSER: processMouseMove's group-hover branch runs
+        // `pointer.resizeDirection &&= void 0` with no eDown guard, so the field is gone
+        // by the first frame of the drag - while `resizing_node` is not set until here.
+        // The two are never valid together.
+        this.resizeDirection = undefined;
     }
     reset() {
         this.finally = undefined; // invokes the previous finally
