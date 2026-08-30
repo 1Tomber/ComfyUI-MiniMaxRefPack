@@ -404,6 +404,42 @@ def test_is_changed_key_moves_when_a_files_bytes_change(fake_folder_paths):
     assert key1 != key2
 
 
+def test_is_changed_key_moves_for_a_same_length_re_upload(fake_folder_paths):
+    """The case the signature exists for, and the one nothing was checking.
+
+    The browser re-uploads with overwrite=true under the SAME filename, so
+    references_json can be byte-identical across two different uploads. The neighbouring
+    test writes replacement bytes of a different length, so its key moves on st_size alone
+    - drop st_mtime_ns from the signature entirely and the whole suite still passes, which
+    makes a regression to size-only hashing invisible.
+
+    Same length, different bytes: size cannot see it, so only mtime can.
+    """
+    import os
+
+    path = fake_folder_paths / "i1.jpg"
+    path.write_bytes(b"aaaa")
+    references_json = json.dumps({"references": [{"kind": "image", "file": "i1.jpg"}]})
+    kwargs = dict(direction="d", openrouter_api_key="", model="m",
+                  references_json=references_json)
+
+    key1 = nodes.MiniMaxH3ReferencePack.IS_CHANGED(**kwargs)
+
+    path.write_bytes(b"bbbb")
+    assert path.stat().st_size == 4, "the test's premise: the size did not change"
+    # Forced rather than assumed: two writes in the same tick can land on one timestamp,
+    # and a test that passes only when the clock cooperates is not a test.
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+
+    key2 = nodes.MiniMaxH3ReferencePack.IS_CHANGED(**kwargs)
+
+    assert key1 != key2, (
+        "a re-upload the same length as the file it replaced must still move the key - "
+        "otherwise ComfyUI cache-hits and emits the PREVIOUS reference's result"
+    )
+
+
 def test_is_changed_key_moves_when_direction_changes(fake_folder_paths):
     (fake_folder_paths / "i1.jpg").write_bytes(b"aaa")
     references_json = json.dumps({"references": [{"kind": "image", "file": "i1.jpg"}]})
