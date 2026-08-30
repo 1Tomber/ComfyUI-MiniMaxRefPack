@@ -2290,7 +2290,12 @@ function parseRefsValue(widget, node) {
         // slot to migrate forever for something that is not part of the reference set.
         // refs.py reads this object's `references` key and Python never writes the widget
         // back, so extra keys survive every round trip untouched.
-        if (parsed && Number.isFinite(parsed.prompt_h)) node._mmrpPromptH = parsed.prompt_h;
+        if (parsed && Number.isFinite(parsed.prompt_h)) {
+            node._mmrpPromptH = parsed.prompt_h;
+            // The unclamped running total the height drag adds to, seeded from the saved
+            // height so a drag after a reload continues from where it left off.
+            node._mmrpPromptRaw = parsed.prompt_h;
+        }
         if (node && parsed && typeof parsed.retag === "boolean") node._mmrpRetag = parsed.retag;
         return fromReferencesList((parsed && parsed.references) || []);
     } catch (e) {
@@ -2362,9 +2367,7 @@ function applyCanvasHeight(node, layout) {
 // fixed-size rewrite was built to kill, and it stays dead.
 function relayout(node) {
     applyCanvasHeight(node);
-    try {
-        if (node.setSize) node.setSize(nodeSize(node));
-    } catch (e) { /* pre-mount, before last_y exists */ }
+    setSizeInternal(node);
     scheduleDraw(node);
     app.graph?.setDirtyCanvas(true, true);
 }
@@ -3527,7 +3530,7 @@ function syncLocalBtn(node) {
     if (node.setSize) {
         setTimeout(() => {
             try {
-                node.setSize(nodeSize(node));
+                setSizeInternal(node);
                 app.graph?.setDirtyCanvas(true, true);
             } catch (_) {}
         }, 0);
@@ -3977,21 +3980,59 @@ function installSelectionHandlers(node) {
 // the old "never stomp a restored size" rule: there is no user-chosen size.
 // ---------------------------------------------------------------------------
 
-// A height the user asked for, turned into a prompt-box height and remembered.
+// A height drag, turned into a prompt-box height and remembered.
 //
 // The node's height is derived from its content, so there is nothing to store it in
 // directly — but the drag has to mean SOMETHING or the handle would fight the user. It
 // means "make the prompt this much taller", which is the only part of the block whose
-// height is a preference rather than a consequence. Everything above the prompt keeps
-// the height it needs, so dragging shorter stops when the prompt hits its floor.
+// height is a preference rather than a consequence.
+//
+// It applies the DELTA, not the requested height. Deriving the prompt from the absolute
+// (requested minus everything else) looked equivalent and was not: dragging the node
+// NARROWER wraps a tile onto a new line, which grows "everything else" — so a pure
+// horizontal drag, whose height never changed, collapsed the prompt to its floor. Then
+// widening again freed that space and handed it back to the prompt, which had forgotten
+// how tall it used to be. Measured: 110 -> 44 -> 181 over one narrow-and-widen round
+// trip, with the node left 71px taller than it started. A delta is zero when the user
+// did not drag vertically, which is the whole of the fix.
+//
+// The unclamped total is what is stored, so dragging down to the floor and back up
+// returns to the height you started from instead of over-shooting by whatever the clamp
+// swallowed. The frontend clamps the drag to computeSize() anyway, so it cannot run far
+// below the floor.
 function absorbHeightIntoPrompt(node, requestedH) {
-    const widgetY = (node._mmrpDomWidget && node._mmrpDomWidget.last_y) || 80;
-    const fixed = CONTENT.uploadsH + CONTENT.gap + layoutOf(node).height + CONTENT.gap;
-    const wanted = requestedH - widgetY - domWidgetMargin(node) * 2 - fixed;
-    if (!Number.isFinite(wanted)) return;
-    node._mmrpPromptH = Math.max(CONTENT.minPromptH, Math.round(wanted));
+    if (!Number.isFinite(requestedH)) return;
+    // Nothing before the node has settled. A delta is only meaningful against a height
+    // that means something, and at creation node.size[1] is still litegraph's default -
+    // so the first real setSize produced a delta of well over a thousand pixels and
+    // dumped all of it into the prompt box. Measured on a fresh node: 1164px tall
+    // instead of 110.
+    if (!node._mmrpSizeReady) return;
+    const current = (node.size && node.size[1]) || 0;
+    const delta = requestedH - current;
+    if (!delta) return;
+    const raw = (Number.isFinite(node._mmrpPromptRaw) ? node._mmrpPromptRaw
+                                                      : promptHeightOf(node)) + delta;
+    node._mmrpPromptRaw = raw;
+    node._mmrpPromptH = Math.max(CONTENT.minPromptH, Math.round(raw));
     syncPromptHeight(node);
     schedulePersistPromptH(node);
+}
+
+// The smallest this node may be: the content with the prompt box at its floor.
+//
+// This is what computeSize() has to report, because the frontend clamps a resize drag UP
+// to it on BOTH axes — 1.51.9: `c.width < l[0] && (c.width = l[0])`, and the same for
+// height. Reporting the CURRENT size there (which is what this did) makes the node
+// un-shrinkable: every drag inwards is clamped straight back out, so it can only ever
+// grow. `min_size`, which the old code set alongside it, does not appear anywhere in the
+// 1.51.9 bundle at all.
+function minNodeHeight(node) {
+    const widgetY = (node._mmrpDomWidget && node._mmrpDomWidget.last_y) || 80;
+    const outputsMin = ((node.outputs && node.outputs.length) || 1) * 20 + 40;
+    const content = CONTENT.uploadsH + CONTENT.gap + layoutOf(node).height
+        + CONTENT.gap + CONTENT.minPromptH;
+    return Math.max(widgetY + content + domWidgetMargin(node) * 2, outputsMin);
 }
 
 function installSizeGuards(node) {
@@ -4005,10 +4046,11 @@ function installSizeGuards(node) {
     // from computeSize — the hottest of the three — costs two property writes.
     const origOnResize = node.onResize;
     node.onResize = function (size) {
-        // The ONE place a user-chosen size is read rather than overwritten. Take the
-        // height as a request for the prompt box first, then re-derive: whatever the
-        // prompt could not absorb (because the media needs it) is simply not granted.
-        absorbHeightIntoPrompt(this, size[1]);
+        // Downstream of setSize on this frontend (`setSize(e){this.size=e,this.onResize?.(
+        // this.size)}`), so by the time this runs the height is already the derived one
+        // and the absorb below is a no-op. It stays for a frontend that calls onResize
+        // directly — the delta form makes calling it twice harmless.
+        if (!this._mmrpInternalResize) absorbHeightIntoPrompt(this, size[1]);
         // A width drag re-wraps the tiles, so the slab's height can change with no change
         // to the content at all.
         applyCanvasHeight(this);
@@ -4024,19 +4066,22 @@ function installSizeGuards(node) {
         // origComputeSize still runs for its side effects on some frontends, but its
         // answer is discarded — ours is derived from the content.
         if (origComputeSize) origComputeSize.apply(this, arguments);
-        const f = nodeSize(this);
-        // min_size is what stops litegraph dragging below the floor. The width floor is
-        // real (the button row); the height floor is the content, so the two together
-        // mean "you may make it wider, and taller, and nothing else".
-        this.min_size = [minNodeWidth(this), f[1]];
         syncDomWidgetSize(this);
-        return [f[0], f[1]];
+        // The MINIMUM, not the current size. See minNodeHeight: the frontend clamps a
+        // resize drag up to whatever this returns, so reporting the current size is what
+        // made the node grow-only.
+        return [minNodeWidth(this), minNodeHeight(this)];
     };
 
     const origSetSize = node.setSize;
     node.setSize = function (size) {
-        // Width is honoured (floored); height is re-derived. setSize is what a restored
-        // workflow comes through, so this is where a saved width survives a reload.
+        // setSize is the resize drag's entry point on this frontend, so the user's height
+        // has to be read HERE — before it is replaced by the derived one two lines down.
+        // Reading it in onResize instead was an identity: onResize only ever sees what
+        // this function already wrote.
+        if (!this._mmrpInternalResize && Array.isArray(size)) {
+            absorbHeightIntoPrompt(this, size[1]);
+        }
         if (Array.isArray(size) && Number.isFinite(size[0])) {
             this.size[0] = Math.max(size[0], minNodeWidth(this));
         }
@@ -4047,6 +4092,21 @@ function installSizeGuards(node) {
         else this.size = size;
         syncDomWidgetSize(this);
     };
+}
+
+// Re-assert the node's own size without the prompt box treating it as a drag. Every
+// internal caller goes through this: relayout after a content change, the visibility
+// sync, the post-mount settle. Without the flag, adding a reference would read its own
+// derived height back as a user request.
+function setSizeInternal(node) {
+    node._mmrpInternalResize = true;
+    try {
+        if (node.setSize) node.setSize(nodeSize(node));
+    } catch (e) {
+        /* pre-mount, before last_y exists */
+    } finally {
+        node._mmrpInternalResize = false;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4170,7 +4230,7 @@ app.registerExtension({
                 syncPromptHeight(this);
                 // configure() writes the serialized size straight onto node.size,
                 // bypassing our setSize wrapper — re-assert the fixed size.
-                this.setSize(nodeSize(this));
+                setSizeInternal(this);
                 renderNodeBody(this);
                 return out;
             };
@@ -4178,7 +4238,10 @@ app.registerExtension({
             // last_y isn't assigned until litegraph's first layout pass — re-assert
             // the fixed size once it exists so the height lands on the real widget top.
             setTimeout(() => {
-                node.setSize(nodeSize(node));
+                setSizeInternal(node);
+                // From here the node's height is its real one, so a further change is a
+                // user gesture rather than the frontend still laying it out.
+                node._mmrpSizeReady = true;
                 app.graph?.setDirtyCanvas(true, true);
                 scheduleDraw(node);
             }, 50);
