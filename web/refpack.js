@@ -2038,15 +2038,65 @@ function onCanvasMouseDown(node, e) {
     }
 }
 
-// Double-clicking a tile opens the crop/trim editor too — same modal as the chip.
-// The affordance chips keep their own single-click meanings.
+// Put text at the caret in the prompt box, spacing it so the result reads as prose.
+//
+// The spacing is not politeness: the tags go to a model that is told to use them exactly,
+// and "<Picture 1>wears" is a different token sequence from "<Picture 1> wears". Making
+// the user remember the space is how you get the first one.
+// >>> MMRP-INSERT
+// The pure half: where the text lands and where the caret ends up. Split out from the
+// DOM so tests/test_insert.py can run the real thing under node.
+export function spliceTag(value, start, end, text) {
+    const before = value.slice(0, start);
+    const after = value.slice(end);
+    const lead = before && !/\s$/.test(before) ? " " : "";
+    const trail = after && !/^\s/.test(after) ? " " : "";
+    const insert = `${lead}${text}${trail}`;
+    return { value: before + insert + after, caret: start + insert.length };
+}
+// <<< MMRP-INSERT
+
+function insertIntoDirection(node, text) {
+    const el = node._mmrpBody && node._mmrpBody.directionInput;
+    if (!el) return;
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? start;
+    const { value, caret } = spliceTag(el.value, start, end, text);
+    el.value = value;
+    el.setSelectionRange(caret, caret);
+    el.focus();
+    // Mirror into the hidden widget exactly the way the textarea's own input listener
+    // does — setting .value programmatically does not fire `input`.
+    const w = widgetByName(node, "direction");
+    if (w) {
+        w.value = el.value;
+        if (w.callback) w.callback(w.value);
+    }
+    mlog("tag_inserted", { text });
+}
+
+// Double-clicking a TILE writes its tag into the prompt. Double-clicking the scissors
+// chip still opens the crop/trim editor, and single-clicking that chip always did.
+//
+// This REASSIGNS the gesture: a double-click anywhere on a tile used to open the editor.
+// The chip is the editor's affordance and is drawn on every tile, so the editor did not
+// lose its way in — and the tag is the thing you reach for far more often, because it is
+// what every sentence in the prompt has to name.
 function onCanvasDblClick(node, e) {
     const pos = getMousePos(node._mmrpBody.canvas, e);
     const hit = hitTest(node, pos.x, pos.y);
     if (!hit || (hit.type !== "tile" && hit.type !== "edit")) return;
     const ref = node._mmrpRefs[`${hit.kind}s`][hit.index];
     if (!ref || ref.missing) return;
-    openEditModal(node, hit.kind, hit.index);
+    if (hit.type === "edit") {
+        openEditModal(node, hit.kind, hit.index);
+        return;
+    }
+    const tagged = assignTags(node._mmrpRefs)[`${hit.kind}s`][hit.index];
+    // The video's own <Video N>, not its soundtrack's <Audio N>. One gesture has to pick
+    // one, and the video tag is what a sentence about the clip needs; the soundtrack tag
+    // is printed on the badge for the rarer case of writing about the sound alone.
+    if (tagged) insertIntoDirection(node, tagged.tag);
 }
 
 function toggleSoundtrack(node, file) {
