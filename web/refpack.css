@@ -518,4 +518,22 @@
     background: #e0e0e0;
     color: #111;
     border-color: #000;
+/* A preference checkbox inside a modal, not an action — it sits above the footer, whose
+   buttons all act on the textarea. Aligned to the top so the label can wrap under itself
+   without the box drifting to the middle of the paragraph. */
+.mmrp-modal-check {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-top: 10px;
+    color: #aaa;
+    font-size: 12px;
+    line-height: 1.45;
+    cursor: pointer;
+}
+
+.mmrp-modal-check input {
+    margin: 2px 0 0 0;
+    flex: 0 0 auto;
+    cursor: pointer;
 }

@@ -14,6 +14,7 @@ One node that manages every reference for **MiniMax H3 Reference to Video**, wri
 - **Two registers.** `standard` writes a scene. `replacement` swaps one object or character in a reference video for the thing in a reference image. `auto` lets a cheap classifier pick.
 - **Portable configs.** **Save config** downloads a JSON file to your machine. **Load config** reads it back on any install, on any pod, and restores your direction text, model, reasoning effort and reference list.
 - **The tags are on the tiles.** Every asset shows the label MiniMax will actually give it: `<Picture 2>`, `<Video 1>`, `<Audio 1>`. What you see is what you address in the prompt.
+- **And they stay pointing at what you meant.** Tags are positional, so deleting a reference or toggling a video's soundtrack renumbers the ones after it. Your direction text is rewritten to match, so `<Picture 2>` keeps meaning the image you wrote it about. Turn it off in the settings modal if you would rather edit by hand.
 - **Video soundtracks come along.** A video's audio track is extracted and sent as its own reference by default. Toggle it off per video.
 - **A `debug` output that shows the whole request.** Where it posted, the model, every setting, your direction, the target format, the reference manifest, and every content part numbered `[3/10]` with its type and size. It stubs the base64 out as `<BASE64_STRING>`, so the output stays readable. Wire it into any text preview node.
 - **Honest about what it sent.** A local server takes text and images but not video or audio, so a clip goes as sampled frames with no sound. The node says so on the canvas, in the log and in `debug`, and it tells the prompt writer not to describe motion or voices it never received.
@@ -139,6 +140,12 @@ node builds the first from your references and reports the second in `debug`, so
 overriding either would make it disagree with what it actually sent.
 
 ## The tag rule
+
+Worth reading once, because the numbering is what your prompt text refers to and it is
+not always what you would guess — a video's soundtrack takes an `<Audio N>` *before* the
+video takes its own `<Video N>`, so toggling one ♪ renumbers standalone clips too. The
+node keeps your direction text in step with all of it (see above); this is what it is
+keeping it in step with.
 
 1. reference images, in order, become `<Picture 1..n>`
 2. then each reference video: if its soundtrack is on, that soundtrack takes the next `<Audio j>` **first**, then the video takes `<Video k>`
