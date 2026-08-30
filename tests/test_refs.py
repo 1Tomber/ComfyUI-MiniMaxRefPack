@@ -21,6 +21,7 @@ from minimax_refpack.refs import (
     output_names,
     output_types,
     slot_index,
+    validate_subjects,
 )
 
 
@@ -333,3 +334,76 @@ def test_crop_and_trim_survive_a_references_json_round_trip():
 
     assert back.crop == [0.0, 0.0, 0.5, 0.5]
     assert back.trim == [1.0, 3.0]
+
+
+# ---- subject grouping ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value,expected", [
+    ([1], [1]), ([3, 1], [1, 3]), ([2, 2], [2]), (5, [5]), ([], []),
+    ([1.0], [1]),
+])
+def test_subjects_normalise_to_a_sorted_unique_list(value, expected):
+    assert validate_subjects(value) == expected
+
+
+@pytest.mark.parametrize("bad", [0, 10, -1, 1.5, "1", [True], [None], {"a": 1}])
+def test_subjects_refuse_anything_outside_one_to_nine(bad):
+    with pytest.raises(ReferenceError):
+        validate_subjects(bad)
+
+
+def test_subject_numbers_are_never_compacted():
+    """They are the user's. Picking 1 and 5 must produce <Subject 5>, not a helpfully
+    renumbered <Subject 2> - a node that quietly renamed what someone clicked would be
+    worse than a gap in the numbering."""
+    s = ReferenceSet([
+        Reference(kind="image", file="a.png", subjects=[1]),
+        Reference(kind="image", file="b.png", subjects=[5]),
+    ])
+    assert sorted(s.subject_groups()) == [1, 5]
+
+
+def test_an_ungrouped_set_serialises_exactly_as_it_used_to():
+    assert Reference(kind="image", file="a.png").to_dict() == {"kind": "image", "file": "a.png"}
+    assert ReferenceSet([Reference(kind="image", file="a.png")]).subject_groups() == {}
+
+
+def test_one_reference_can_define_several_subjects():
+    """A photo of a woman in a room is both the character and the location, and the
+    packaged prompt has a line for each."""
+    s = ReferenceSet([Reference(kind="image", file="a.png", subjects=[1, 2])])
+    assert s.subject_groups() == {1: ["<Picture 1>"], 2: ["<Picture 1>"]}
+
+
+def test_several_references_can_define_one_subject():
+    s = ReferenceSet([
+        Reference(kind="image", file="a.png", subjects=[1]),
+        Reference(kind="image", file="b.png", subjects=[1]),
+        Reference(kind="image", file="c.png"),
+    ])
+    assert s.subject_groups() == {1: ["<Picture 1>", "<Picture 2>"]}
+
+
+def test_a_video_contributes_its_soundtrack_tag_to_the_same_subject():
+    """A character's clip and that character's voice are the same subject, and the
+    soundtrack has its own <Audio N> - so grouping the video must carry both."""
+    s = ReferenceSet([Reference(kind="video", file="v.mp4", use_soundtrack=True, subjects=[2])])
+    assert s.subject_groups() == {2: ["<Video 1>", "<Audio 1>"]}
+
+
+def test_a_muted_video_contributes_only_its_video_tag():
+    s = ReferenceSet([Reference(kind="video", file="v.mp4", use_soundtrack=False, subjects=[2])])
+    assert s.subject_groups() == {2: ["<Video 1>"]}
+
+
+def test_subjects_are_allowed_on_audio_too():
+    """The packaged prompt: "<Audio 1> is the voice-timbre reference for <Subject 1>"."""
+    s = ReferenceSet([Reference(kind="audio", file="a.wav", subjects=[1])])
+    assert s.subject_groups() == {1: ["<Audio 1>"]}
+
+
+def test_subject_groups_round_trip_through_json():
+    s = ReferenceSet([Reference(kind="image", file="a.png", subjects=[2, 1])])
+    assert ReferenceSet.from_json(s.to_json()).subject_groups() == {1: ["<Picture 1>"],
+                                                                   2: ["<Picture 1>"]}

@@ -1133,3 +1133,67 @@ def test_the_logged_payload_size_counts_the_video():
     ]
 
     assert prompt._payload_bytes(parts) == 10 + len("data:video/mp4;base64,") + 1000
+
+
+# ---- the user's subject grouping ---------------------------------------------------
+#
+# <Subject N> is a label the model invents in subject_definitions, working out which
+# references belong together by LOOKING at them. Declaring it is the one thing about the
+# set the user knows for certain and the model can only infer.
+
+
+def _grouping_text(content):
+    return content[0]["text"]
+
+
+def _content(refs, tmp_path, accepts=None):
+    for r in refs.references:
+        (tmp_path / r.file).write_bytes(b"x")
+    return prompt._build_content(refs, str(tmp_path), "d", accepts=accepts)
+
+
+def test_no_grouping_block_when_nobody_grouped_anything(tmp_path, monkeypatch):
+    monkeypatch.setattr(prompt.media, "load_image", fake_load_image, raising=False)
+    refs = ReferenceSet([Reference(kind="image", file="a.png")])
+    assert "SUBJECT GROUPING" not in _grouping_text(_content(refs, tmp_path))
+
+
+def test_the_grouping_block_names_each_subject_and_its_tags(tmp_path, monkeypatch):
+    monkeypatch.setattr(prompt.media, "load_image", fake_load_image, raising=False)
+    refs = ReferenceSet([
+        Reference(kind="image", file="a.png", subjects=[1]),
+        Reference(kind="image", file="b.png", subjects=[1]),
+        Reference(kind="image", file="c.png", subjects=[2]),
+    ])
+    text = _grouping_text(_content(refs, tmp_path))
+    assert "SUBJECT GROUPING" in text
+    assert "<Subject 1> = <Picture 1>, <Picture 2>" in text
+    assert "<Subject 2> = <Picture 3>" in text
+
+
+def test_the_grouping_reaches_the_CONCISE_manifest_too(tmp_path, monkeypatch):
+    """The one that matters most in practice. `concise` is chosen whenever the endpoint
+    cannot take video - which is every local server - so wiring only the OpenRouter branch
+    would ship a feature that does nothing for the people most likely to want it."""
+    monkeypatch.setattr(prompt.media, "load_image", fake_load_image, raising=False)
+    refs = ReferenceSet([Reference(kind="image", file="a.png", subjects=[3])])
+    text = _grouping_text(_content(refs, tmp_path, accepts=frozenset({"text", "image"})))
+    assert "<Subject 3> = <Picture 1>" in text
+
+
+def test_the_block_tells_the_model_not_to_regroup():
+    """Without that, a grouping the model disagrees with reads as a suggestion. The whole
+    value here is that the user knows something the model cannot see."""
+    refs = ReferenceSet([Reference(kind="image", file="a.png", subjects=[1])])
+    assert refs.subject_groups() == {1: ["<Picture 1>"]}
+
+
+def test_subject_numbers_are_passed_through_as_chosen(tmp_path, monkeypatch):
+    monkeypatch.setattr(prompt.media, "load_image", fake_load_image, raising=False)
+    refs = ReferenceSet([
+        Reference(kind="image", file="a.png", subjects=[1]),
+        Reference(kind="image", file="b.png", subjects=[5]),
+    ])
+    text = _grouping_text(_content(refs, tmp_path))
+    assert "<Subject 5> = <Picture 2>" in text
+    assert "<Subject 2>" not in text, "picking 1 and 5 must not be renumbered to 1 and 2"

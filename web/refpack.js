@@ -248,6 +248,14 @@ const CL = {
     // another tile; it never centres itself and only ever moves rightwards.
     addBtn: 44,
     addGap: 24,
+    // The subject picker, painted INSIDE the tile: 5 across, 2 down - "none" plus 1..9.
+    // 5*24 + 4*2 = 128 inside a 131px tile, so it fits with a hair to spare and needs no
+    // new furniture on a tile whose four corners are already spoken for.
+    subCell: 24,
+    subGap: 2,
+    // The persistent badge, bottom-right above the tag strip - the mirror of the music
+    // toggle's corner, and the only one still free.
+    subPill: 18,
 };
 CL.stripH = CL.stripPad * 2 + CL.tile;
 
@@ -410,6 +418,58 @@ function withRetag(node, mutate) {
     applyRefs(node, next);
 }
 
+// >>> MMRP-SUBJECT
+// The picker's cells, in tile-local coordinates. Cell 0 is "none"; 1..9 are the subjects.
+//
+// Returned as data rather than drawn inline so draw() and the hit test consume ONE
+// description of the grid - a picker whose painted cells and clickable cells disagree is
+// the worst possible version of this control.
+export function subjectCells(tile, cell, gap) {
+    const cols = 5;
+    const rows = 2;
+    const w = cols * cell + (cols - 1) * gap;
+    const h = rows * cell + (rows - 1) * gap;
+    const x0 = Math.round((tile - w) / 2);
+    const y0 = Math.round((tile - h) / 2);
+    const out = [];
+    for (let i = 0; i < cols * rows; i++) {
+        out.push({
+            n: i,                                   // 0 = none
+            x: x0 + (i % cols) * (cell + gap),
+            y: y0 + Math.floor(i / cols) * (cell + gap),
+            w: cell,
+            h: cell,
+        });
+    }
+    return out;
+}
+
+// Toggle one subject on a reference. `0` clears every subject rather than toggling one,
+// which is what the empty square means.
+//
+// Membership is a SET, so a reference can define several subjects - a photo of a woman in
+// a room is both the character and the location, and the packaged prompt has a line for
+// each. Sorted and de-duplicated to match refs.validate_subjects, so the JSON the widget
+// holds is already in the shape Python will hand back.
+export function toggleSubject(subjects, n) {
+    const set = new Set(Array.isArray(subjects) ? subjects : []);
+    if (!n) return [];
+    if (set.has(n)) set.delete(n);
+    else set.add(n);
+    return [...set].sort((a, b) => a - b);
+}
+
+// What the pill shows. Capped, because nine numbers do not fit in an 18px corner and a
+// reference in more than three subjects is not something to render, it is something to
+// summarise.
+export function subjectPillText(subjects, max = 3) {
+    const list = Array.isArray(subjects) ? subjects : [];
+    if (!list.length) return null;
+    if (list.length <= max) return list.join(" ");
+    return `${list.slice(0, max).join(" ")}+${list.length - max}`;
+}
+// <<< MMRP-SUBJECT
+
 // ---- references_json <-> working-state conversion --------------------
 // refs.py's Reference shape:
 //   {"kind": "image"|"video"|"audio", "file": str, [use_soundtrack], [crop], [trim]}
@@ -422,10 +482,27 @@ function takeEdit(v) {
 
 export function fromReferencesList(list) {
     const refs = { images: [], videos: [], audios: [] };
+    // Everything beyond kind/file/use_soundtrack that must survive the round trip. Both
+    // directions whitelist, so a field missing from here is dropped between the widget and
+    // the working state - which presents as "the edit did not save" rather than as an
+    // error, and is worth naming in one place for that reason.
+    const extras = (r) => ({
+            // Sorted and de-duplicated on the way IN, mirroring refs.validate_subjects.
+            // Without it a hand-edited or older value renders as "2 1" on the pill while
+            // the server uses [1, 2] - the UI and the payload disagreeing about the same
+            // reference, which is the exact failure the tag rule's JS mirror exists to
+            // avoid elsewhere.
+            ...(Array.isArray(r.subjects) && r.subjects.length
+                ? { subjects: [...new Set(r.subjects.filter((n) => Number.isInteger(n)
+                                                            && n >= 1 && n <= 9))]
+                        .sort((a, b) => a - b) }
+                : {}),
+    });
     for (const r of list || []) {
         if (!r || typeof r.file !== "string") continue;
         if (r.kind === "image")
-            refs.images.push({ file: r.file, missing: !!r.missing, crop: takeEdit(r.crop) });
+            refs.images.push({ file: r.file, missing: !!r.missing, crop: takeEdit(r.crop),
+                               ...extras(r) });
         else if (r.kind === "video")
             refs.videos.push({
                 file: r.file,
@@ -433,9 +510,11 @@ export function fromReferencesList(list) {
                 missing: !!r.missing,
                 crop: takeEdit(r.crop),
                 trim: takeEdit(r.trim),
+                ...extras(r),
             });
         else if (r.kind === "audio")
-            refs.audios.push({ file: r.file, missing: !!r.missing, trim: takeEdit(r.trim) });
+            refs.audios.push({ file: r.file, missing: !!r.missing, trim: takeEdit(r.trim),
+                               ...extras(r) });
     }
     return refs;
 }
@@ -445,12 +524,19 @@ export function toReferencesList(refs) {
     const withEdits = (d, r) => {
         if (Array.isArray(r.crop)) d.crop = r.crop.slice();
         if (Array.isArray(r.trim)) d.trim = r.trim.slice();
+        if (Array.isArray(r.subjects) && r.subjects.length) {
+            d.subjects = r.subjects.slice();
+        }
         return d;
     };
-    for (const r of refs.images) out.push(withEdits({ kind: "image", file: r.file }, { crop: r.crop }));
+    // The whole reference is handed to withEdits now, not a hand-picked subset of it.
+    // Passing { crop: r.crop } meant every field added later was silently dropped for
+    // images and audio while working for video, which is the sort of asymmetry nobody
+    // finds by reading.
+    for (const r of refs.images) out.push(withEdits({ kind: "image", file: r.file }, r));
     for (const r of refs.videos)
         out.push(withEdits({ kind: "video", file: r.file, use_soundtrack: !!r.use_soundtrack }, r));
-    for (const r of refs.audios) out.push(withEdits({ kind: "audio", file: r.file }, { trim: r.trim }));
+    for (const r of refs.audios) out.push(withEdits({ kind: "audio", file: r.file }, r));
     return out;
 }
 
@@ -1128,6 +1214,23 @@ function drawTile(ctx, kind, ref, lines, x, y, selected, soundState, badgeH, pla
         }
     }
 
+    // Subject membership, bottom-right above the tag strip - the mirror of the music
+    // toggle's corner. Only drawn when the user has actually grouped this reference; an
+    // empty badge on every tile would be noise on the majority that carry none.
+    const pill = subjectPillText(ref.subjects);
+    if (pill) {
+        ctx.font = "bold 11px sans-serif";
+        const pw = Math.max(CL.subPill, ctx.measureText(pill).width + 10);
+        const px = x + T - pw - 3;
+        const py = y + T - badgeH - CL.subPill - 3;
+        ctx.fillStyle = C.text;
+        pathRoundRect(ctx, px, py, pw, CL.subPill, 4);
+        ctx.fill();
+        ctx.fillStyle = "#000";
+        ctx.textAlign = "center";
+        ctx.fillText(pill, px + pw / 2, py + 13);
+    }
+
     ctx.restore();
 
     ctx.strokeStyle = ref.missing ? C.danger : C.border;
@@ -1186,6 +1289,40 @@ function drawAddSquare(ctx, x, y, dimmed) {
     ctx.restore();
 }
 
+// The subject picker, painted inside one tile and hit-tested from the same cell list.
+function drawSubjectPicker(ctx, ref, x, y, regions, kind, index) {
+    const T = CL.tile;
+    ctx.save();
+    pathRoundRect(ctx, x, y, T, T, 4);
+    ctx.clip();
+    // Dark enough that white cell text reads over any thumbnail underneath.
+    ctx.fillStyle = "rgba(0, 0, 0, 0.82)";
+    ctx.fillRect(x, y, T, T);
+
+    const on = new Set(ref.subjects || []);
+    for (const cell of subjectCells(T, CL.subCell, CL.subGap)) {
+        const cx = x + cell.x;
+        const cy = y + cell.y;
+        const active = cell.n === 0 ? on.size === 0 : on.has(cell.n);
+        ctx.fillStyle = active ? C.text : "rgba(255, 255, 255, 0.08)";
+        pathRoundRect(ctx, cx, cy, cell.w, cell.h, 3);
+        ctx.fill();
+        ctx.strokeStyle = active ? "#000" : "#555";
+        ctx.lineWidth = 1;
+        pathRoundRect(ctx, cx + 0.5, cy + 0.5, cell.w - 1, cell.h - 1, 3);
+        ctx.stroke();
+        if (cell.n) {
+            ctx.fillStyle = active ? "#000" : C.textMuted;
+            ctx.font = "bold 12px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText(String(cell.n), cx + cell.w / 2, cy + cell.h / 2 + 4);
+        }
+        regions.push({ type: "subject", kind, index, n: cell.n,
+                       x: cx, y: cy, w: cell.w, h: cell.h });
+    }
+    ctx.restore();
+}
+
 function draw(node) {
     const body = node._mmrpBody;
     if (!body) return;
@@ -1224,6 +1361,7 @@ function draw(node) {
     node._mmrpHit = { regions };
     const playing = node._mmrpPlaying;
     const drag = node._mmrpDrag;
+    const picker = node._mmrpPicker;
 
     for (const row of CANVAS_ROWS.rows) {
         const kind = row.kind;
@@ -1289,8 +1427,11 @@ function draw(node) {
 
             const dragging = drag && drag.active && drag.kind === kind && drag.index === i;
             if (dragging) ctx.globalAlpha = 0.35;
-            drawTile(ctx, kind, ref, lines, tx, tileY, selected, soundState, badgeH, playState);
+            const picking = picker && picker.kind === kind && picker.index === i;
+            drawTile(ctx, kind, ref, lines, tx, tileY, selected, soundState, badgeH,
+                     picking ? null : playState);
             ctx.globalAlpha = 1;
+            if (picking) drawSubjectPicker(ctx, ref, tx, tileY, regions, kind, i);
 
             // Hit regions, most specific last — hitTest scans in reverse so the
             // play/delete/soundtrack/edit affordances win over the tile containing them.
@@ -1474,8 +1615,16 @@ function finishDrag(node, e) {
     endDragListeners(node);
     if (!drag) return;
     if (!drag.active) {
-        // Never crossed the threshold, so it was a click and the old meaning stands.
+        // Never crossed the threshold, so it was a click. Selecting still happens; the
+        // click additionally toggles this tile's subject picker, which is the gesture
+        // that makes grouping quick. Clicking a DIFFERENT tile moves the picker there
+        // rather than closing it, so working along a row is one click per tile.
         node._mmrpSelected = { kind: drag.kind, index: drag.index };
+        const open = node._mmrpPicker;
+        node._mmrpPicker = (open && open.kind === drag.kind && open.index === drag.index)
+            ? null
+            : { kind: drag.kind, index: drag.index };
+        if (node._mmrpPicker) stopPreview(node);   // the picker covers the play glyph
         scheduleDraw(node);
         return;
     }
@@ -1490,6 +1639,7 @@ function finishDrag(node, e) {
         return;
     }
     // Reordering renumbers the tags, which is exactly what the retag pass is for.
+    node._mmrpPicker = null;   // same reason as removeRef: indices moved
     withRetag(node, () => {
         const refs = cloneRefs(node._mmrpRefs);
         refs[`${drag.kind}s`] = moveRef(refs[`${drag.kind}s`], drag.index, to);
@@ -1514,6 +1664,7 @@ function onDragMove(node, e) {
         // underneath it.
         stopPreview(node);
         node._mmrpSelected = null;
+        node._mmrpPicker = null;
     }
     drag.insertAt = dropIndexAt(node, drag.kind, pos.x, pos.y);
     scheduleDraw(node);
@@ -1524,13 +1675,26 @@ function onCanvasMouseDown(node, e) {
     const pos = getMousePos(node._mmrpBody.canvas, e);
     const hit = hitTest(node, pos.x, pos.y);
     if (!hit) {
-        if (node._mmrpSelected) {
+        if (node._mmrpSelected || node._mmrpPicker) {
             node._mmrpSelected = null;
+            node._mmrpPicker = null;
             scheduleDraw(node);
         }
         return;
     }
-    if (hit.type === "del") {
+    if (hit.type === "subject") {
+        // Cells TOGGLE and the picker stays open, so several subjects can be set in one
+        // visit. Closing after each pick would make the multi-subject case - the reason
+        // this is a set and not a single value - four gestures instead of one.
+        const next = cloneRefs(node._mmrpRefs);
+        const target = next[`${hit.kind}s`][hit.index];
+        if (target) {
+            target.subjects = toggleSubject(target.subjects, hit.n);
+            if (!target.subjects.length) delete target.subjects;
+            mlog("subjects", { kind: hit.kind, file: target.file, subjects: target.subjects || [] });
+        }
+        applyRefs(node, next);
+    } else if (hit.type === "del") {
         removeRef(node, hit.kind, hit.index);
     } else if (hit.type === "sound") {
         toggleSoundtrack(node, hit.file);
@@ -1748,6 +1912,9 @@ async function addFiles(node, kind, files) {
 }
 
 function removeRef(node, kind, index) {
+    // The picker is pinned to an index and delete shifts them, so it would end up open on
+    // a different reference than the one the user had chosen. Closing is the honest move.
+    node._mmrpPicker = null;
     if (node._mmrpSelected && node._mmrpSelected.kind === kind) {
         if (node._mmrpSelected.index === index) node._mmrpSelected = null;
         else if (node._mmrpSelected.index > index) node._mmrpSelected.index -= 1;
