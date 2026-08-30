@@ -732,11 +732,31 @@ function fileUrl(file) {
 // on the user's own machine (download + file picker, see "Config save/load" below),
 // so the /minimax_refpack/packs routes are no longer called from the UI at all.
 
-async function apiSystemPromptDefault() {
-    const res = await fetch("/minimax_refpack/system_prompt");
+// `mode` is which packaged prompt to hand back — the two registers are separate files.
+// Omitted, the route answers `standard`, which is what it always did and is why a
+// replacement workflow used to be shown the wrong one.
+async function apiSystemPromptDefault(mode) {
+    const qs = mode ? `?mode=${encodeURIComponent(mode)}` : "";
+    const res = await fetch(`/minimax_refpack/system_prompt${qs}`);
     if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
     const data = await res.json();
-    return data.default || "";
+    // The route echoes back the mode it RESOLVED, which is the point of it echoing at
+    // all: it absorbs anything it does not recognise into `standard`, so what came back
+    // is not necessarily what was asked for. Returning it lets the caller label the text
+    // it is actually showing rather than the text it hoped for.
+    return { text: data.default || "", mode: data.mode || mode || "standard" };
+}
+
+// Which packaged prompt this workflow is actually going to use.
+//
+// `auto` is genuinely unanswerable here: it is resolved at queue time by a classifier
+// that reads the reference set and the direction text, so the browser cannot know. It
+// resolves to `standard` because that is what auto falls back to on every failure path
+// (prompt.classify_mode) and what it picks for almost every job — but the modal SAYS so
+// rather than presenting a guess as a fact.
+function systemPromptModeOf(node) {
+    const jobType = String(widgetByName(node, "job_type")?.value ?? "").trim().toLowerCase();
+    return jobType === "replacement" ? "replacement" : "standard";
 }
 
 // >>> MMRP-LOOPBACK
@@ -2901,6 +2921,17 @@ function openLocalServerModal(node, anchorBtn) {
 
 function openSystemPromptModal(node) {
     const systemPromptWidget = widgetByName(node, "system_prompt");
+    const mode = systemPromptModeOf(node);
+    const jobType = String(widgetByName(node, "job_type")?.value ?? "").trim().toLowerCase();
+    // Only `auto` is ambiguous, and only `auto` gets the caveat — saying "assuming
+    // standard" under an explicit job_type: standard would be noise about a certainty.
+    const noteFor = (which) =>
+        jobType === "auto"
+            ? " job_type is `auto`, so the register is picked at queue time by a " +
+              `classifier: this is the \`${which}\` prompt, and a job routed to the other ` +
+              "register uses a different one."
+            : ` This is the \`${which}\` prompt, matching job_type.`;
+    const modeNote = noteFor(mode);
 
     const overlay = document.createElement("div");
     overlay.className = "mmrp-overlay";
@@ -2919,7 +2950,7 @@ function openSystemPromptModal(node) {
 
     const hint = document.createElement("div");
     hint.className = "mmrp-modal-hint";
-    hint.textContent = "Empty = use the built-in default.";
+    hint.textContent = "Empty = use the built-in default." + modeNote;
     modal.appendChild(hint);
 
     const textarea = document.createElement("textarea");
@@ -2934,17 +2965,23 @@ function openSystemPromptModal(node) {
     // textarea back only if it differs from the default (see saveBtn).
     let prefilledDefault = "";
     if (!textarea.value.trim()) {
-        hint.textContent = "Showing the built-in default. Edit to override it for this workflow.";
-        apiSystemPromptDefault()
-            .then((text) => {
+        hint.textContent =
+            "Showing the built-in default. Edit to override it for this workflow." + modeNote;
+        apiSystemPromptDefault(mode)
+            .then(({ text, mode: served }) => {
                 // Don't clobber anything the user typed while the fetch was in flight.
                 if (!textarea.value.trim()) {
                     prefilledDefault = text;
                     textarea.value = text;
                 }
+                if (served !== mode) {
+                    hint.textContent =
+                        "Showing the built-in default. Edit to override it for this "
+                        + "workflow." + noteFor(served);
+                }
             })
             .catch(() => {
-                hint.textContent = "Empty = use the built-in default.";
+                hint.textContent = "Empty = use the built-in default." + modeNote;
             });
     }
 
@@ -2953,10 +2990,21 @@ function openSystemPromptModal(node) {
 
     const loadDefaultBtn = document.createElement("button");
     loadDefaultBtn.className = "mmrp-btn";
-    loadDefaultBtn.textContent = "Load default";
+    loadDefaultBtn.textContent = mode === "replacement" ? "Load default (replacement)" : "Load default";
     loadDefaultBtn.onclick = async () => {
         try {
-            textarea.value = await apiSystemPromptDefault();
+            const { text, mode: served } = await apiSystemPromptDefault(mode);
+            textarea.value = text;
+            // 7: this used to leave prefilledDefault at "" - so Save & close saw an
+            // edited-looking box and froze the whole packaged prompt into the workflow,
+            // which is exactly what its own comment says it is trying to avoid. It
+            // matters more now that the text is register-specific: a frozen replacement
+            // prompt would then be used for a standard run.
+            prefilledDefault = text;
+            if (served !== mode) {
+                hint.textContent = "Showing the built-in default. Edit to override it "
+                    + "for this workflow." + noteFor(served);
+            }
         } catch (e) {
             alert(`Couldn't load the default: ${e.message}`);
         }
