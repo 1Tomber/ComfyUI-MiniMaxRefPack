@@ -740,14 +740,21 @@ def write_prompt(
     reasoning_effort: str = DEFAULT_REASONING_EFFORT, job_type: str = "auto",
     classifier_model: str = "", debug: list | None = None,
     provider: str = "openrouter", api_base: str = "",
+    local_ttl: int = _endpoint.LOCAL_TTL_OFF,
+    local_server: str = _endpoint.DEFAULT_LOCAL_SERVER,
+    local_send_reasoning: bool = False, local_extra_body: str = "",
 ) -> str:
     """Pass a list as `debug` to have the rendered payload appended to it. A sink rather
     than a second return value, so the frozen `-> str` contract and every existing caller
     stay untouched, and so the payload survives a raised PromptError.
 
-    `provider`/`api_base` default to today's behaviour, so every existing caller and test
-    that omits them posts to OpenRouter exactly as before."""
-    ep = _endpoint.resolve(provider, api_base)
+    `provider`/`api_base` and every `local_*` setting default to today's behaviour, so
+    every existing caller and test that omits them posts to OpenRouter exactly as before."""
+    ep = _endpoint.resolve(
+        provider, api_base,
+        local_ttl=local_ttl, local_server=local_server,
+        local_send_reasoning=local_send_reasoning, local_extra_body=local_extra_body,
+    )
     key = _key_for(ep, api_key)
 
     # job_type picks the register. "auto" asks a cheap classifier; anything else is taken
@@ -793,8 +800,22 @@ def write_prompt(
     # providers and drops it for models that don't reason; a plain OpenAI-compatible
     # server is more likely to reject an unknown top-level field outright, which would
     # turn a working local setup into a 400 nobody can explain.
+    # ...and in the spelling that endpoint understands. OpenRouter takes the NESTED
+    # `reasoning: {effort}` it normalises across providers; a plain OpenAI-compatible
+    # server takes the FLAT `reasoning_effort` and has never heard of the other. Sending
+    # the wrong one is worse than sending nothing: it is silently ignored, so the model
+    # reasons anyway and the user sees only a slow call and a truncated answer.
     if ep.sends_reasoning and reasoning_effort in REASONING_EFFORTS:
-        payload["reasoning"] = {"effort": reasoning_effort}
+        if ep.reasoning_style == "flat":
+            payload["reasoning_effort"] = reasoning_effort
+        else:
+            payload["reasoning"] = {"effort": reasoning_effort}
+
+    # Server-specific top-level fields (idle-unload TTL, and whatever local_extra_body
+    # carries). Merged LAST so the endpoint's answer wins over anything assembled above,
+    # and applied here rather than inside the payload literal so that `payload` stays the
+    # OpenAI request shape and everything vendor-specific stays in one place.
+    payload.update(ep.extra_body)
 
     # Filled before the call, so a failed request still leaves the caller the payload
     # that caused it - that's when it's worth the most.
@@ -803,6 +824,9 @@ def write_prompt(
         # of the payload render rather than being a second entry.
         routing = f"job_type: {job_type} -> {resolved} (system prompt: {resolved}.md)"
         routing += f"\nendpoint: {ep.describe()}"
+        extras = ep.describe_extras()
+        if extras:
+            routing += f"\n{extras}"
         if ep.degrades:
             missing = ", ".join(sorted(_DEFAULT_ENDPOINT.accepts - ep.accepts))
             routing += (

@@ -96,6 +96,47 @@ On `prompt_provider: local` the environment is never read. Only a key typed into
 | `local_model_slug` | The model id your own server reports, used only on `local`. Ignored on every other provider. The **Local LLM** button fills it in. |
 | `system_prompt` | The full instructions the model is given, editable in the settings modal and saved with the workflow. Blank uses the packaged default. Rewrite it if you want prompts in your own style. |
 | `max_reference_edge` | Downscales a reference **image** whose long edge is bigger than this, `0` turns it off. Never upscales. Reference videos are already capped by the core node. |
+| `local_ttl` | `local` only. Seconds your server should keep the model loaded after answering. `-1` (default) sends nothing. See below. |
+| `local_server` | `local` only. `auto` / `lmstudio` / `ollama` / `generic` — decides what `local_ttl` is *called* on the wire. |
+| `local_send_reasoning` | `local` only. Send `reasoning_effort` to your own server. Off by default. |
+| `local_extra_body` | `local` only. A JSON object merged into the request as top-level fields. Applied last, so it overrides everything else. |
+
+## Sharing a GPU with the model you're generating with
+
+If the prompt writer runs on the same card as your diffusion model, it has to give the
+VRAM back. A 27B Q4 vision model and a video model will not co-reside, and a JIT-loaded
+writer that stays resident after answering costs you the generation it just wrote the
+prompt for.
+
+Both popular servers can unload on idle, and they disagree about what the field is called
+**and** about what zero means:
+
+| Server | Field | What `0` means there |
+| --- | --- | --- |
+| LM Studio | `ttl` | **Unset** — falls back to its 60-minute default. Use `1` for "unload now". |
+| Ollama | `keep_alive` | Unload immediately. |
+
+So `local_ttl` uses **`-1` as its off switch**, and anything `>= 0` goes on the wire
+untouched, meaning whatever your server means by it. The node does not rewrite your
+number, because there is no rewriting rule that is right for both.
+
+`local_server` picks the field name. `auto` guesses from the port — 1234 is LM Studio,
+11434 is Ollama — because an OpenAI-compatible `/v1` surface does not report what is
+behind it. A port it does not recognise sends **no** idle-unload field rather than
+guessing, and `debug` says so, since a TTL that silently did nothing looks exactly like
+one that worked right up until the VRAM is still gone.
+
+**Thinking models.** `local_send_reasoning` sends `reasoning_effort` to your server —
+the flat field, which is what an OpenAI-compatible server takes, not the nested
+`reasoning: {effort}` OpenRouter normalises. It is off by default because a plain server
+is likelier to reject an unknown top-level field than ignore it. Turn it on with
+`reasoning_effort: none` for a thinking checkpoint that would otherwise spend its whole
+token budget reasoning and never reach the answer.
+
+**Anything else**, put in `local_extra_body` as a JSON object — `{"top_k": 40}`. It is
+merged last, so it beats the node's own guess. It may not set `messages` or `model`: the
+node builds the first from your references and reports the second in `debug`, so
+overriding either would make it disagree with what it actually sent.
 
 ## The tag rule
 

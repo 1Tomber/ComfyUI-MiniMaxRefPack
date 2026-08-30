@@ -17,7 +17,7 @@ import types
 
 import pytest
 
-from minimax_refpack import nodes, refs
+from minimax_refpack import endpoint, nodes, refs
 
 
 @pytest.fixture
@@ -158,6 +158,10 @@ def test_the_widgets_are_named_and_ordered_as_declared():
         "local_model_slug", "job_type", "width", "height", "length_seconds",
         "max_reference_edge",
         "system_prompt_replacement",
+        "local_ttl",
+        "local_server",
+        "local_send_reasoning",
+        "local_extra_body",
     ]
 
 
@@ -167,3 +171,63 @@ def test_the_debug_header_names_the_field_that_was_actually_used(env, sent):
     debug = out[refs.slot_index("debug")]
     assert "local/model" in debug
     assert "dropdown/model" not in debug
+
+
+# ---- the local server's own request fields reach the writer ----------------------
+
+
+def test_the_local_settings_are_handed_to_the_writer(env, sent):
+    _build(direction="d", prompt_provider="local", local_model_slug="m",
+           api_base="http://127.0.0.1:1234/v1",
+           local_ttl=1, local_server="lmstudio", local_send_reasoning=True,
+           local_extra_body='{"top_k": 40}')
+    assert sent["local_ttl"] == 1
+    assert sent["local_server"] == "lmstudio"
+    assert sent["local_send_reasoning"] is True
+    assert sent["local_extra_body"] == '{"top_k": 40}'
+
+
+def test_build_accepts_the_new_widgets_without_them_being_passed(env, sent):
+    """build() has no **kwargs, unlike IS_CHANGED. Every declared widget must be a real
+    parameter with a default or an API client replaying a stored prompt breaks at queue
+    time - and so does a workflow saved before these widgets existed."""
+    _build(direction="d", prompt_provider="local", local_model_slug="m",
+           api_base="http://127.0.0.1:1234/v1")
+    assert sent["local_ttl"] == endpoint.LOCAL_TTL_OFF
+    assert sent["local_send_reasoning"] is False
+
+
+def test_a_broken_extra_body_reads_as_a_user_error_not_a_crash(env):
+    """It reaches endpoint.resolve as a ValueError. build() re-raises it wrapped, the
+    same way it already does for "local with no api_base", so ComfyUI shows a sentence
+    naming the widget instead of a traceback."""
+    with pytest.raises(ValueError) as e:
+        _build(direction="d", prompt_provider="local", local_model_slug="m",
+               api_base="http://127.0.0.1:1234/v1", local_extra_body="{not json")
+    assert "prompt generation failed" in str(e.value)
+    assert "local_extra_body" in str(e.value)
+
+
+def test_the_debug_header_states_the_auto_guess_and_the_field_it_picked(env, sent):
+    out = _build(direction="d", prompt_provider="local", local_model_slug="m",
+                 api_base="http://127.0.0.1:11434/v1", local_ttl=0, local_server="auto")
+    debug = out[refs.slot_index("debug")]
+    assert "auto:ollama" in debug
+    assert "keep_alive" in debug
+
+
+def test_the_debug_header_says_when_the_ttl_will_be_dropped(env, sent):
+    """local_server=generic takes no idle-unload field, so a value typed into local_ttl
+    goes nowhere. Saying so beats letting the user conclude their server ignored it."""
+    out = _build(direction="d", prompt_provider="local", local_model_slug="m",
+                 api_base="http://127.0.0.1:1234/v1", local_ttl=30, local_server="generic")
+    assert "the value is dropped" in out[refs.slot_index("debug")]
+
+
+def test_the_local_block_stays_out_of_an_openrouter_debug_header(env, sent):
+    """Four settings that do nothing on this path would just be noise in the one output
+    a user pastes into a bug report."""
+    out = _build(direction="d", prompt_provider="openrouter", openrouter_model="m",
+                 local_ttl=30, local_server="ollama")
+    debug = out[refs.slot_index("debug")]
+    assert "local_ttl" not in debug and "local_server" not in debug

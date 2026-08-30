@@ -693,6 +693,10 @@ def test_the_cap_is_declared_last_so_old_workflows_restore_unchanged():
         "local_model_slug", "job_type", "width", "height", "length_seconds",
         "max_reference_edge",
         "system_prompt_replacement",
+        "local_ttl",
+        "local_server",
+        "local_send_reasoning",
+        "local_extra_body",
     ]
 
 
