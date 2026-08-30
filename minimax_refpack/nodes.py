@@ -214,6 +214,49 @@ class MiniMaxH3ReferencePack:
                                "arrives huge and every sampling step pays for it. "
                                "Reference videos are already capped by the core node.",
                 }),
+
+                # --- the local server's own knobs; hidden by the UI on other providers ---
+                #
+                # APPENDED, not filed into the `local` group above, even though that is
+                # where they belong on the canvas. This list is a WIRE FORMAT: litegraph
+                # restores widgets_values POSITIONALLY, so inserting anything mid-list
+                # re-points every widget after it in every saved workflow. 0.3.3 paid for
+                # that lesson and needed remapWidgetValues to dig out. Appending is the one
+                # edit that is safe without a migration, and web/refpack.js groups them
+                # visually by NAME, so the canvas still reads correctly.
+                "local_ttl": ("INT", {
+                    "default": endpoint.LOCAL_TTL_OFF, "min": -1, "max": 86400,
+                    "tooltip": "Only on prompt_provider 'local'. Seconds the server should "
+                               "keep the model loaded after answering. -1 = don't send the "
+                               "field at all (default). Sent verbatim, so it means whatever "
+                               "YOUR server means: LM Studio reads ttl=0 as UNSET and falls "
+                               "back to 60 minutes, so use 1 for 'unload now'; Ollama reads "
+                               "keep_alive=0 as 'unload now'. Set this if the prompt writer "
+                               "has to share a GPU with your diffusion model.",
+                }),
+                "local_server": (list(endpoint.LOCAL_SERVERS), {
+                    "default": endpoint.DEFAULT_LOCAL_SERVER,
+                    "tooltip": "Only on 'local'. Which server is behind api_base, which "
+                               "decides what local_ttl is CALLED: lmstudio sends 'ttl', "
+                               "ollama sends 'keep_alive', generic sends neither. auto "
+                               "guesses from the port (1234 / 11434) and says what it "
+                               "guessed in the debug output.",
+                }),
+                "local_send_reasoning": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Only on 'local'. Send reasoning_effort to your own server. "
+                               "OFF by default because a plain OpenAI-compatible server is "
+                               "likelier to reject an unknown field than ignore it. Turn it "
+                               "ON for a thinking model that would otherwise burn its whole "
+                               "token budget before answering.",
+                }),
+                "local_extra_body": ("STRING", {
+                    "multiline": True, "dynamicPrompts": False, "default": "",
+                    "tooltip": "Only on 'local'. A JSON object merged into the request as "
+                               "top-level fields, e.g. {\"ttl\": 1}. Applied LAST, so it "
+                               "overrides everything above it. The escape hatch for a "
+                               "server this node has not been taught about.",
+                }),
             },
         }
 
@@ -229,6 +272,8 @@ class MiniMaxH3ReferencePack:
         prompt_provider=endpoint.DEFAULT_PROVIDER,
         reasoning_effort=prompt.DEFAULT_REASONING_EFFORT, job_type="auto",
         max_reference_edge=DEFAULT_MAX_REFERENCE_EDGE, api_base="", local_model_slug="",
+        local_ttl=endpoint.LOCAL_TTL_OFF, local_server=endpoint.DEFAULT_LOCAL_SERVER,
+        local_send_reasoning=False, local_extra_body="",
         use_openrouter=None, model=None, model_override=None, **kwargs
     ):
         openrouter_model = openrouter_model or (model or "")
@@ -244,12 +289,18 @@ class MiniMaxH3ReferencePack:
         # and reasoning_effort changes the completion, so all five move the key too.
         # api_base and model_override change WHERE the call goes and WHAT answers it, so
         # they belong here as much as `model` does.
+        # The four local_* settings all change the REQUEST BODY (an idle-unload field,
+        # the reasoning field, arbitrary extra keys), and a changed request can change the
+        # completion, so they move the key like every other payload input. Leaving them
+        # out would serve a cached prompt written under the old settings.
         return "|".join([
             sig, direction, openrouter_model, references_json, system_prompt,
             str(width), str(height), str(length_seconds),
             _provider_of(prompt_provider, use_openrouter),
             str(reasoning_effort), str(job_type), str(max_reference_edge),
             str(api_base), str(local_model_slug),
+            str(local_ttl), str(local_server), str(local_send_reasoning),
+            str(local_extra_body),
         ])
 
     def build(
@@ -258,6 +309,8 @@ class MiniMaxH3ReferencePack:
         prompt_provider=endpoint.DEFAULT_PROVIDER,
         reasoning_effort=prompt.DEFAULT_REASONING_EFFORT, job_type="auto",
         max_reference_edge=DEFAULT_MAX_REFERENCE_EDGE, api_base="", local_model_slug="",
+        local_ttl=endpoint.LOCAL_TTL_OFF, local_server=endpoint.DEFAULT_LOCAL_SERVER,
+        local_send_reasoning=False, local_extra_body="",
         use_openrouter=None, model=None, model_override=None,
     ):
         # Legacy kwarg names, for an API client replaying a prompt stored before 0.3.2.
@@ -323,9 +376,21 @@ class MiniMaxH3ReferencePack:
             + (" (local_model_slug)" if provider == "local" else " (openrouter_model)"),
             f"width: {width or '(unspecified)'}  height: {height or '(unspecified)'}  "
             f"length_seconds: {length_seconds or '(unspecified)'}",
-            f"reasoning_effort: {reasoning_effort}",
+            f"reasoning_effort: {reasoning_effort}"
+            + ("" if provider != "local" else
+               f" (sent: {'yes, as reasoning_effort' if local_send_reasoning else 'no'})"),
             f"max_reference_edge: {max_reference_edge or 'off'}",
             f"job_type: {job_type}",   # rewritten below once auto has resolved
+            # Only on local, because these four do nothing anywhere else and a header full
+            # of inapplicable settings is how a debug output stops being read.
+            *([] if provider != "local" else [
+                f"local_ttl: {local_ttl}"
+                + (" (off, no idle-unload field sent)" if int(local_ttl) < 0 else
+                   f" seconds, as {endpoint.ttl_field_for(local_server, api_base)[0] or 'NOTHING - '
+                   'this server takes no idle-unload field, so the value is dropped'}"),
+                f"local_server: {local_server} -> {endpoint.ttl_field_for(local_server, api_base)[1]}",
+                f"local_extra_body: {local_extra_body.strip() or '(empty)'}",
+            ]),
             f"system_prompt: {'workflow override' if (system_prompt or '').strip() else 'packaged default'}",
             f"references: {len(reference_set.references)} "
             f"({', '.join(f'{t.tag} {t.file}' for t in reference_set.assign_tags()) or 'none'})",
@@ -366,11 +431,17 @@ class MiniMaxH3ReferencePack:
                     debug=debug_sink,
                     provider=provider,
                     api_base=api_base,
+                    local_ttl=local_ttl,
+                    local_server=local_server,
+                    local_send_reasoning=local_send_reasoning,
+                    local_extra_body=local_extra_body,
                 )
             except ValueError as e:
-                # endpoint.resolve raises this for "local with no api_base". It is a user
-                # error with a fixable cause, so it reads as one rather than as a crash.
-                if "api_base" not in str(e):
+                # endpoint.resolve raises this for "local with no api_base" and for a
+                # local_extra_body that is not a JSON object. Both are user errors with a
+                # fixable cause named in the message, so they read as one rather than as a
+                # crash. Anything else is still a real fault and goes up untouched.
+                if not any(field in str(e) for field in ("api_base", "local_extra_body")):
                     raise
                 raise ValueError(f"prompt generation failed: {e}") from e
             except prompt.PromptError as e:

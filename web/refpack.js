@@ -157,11 +157,32 @@ const ORDER_0_3_3 = [
     "max_reference_edge",
 ];
 
+// The four local_* settings were APPENDED to the 0.3.3 layout rather than filed next to
+// api_base where they belong on the canvas. widgets_values is positional, so inserting
+// mid-list re-points every widget after it in every saved workflow — the exact failure
+// 0.3.3 itself caused and needed remapWidgetValues to dig out of. The UI groups them by
+// NAME instead (see MMRP-VISIBILITY), so the canvas still reads correctly.
+//
+// The useful consequence: the current layout is the 0.3.3 layout plus a tail, so a 0.3.3
+// array restores correctly by position with no remapping at all.
+const ORDER_CURRENT = ORDER_0_3_3.concat([
+    "local_ttl", "local_server", "local_send_reasoning", "local_extra_body",
+]);
+
+// True when restoring this layout POSITIONALLY already lands every value in the right
+// widget — it is the current order, or an earlier order the current one merely extends.
+// Widgets past the end of a shorter array simply keep their defaults. Appending is the
+// only edit with that property, which is exactly why it is the safe one.
+function isPrefixOfCurrent(order) {
+    return Array.isArray(order) && order.every((name, i) => ORDER_CURRENT[i] === name);
+}
+
 function detectLayout(values) {
     if (!Array.isArray(values)) return null;
-    // 0.3.3 already: slot 3 holds a provider string.
+    // Slot 3 holds a provider string in 0.3.3 and everything after it; the LENGTH is what
+    // separates those, since appending is the only change that has happened since.
     if (PROVIDER_VALUES.includes(String(values[3] ?? "").trim().toLowerCase())) {
-        return ORDER_0_3_3;
+        return values.length > ORDER_0_3_3.length ? ORDER_CURRENT : ORDER_0_3_3;
     }
     // 0.3.1: use_openrouter was a boolean at slot 8. 0.3.2: a provider string there.
     const slot8 = values[8];
@@ -2382,7 +2403,13 @@ function setWidgetVisible(w, visible) {
 // that let a local model id sit in a field OpenRouter then read.
 const PROVIDER_FIELDS = {
     openrouter: ["openrouter_api_key", "openrouter_model", "reasoning_effort"],
-    local: ["api_base", "local_model_slug"],
+    local: [
+        "api_base", "local_model_slug",
+        // Declared at the END of INPUT_TYPES (widgets_values is positional — see
+        // ORDER_CURRENT) but grouped HERE, because grouping is by name and the canvas
+        // should read by decision flow even though the wire format cannot.
+        "local_ttl", "local_server", "local_send_reasoning", "local_extra_body",
+    ],
 };
 // <<< MMRP-VISIBILITY
 
@@ -2401,6 +2428,14 @@ function syncLocalBtn(node) {
             setWidgetVisible(widgetByName(node, field), provider === name);
         }
     }
+    // reasoning_effort is the one field with two owners. It is OpenRouter's by default,
+    // but turning on local_send_reasoning makes it live on `local` too — and a setting
+    // that is being sent while its own control stays hidden is the same trap this whole
+    // function exists to prevent, just inverted.
+    if (provider === "local") {
+        const sendsReasoning = !!widgetByName(node, "local_send_reasoning")?.value;
+        setWidgetVisible(widgetByName(node, "reasoning_effort"), sendsReasoning);
+    }
     // last_y only settles after litegraph's next layout pass, so re-assert on the frame
     // after rather than reading a stale height now.
     if (node.setSize) {
@@ -2418,15 +2453,22 @@ function syncLocalBtn(node) {
 // than once for a node across a paste or an undo, and a chain of wrappers would fire the
 // original callback once per wrap.
 function watchProviderWidget(node) {
-    const w = widgetByName(node, "prompt_provider");
-    if (!w || w._mmrpWatched) return;
-    const orig = w.callback;
-    w.callback = function (...args) {
-        const out = orig ? orig.apply(this, args) : undefined;
-        syncLocalBtn(node);
-        return out;
-    };
-    w._mmrpWatched = true;
+    // Two widgets decide what is visible, not one. prompt_provider picks the group;
+    // local_send_reasoning decides whether reasoning_effort joins the local group. Both
+    // are watched the same way, and both are guarded against double-wrapping because
+    // onNodeCreated can run more than once across a paste or an undo and a chain of
+    // wrappers would fire the original callback once per wrap.
+    for (const name of ["prompt_provider", "local_send_reasoning"]) {
+        const w = widgetByName(node, name);
+        if (!w || w._mmrpWatched) continue;
+        const orig = w.callback;
+        w.callback = function (...args) {
+            const out = orig ? orig.apply(this, args) : undefined;
+            syncLocalBtn(node);
+            return out;
+        };
+        w._mmrpWatched = true;
+    }
 }
 
 
@@ -2802,7 +2844,12 @@ app.registerExtension({
                 // layout it was actually written in.
                 const saved = info && info.widgets_values;
                 const byName = remapWidgetValues(saved);
-                if (byName && detectLayout(saved) !== ORDER_0_3_3) {
+                // Was `!== ORDER_0_3_3`. A 0.3.3 array is now a strict PREFIX of the
+                // current layout, so positional restore has already put every one of its
+                // values in the right widget - remapping it would be a no-op that still
+                // logged "migrated_layout" and made a workflow needing nothing look like
+                // one that had been repaired.
+                if (byName && !isPrefixOfCurrent(detectLayout(saved))) {
                     for (const [name, value] of Object.entries(byName)) {
                         setWidget(this, name, value);
                     }

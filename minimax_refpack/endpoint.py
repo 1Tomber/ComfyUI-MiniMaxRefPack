@@ -227,6 +227,15 @@ def ttl_field_for(server: str, base: str) -> tuple[str | None, str]:
     return field_name, f"auto:{flavor}"
 
 
+# Fields local_extra_body may not set, because the node's own account of the run depends
+# on owning them. `messages` IS the prompt this node exists to assemble - replacing it
+# from a text box throws away every reference and, with an empty list, crashes the reader
+# that pulls the content parts back out for the size log. `model` is what the debug header
+# and the widget both state was used, so overriding it here makes the node lie about where
+# the completion came from. Everything else is fair game: that is the point of the field.
+_EXTRA_BODY_RESERVED = frozenset({"messages", "model"})
+
+
 def parse_extra_body(raw) -> dict:
     """The `local_extra_body` widget -> a dict of top-level payload fields.
 
@@ -241,16 +250,24 @@ def parse_extra_body(raw) -> dict:
     text = (raw or "").strip() if isinstance(raw, str) else raw
     if not text:
         return {}
-    if isinstance(text, dict):
-        return dict(text)
-    try:
-        parsed = json.loads(text)
-    except (TypeError, ValueError) as e:
-        raise ValueError(f"local_extra_body is not valid JSON: {e}") from None
+    parsed = dict(text) if isinstance(text, dict) else None
+    if parsed is None:
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"local_extra_body is not valid JSON: {e}") from None
     if not isinstance(parsed, dict):
         raise ValueError(
             f"local_extra_body must be a JSON object like {{\"ttl\": 1}}, got "
             f"{type(parsed).__name__}"
+        )
+    clashes = sorted(_EXTRA_BODY_RESERVED & set(parsed))
+    if clashes:
+        raise ValueError(
+            f"local_extra_body may not set {', '.join(clashes)}: the node builds "
+            f"`messages` from your references and reports `model` in its debug output, "
+            f"so overriding either would make it disagree with what it actually sent. "
+            f"Use the model widget for the model."
         )
     return parsed
 

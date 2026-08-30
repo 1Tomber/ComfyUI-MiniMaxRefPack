@@ -263,3 +263,94 @@ def test_failures_name_the_endpoint_the_user_actually_used(monkeypatch, tmp_path
         )
     assert "localhost:1234" in str(e.value)
     assert "OpenRouter" not in str(e.value)
+
+
+# ---- the local server's own request fields ---------------------------------------
+#
+# These exist to retire a side-car proxy. Running LM Studio beside ComfyUI on one card
+# meant putting an aiohttp proxy in front of it purely to inject `ttl` (so a JIT-loaded
+# model unloads instead of squatting in VRAM) and `reasoning_effort` (so a thinking model
+# does not burn its whole budget before answering). Both are things the node can send.
+
+LOCAL = "http://127.0.0.1:1234/v1"
+
+
+def _write(tmp_path, **kw):
+    kw.setdefault("provider", "local")
+    kw.setdefault("api_base", LOCAL)
+    kw.setdefault("model", "local/model")
+    return prompt.write_prompt(
+        references=ReferenceSet([]), input_dir=str(tmp_path), direction="d",
+        api_key="", **kw
+    )
+
+
+def test_the_ttl_reaches_the_request_body(calls, tmp_path):
+    _write(tmp_path, local_ttl=1, local_server="lmstudio")
+    assert calls[-1]["json"]["ttl"] == 1
+
+
+def test_no_ttl_field_appears_when_it_is_off(calls, tmp_path):
+    _write(tmp_path)
+    body = calls[-1]["json"]
+    assert "ttl" not in body and "keep_alive" not in body
+
+
+def test_reasoning_goes_flat_to_a_local_server_and_nested_to_openrouter(calls, tmp_path):
+    _write(tmp_path, local_send_reasoning=True, reasoning_effort="none")
+    local_body = calls[-1]["json"]
+    assert local_body["reasoning_effort"] == "none"
+    assert "reasoning" not in local_body, "the nested shape is OpenRouter's and is ignored here"
+
+    prompt.write_prompt(references=ReferenceSet([]), input_dir=str(tmp_path), direction="d",
+                        api_key="k", model="m", provider="openrouter",
+                        reasoning_effort="none")
+    or_body = calls[-1]["json"]
+    assert or_body["reasoning"] == {"effort": "none"}
+    assert "reasoning_effort" not in or_body
+
+
+def test_local_still_sends_no_reasoning_by_default(calls, tmp_path):
+    """Unchanged default. A plain OpenAI-compatible server is likelier to reject an
+    unknown top-level field than ignore it, so this is opt-in."""
+    _write(tmp_path)
+    body = calls[-1]["json"]
+    assert "reasoning" not in body and "reasoning_effort" not in body
+
+
+def test_extra_body_reaches_the_wire_and_overrides_the_ttl(calls, tmp_path):
+    _write(tmp_path, local_ttl=600, local_server="lmstudio", local_extra_body='{"ttl": 1}')
+    assert calls[-1]["json"]["ttl"] == 1
+
+
+@pytest.mark.parametrize("raw", ['{"messages": []}', '{"model": "other"}'])
+def test_extra_body_may_not_take_over_the_fields_the_node_reports(calls, tmp_path, raw):
+    """Found by writing this test: `{"messages": []}` used to reach the payload and then
+    crash with a bare IndexError, because the size log reads messages[1]["content"] back
+    out afterwards. `{"model": ...}` was quieter and worse - the debug header and the
+    widget would both still name the model from the dropdown while the completion came
+    from somewhere else. Both are refused by name now."""
+    with pytest.raises(ValueError) as e:
+        _write(tmp_path, local_extra_body=raw)
+    assert "local_extra_body may not set" in str(e.value)
+    assert not calls, "nothing may be sent once the body is refused"
+
+
+def test_the_local_fields_never_ride_along_to_openrouter(calls, tmp_path):
+    prompt.write_prompt(
+        references=ReferenceSet([]), input_dir=str(tmp_path), direction="d",
+        api_key="k", model="m", provider="openrouter",
+        local_ttl=1, local_server="lmstudio", local_send_reasoning=True,
+        local_extra_body='{"ttl": 1}',
+    )
+    body = calls[-1]["json"]
+    assert "ttl" not in body and "keep_alive" not in body
+    assert "reasoning_effort" not in body
+
+
+def test_debug_says_when_no_idle_unload_field_is_being_sent(calls, tmp_path):
+    """A TTL that silently did nothing is indistinguishable from one that worked, right
+    up until the model is still holding VRAM. So the absence is reported too."""
+    sink = []
+    _write(tmp_path, local_ttl=5, local_server="generic", debug=sink)
+    assert "no idle-unload field is being sent" in sink[0]

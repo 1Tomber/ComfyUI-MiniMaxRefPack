@@ -692,6 +692,27 @@ def test_the_cap_is_declared_last_so_old_workflows_restore_unchanged():
         "openrouter_api_key", "openrouter_model", "reasoning_effort", "api_base",
         "local_model_slug", "job_type", "width", "height", "length_seconds",
         "max_reference_edge",
+        "local_ttl", "local_server", "local_send_reasoning", "local_extra_body",
+    ]
+
+
+def test_the_0_3_3_slots_never_move():
+    """The rule the test above is really enforcing, stated so it cannot be edited away.
+
+    Everything through max_reference_edge is frozen at its index forever: a workflow saved
+    at 0.3.3 restores POSITIONALLY, so those fourteen values land correctly only while
+    these fourteen names stay exactly here. New settings go on the END - which is why
+    local_ttl and friends are appended rather than filed next to api_base where they
+    belong on the canvas. web/refpack.js groups them by name instead (PROVIDER_FIELDS),
+    and ORDER_CURRENT there is this list plus the same tail.
+    """
+    spec = nodes.MiniMaxH3ReferencePack.INPUT_TYPES()
+    order = list(spec["required"]) + list(spec["optional"])
+    assert order[:14] == [
+        "direction", "references_json", "system_prompt", "prompt_provider",
+        "openrouter_api_key", "openrouter_model", "reasoning_effort", "api_base",
+        "local_model_slug", "job_type", "width", "height", "length_seconds",
+        "max_reference_edge",
     ]
 
 
