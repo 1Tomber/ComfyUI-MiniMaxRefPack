@@ -508,3 +508,37 @@
     transition: transform 0.15s ease;
     transform-origin: center center;
 }
+
+/* Free-angle slider. Sits between the quarter-turn glyphs and Clear rotation, so it
+   reads as the fine control for the same setting the buttons step. */
+.mmrp-angle {
+    flex: 1 1 120px;
+    min-width: 90px;
+    accent-color: #888;
+    cursor: pointer;
+}
+
+.mmrp-angle-out {
+    min-width: 46px;
+    text-align: right;
+    color: #aaa;
+    font-variant-numeric: tabular-nums; /* the number must not jitter while dragging */
+    font-size: 12px;
+}
+
+.mmrp-fit {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: #aaa;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+/* Only a free angle can spill outside the source, so on a quarter turn the fit toggle
+   has nothing to do and says so rather than sitting there looking live. */
+.mmrp-fit.mmrp-dim {
+    opacity: 0.45;
+    cursor: default;
+}

@@ -113,3 +113,28 @@ def test_toggling_a_mirror_axis_normalises_to_the_python_spelling(start, axis, e
     """refs.validate_flip accepts h/v/hv only, so the UI must never produce "vh"."""
     got = _run(f"toggleFlipAxis({json.dumps(start)}, {json.dumps(axis)})")
     assert got == expected
+
+
+# ---- the free angle ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value,expected", [
+    (0, 0), (90, 90), (180, 180), (-90, 270),
+    (89.0, 90), (91.5, 90), (2.0, 0), (358.0, 0), (178.5, 180),
+    (45, 45), (30.5, 30.5), (86, 86),   # outside the snap window, kept exactly
+])
+def test_the_slider_snaps_to_the_lossless_angles(value, expected):
+    """Not tidiness: a quarter turn is lossless (transpose / strides) while any other
+    angle resamples every frame of a clip. A slider parked on 89.6 would cost a full
+    re-render and look identical, so snapping is what keeps the cheap path reachable by
+    hand."""
+    assert _run(f"snapAngle({value})") == pytest.approx(expected)
+
+
+def test_snapping_can_be_turned_off_for_a_deliberate_near_quarter_angle():
+    assert _run("snapAngle(89.4, 0)") == pytest.approx(89.4)
+
+
+def test_snapping_normalises_into_one_turn():
+    assert _run("snapAngle(-270)") == pytest.approx(90)
+    assert _run("snapAngle(450)") == pytest.approx(90)
