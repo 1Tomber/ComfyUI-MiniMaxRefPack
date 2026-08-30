@@ -64,6 +64,106 @@ def test_a_hostname_that_would_resolve_to_loopback_is_still_refused():
     assert endpoint.is_loopback("http://my-local-box.internal/v1") is False
 
 
+@pytest.mark.parametrize("url", [
+    # THE EXPLOIT. urlparse reads the backslash as part of userinfo and reports host
+    # 127.0.0.1; urllib3 - which is what requests dials with - ends the authority at the
+    # backslash and connects to evil.example. Validating with one parser and connecting
+    # with another is the whole bug.
+    "http://evil.example\\@127.0.0.1/v1",
+    "http://evil.example:8443\\@localhost/v1",
+    "http://169.254.169.254\\@127.0.0.1/v1",   # metadata service, smuggled
+    # Userinfo without the trick, refused on its own account: no local model server needs
+    # it, and it is the delivery mechanism for the above.
+    "http://evil.example@127.0.0.1/v1",
+    "http://user:pass@127.0.0.1/v1",
+    # Characters that make two parsers read one string as two different hosts.
+    "http://127.0.0.1 /v1",
+    "http://127.0.0.1\r\nHost: evil.example/v1",
+    "http://127.0.0.1\t/v1",
+])
+def test_a_url_two_parsers_read_differently_is_refused(url):
+    """The gate and the HTTP client must agree on the host, or the gate is decoration.
+
+    Anyone able to reach ComfyUI - which is routinely unauthenticated - could otherwise
+    hand this route an arbitrary host and port, get a connection made from inside the
+    network, and read back which ones answered: an SSRF probe and a port scanner.
+    """
+    assert endpoint.is_loopback(url) is False
+
+
+def test_the_gate_agrees_with_the_parser_that_dials():
+    """Belt and braces: whatever urlparse says, the host urllib3 would actually connect to
+    has to be loopback too. Pins the invariant rather than the one known trick, so a future
+    normalisation quirk fails closed instead of quietly reopening this."""
+    urllib3 = pytest.importorskip("urllib3")
+    for url in ["http://127.0.0.1:1234/v1", "http://localhost:11434/v1",
+                "http://[::1]:8080/v1"]:
+        assert endpoint.is_loopback(url) is True
+        dialled = (urllib3.util.parse_url(url).host or "").strip("[]").lower()
+        assert dialled in {"127.0.0.1", "localhost", "::1"}
+
+
+def test_models_probe_does_not_follow_redirects():
+    """is_loopback only ever vets the base. If redirects were followed, a loopback server
+    answering 302 - an open redirect, or simply a hostile one on a port the user was told
+    to try - would walk this process off the box to anywhere, 169.254.169.254 included.
+
+    Driven against two real sockets rather than by reading the source: an assertion that
+    greps for `allow_redirects=False` is satisfied by the COMMENT that explains it, so it
+    would stay green with the argument itself deleted.
+    """
+    import http.server
+    import socketserver
+    import threading
+
+    from minimax_refpack import prompt
+
+    reached = []
+
+    def serve(handler):
+        srv = socketserver.TCPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv, srv.server_address[1]
+
+    class Target(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            reached.append("TARGET")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"data": [{"id": "should-not-be-reachable"}]}')
+
+        def log_message(self, *a):
+            pass
+
+    target_srv, target_port = serve(Target)
+
+    class Redirector(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            reached.append("REDIRECTOR")
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{target_port}/models")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    redir_srv, redir_port = serve(Redirector)
+
+    try:
+        result = prompt._models_at(f"http://127.0.0.1:{redir_port}/v1")
+    finally:
+        redir_srv.shutdown()
+        target_srv.shutdown()
+
+    assert "TARGET" not in reached, (
+        "the probe followed a redirect off the base it was given; only the base is vetted, "
+        "so this reaches any host the redirect names"
+    )
+    assert reached == ["REDIRECTOR"]
+    assert result is None, "a 302 is not an OpenAI-compatible /models answer"
+
+
 # ---- the route -----------------------------------------------------------------
 
 
