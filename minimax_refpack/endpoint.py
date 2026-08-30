@@ -81,9 +81,14 @@ def is_loopback(url: str) -> bool:
     So rather than trying to out-parse the attacker, anything whose authority is not
     boringly unambiguous is refused:
 
-      * characters that make parsers disagree (backslash, whitespace, control characters)
+      * whitespace and control characters, which are never legitimate in a URL and are
+        the shape of a header-injection attempt
       * userinfo at all - `http://anything@127.0.0.1/` has no legitimate use for a local
-        model server, and it is the delivery mechanism for the confusion above
+        model server, and it is the delivery mechanism for the confusion above. A
+        backslash on its OWN is fine and stays allowed: both parsers agree the host of
+        `http://127.0.0.1:1234\v1` is 127.0.0.1, and typing one instead of a slash is a
+        routine Windows slip. It is only a backslash IN FRONT OF userinfo that smuggles,
+        and the rule above already refuses that
       * and finally the host itself, checked twice: once through urlparse and once through
         the parser the HTTP client will really use, which must agree.
 
@@ -97,7 +102,7 @@ def is_loopback(url: str) -> bool:
         return False
     # Reject before parsing: these are exactly the characters that make two parsers read
     # one string as two different hosts.
-    if any(c in raw for c in "\\ \t\r\n") or any(ord(c) < 0x20 for c in raw):
+    if any(c.isspace() or ord(c) < 0x20 for c in raw):
         return False
     try:
         parsed = urlparse(raw)

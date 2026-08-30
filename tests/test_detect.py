@@ -91,6 +91,19 @@ def test_a_url_two_parsers_read_differently_is_refused(url):
     assert endpoint.is_loopback(url) is False
 
 
+def test_a_backslash_alone_is_a_typo_not_an_attack():
+    """A backslash only smuggles when it sits in front of userinfo.
+
+    On its own both parsers agree - the host of `http://127.0.0.1:1234\\v1` is 127.0.0.1
+    to urlparse AND to urllib3 - and typing one instead of a slash is a routine Windows
+    slip. Refusing it bought nothing and told the user their loopback address was not a
+    loopback address. What makes the smuggling work is the `@`, which is refused outright.
+    """
+    backslash = chr(92)
+    assert endpoint.is_loopback(f"http://127.0.0.1:1234{backslash}v1") is True
+    assert endpoint.is_loopback(f"http://evil.example{backslash}@127.0.0.1/v1") is False
+
+
 def test_the_gate_agrees_with_the_parser_that_dials():
     """Belt and braces: whatever urlparse says, the host urllib3 would actually connect to
     has to be loopback too. Pins the invariant rather than the one known trick, so a future
