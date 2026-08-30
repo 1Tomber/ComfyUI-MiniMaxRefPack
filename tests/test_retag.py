@@ -173,7 +173,6 @@ def test_the_js_tag_rule_still_agrees_with_refs_py():
     assert js["audios"][0]["tag"] == "<Audio 2>"
 
 
-<<<<<<< HEAD
 # ---- moving a reference within its section -----------------------------------------
 #
 # `to` is an INSERTION point in the ORIGINAL array, which is the natural thing for a drop
@@ -222,7 +221,7 @@ def test_moving_an_image_renumbers_the_tags_and_rewrites_the_prompt():
     assert [r["file"] for r in after["images"]] == ["c.png", "a.png", "b.png"]
     assert _retag("<Picture 3> wears the jacket", before, after) == \
         "<Picture 1> wears the jacket"
-=======
+
 # ---- adding a reference is not always an append, as far as the tags go --------------
 
 
@@ -264,4 +263,69 @@ def test_a_probe_finding_a_silent_clip_renumbers_the_audio_after_it():
     before = _refs(videos=[("v.mp4", True)], audios=["m.wav"])
     after = _refs(videos=[("v.mp4", False)], audios=["m.wav"])
     assert _remap(before, after) == {"<Audio 2>": "<Audio 1>"}
->>>>>>> fix/retag-stale-reference-tags
+
+
+# ---- where a drop lands, once a section spans several rows --------------------------
+
+
+def _extract_drop() -> str:
+    text = REFPACK_JS.read_text(encoding="utf-8")
+    start = text.find("// >>> MMRP-DROP")
+    end = text.find("// <<< MMRP-DROP")
+    assert start != -1 and end != -1, "the MMRP-DROP markers are gone from web/refpack.js"
+    return "const CL = { tile: 131, gap: 6 };\n" + text[start:end]
+
+
+def _drop_at(count, per_row, x, y):
+    """Tile regions laid out exactly as draw() paints them, then the real dropIndexAt."""
+    tiles = [
+        {"type": "tile", "kind": "image", "index": i,
+         "x": 10 + (i % per_row) * 137, "y": 8 + (i // per_row) * 137, "w": 131, "h": 131}
+        for i in range(count)
+    ]
+    node = {"_mmrpHit": {"regions": tiles}}
+    script = (_extract_drop()
+              + f"\nconst node = {json.dumps(node)};\n"
+              + f"console.log(JSON.stringify(dropIndexAt(node, 'image', {x}, {y})));\n")
+    proc = subprocess.run([NODE, "--input-type=module", "-e", script],
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, f"node failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip())
+
+
+@requires_node
+def test_dropping_past_the_end_of_a_short_last_row_appends():
+    """The bug: five tiles in rows of three leaves the last row short, and a drop in the
+    empty space to its right used to be won by a tile on the row ABOVE - returning 3, the
+    START of the last row, instead of 5. A single weighted distance cannot express "same
+    row"; the row has to be chosen first."""
+    assert _drop_at(5, 3, x=800, y=8 + 137 + 65) == 5
+
+
+@requires_node
+def test_dropping_past_the_end_of_a_full_single_row_appends():
+    assert _drop_at(3, 3, x=800, y=8 + 65) == 3
+
+
+@requires_node
+def test_dropping_right_of_a_full_upper_row_stays_on_that_row():
+    """The other side of the same coin: a drop level with a FULL row belongs at that row's
+    end, not carried down to the last row."""
+    assert _drop_at(5, 3, x=800, y=8 + 65) == 3
+
+
+@requires_node
+def test_dropping_before_the_first_tile_is_index_zero():
+    assert _drop_at(5, 3, x=0, y=8 + 65) == 0
+
+
+@pytest.mark.parametrize("i,expected", [(0, 0), (1, 1), (2, 2)])
+@requires_node
+def test_a_drop_on_a_tiles_left_half_inserts_before_it(i, expected):
+    assert _drop_at(5, 3, x=10 + i * 137 + 20, y=8 + 65) == expected
+
+
+@pytest.mark.parametrize("i,expected", [(0, 1), (1, 2), (2, 3)])
+@requires_node
+def test_a_drop_on_a_tiles_right_half_inserts_after_it(i, expected):
+    assert _drop_at(5, 3, x=10 + i * 137 + 110, y=8 + 65) == expected

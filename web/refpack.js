@@ -1440,6 +1440,7 @@ export function hitTest(node, x, y) {
 // which is what keeps "select a tile" working now that dragging one means something.
 const DRAG_THRESHOLD = 4;
 
+// >>> MMRP-DROP
 // Where a drop at (x, y) would insert, as an index into that kind's array.
 //
 // Derived from the TILE HIT REGIONS rather than from x arithmetic, deliberately. The
@@ -1447,7 +1448,7 @@ const DRAG_THRESHOLD = 4;
 // is one row or several - there is no second copy of the layout maths to drift out of
 // step with the first, and nothing here to revisit if the tiles start wrapping.
 function dropIndexAt(node, kind, x, y) {
-    const regions = (node._mmrpHit && node._mmrpHit.regions) || [];
+    const regions = (node && node._mmrpHit && node._mmrpHit.regions) || [];
     const tiles = regions.filter((r) => r.type === "tile" && r.kind === kind);
     if (!tiles.length) return 0;
     for (const r of tiles) {
@@ -1456,18 +1457,27 @@ function dropIndexAt(node, kind, x, y) {
             return x < r.x + r.w / 2 ? r.index : r.index + 1;
         }
     }
-    // Outside every tile: fall back to the nearest, so a drop in the empty space at the
-    // end of a strip lands at the end rather than nowhere. Rows dominate the distance, so
-    // a drop below a short row does not snap up to a tile on the row above it.
+    // Outside every tile. Pick the ROW first, then the nearest tile within it - a single
+    // weighted distance does not work here. Weighting rows more heavily still let a tile
+    // on the row ABOVE win once the cursor was far enough to the right of a short last
+    // row: dropping in the empty space at the end of "5 images in rows of 3" returned
+    // index 3 (the start of the last row) instead of 5 (the end of the list).
+    const rowOf = (r) => Math.round(r.y);
+    const rows = [...new Set(tiles.map(rowOf))];
+    let row = rows[0];
+    for (const candidate of rows) {
+        const mid = candidate + CL.tile / 2;
+        if (Math.abs(y - mid) < Math.abs(y - (row + CL.tile / 2))) row = candidate;
+    }
+    const onRow = tiles.filter((r) => rowOf(r) === row);
     let best = null;
-    for (const r of tiles) {
-        const dy = Math.abs(y - (r.y + r.h / 2));
-        const dx = Math.abs(x - (r.x + r.w / 2));
-        const d = dy * 4 + dx;
+    for (const r of onRow) {
+        const d = Math.abs(x - (r.x + r.w / 2));
         if (!best || d < best.d) best = { d, index: r.index, after: x > r.x + r.w / 2 };
     }
     return best ? best.index + (best.after ? 1 : 0) : 0;
 }
+// <<< MMRP-DROP
 
 function endDragListeners(node) {
     window.removeEventListener("mousemove", node._mmrpDragMove, true);
@@ -1480,6 +1490,13 @@ function finishDrag(node, e) {
     node._mmrpDrag = null;
     endDragListeners(node);
     if (!drag) return;
+    // Cancelled first: Escape on a drag that has not moved yet is still a cancel, not a
+    // click. Checking `active` before this made it select the tile - and, with the subject
+    // picker in play, open that too.
+    if (drag.cancelled) {
+        scheduleDraw(node);
+        return;
+    }
     if (!drag.active) {
         // Never crossed the threshold, so it was a click and the old meaning stands.
         node._mmrpSelected = { kind: drag.kind, index: drag.index };
@@ -2993,6 +3010,11 @@ function installSelectionHandlers(node) {
         (node._mmrpHideIntervals || []).forEach((id) => clearInterval(id));
         stopPreview(node);
         if (node._mmrpBody) node._mmrpBody.resizeObserver.disconnect();
+        // A drag in flight holds three capture-phase WINDOW listeners. Without this they
+        // outlive the node until the next mouseup anywhere, whose finishDrag then applies
+        // a reorder to a node that is no longer in the graph.
+        node._mmrpDrag = null;
+        endDragListeners(node);
         liveNodes.delete(node);
         if (origOnRemoved) origOnRemoved.apply(this, arguments);
     };
