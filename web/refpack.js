@@ -2442,9 +2442,16 @@ function applyRefs(node, refs) {
 }
 
 async function addFiles(node, kind, files) {
-    const refs = cloneRefs(node._mmrpRefs);
-    const arr = refs[`${kind}s`];
-    const room = CAPS[kind] - arr.length;
+    // The clone is taken AFTER the uploads, not before.
+    //
+    // Every `await` below is a window in which another gesture finishes its own applyRefs.
+    // Cloning at entry and writing that clone back afterwards silently reverted whatever
+    // happened in between: delete a tile while an upload is in flight and it comes back;
+    // toggle a soundtrack and the toggle is undone. Two drops a second apart is enough.
+    //
+    // Found by semmlerino in PR #2 against upstream, where it was diagnosed on the
+    // drag-and-drop path; it is the same race on the file-picker path.
+    const room = CAPS[kind] - node._mmrpRefs[`${kind}s`].length;
     if (room <= 0) return;
     const all = Array.from(files);
     const take = all.slice(0, room);
@@ -2454,24 +2461,36 @@ async function addFiles(node, kind, files) {
     }
     mlog("upload", { kind, files: take.length });
     const uploadStarted = performance.now();
+    const uploaded = [];
     for (const file of take) {
         try {
             const name = await apiUpload(file);
             mlog("uploaded", { kind, file: name, bytes: file.size });
-            // soundtrack ON by default; the probe turns it back off for a silent clip
-            arr.push(kind === "video" ? { file: name, use_soundtrack: true } : { file: name });
+            uploaded.push(name);
         } catch (e) {
             mwarn("upload_failed", { kind, file: file.name, error: e.message });
             alert(`Upload failed for ${file.name}: ${e.message}`);
         }
     }
     mlog("upload_done", { kind, files: take.length, ms: performance.now() - uploadStarted });
+    if (!uploaded.length) return;
     // Adding a reference is NOT always an append as far as the tags are concerned. A
     // video's soundtrack claims its <Audio N> before all standalone audio, so uploading
     // one clip shifts every standalone <Audio> up by one - and a prompt that said
     // "<Audio 1>" about the user's music now means the new video's soundtrack. Images
     // and standalone audio really do just append, and the retag pass is a no-op for them.
-    withRetag(node, () => refs);
+    withRetag(node, () => {
+        const refs = cloneRefs(node._mmrpRefs);
+        const arr = refs[`${kind}s`];
+        for (const name of uploaded) {
+            // The cap is re-checked here, not just at entry: the set may have grown while
+            // these files were uploading.
+            if (arr.length >= CAPS[kind]) break;
+            // soundtrack ON by default; the probe turns it back off for a silent clip
+            arr.push(kind === "video" ? { file: name, use_soundtrack: true } : { file: name });
+        }
+        return refs;
+    });
 }
 
 function removeRef(node, kind, index) {
