@@ -1860,7 +1860,12 @@ function draw(node) {
                 w: CL.del,
                 h: CL.del,
             });
-            if (playState) {
+            // ...and neither is play, for the same reason. The 2px gutters between the
+            // picker's cells cross the play glyph's 28x28 region at the tile's centre, so
+            // a click landing between two numbers started a video playing UNDER the open
+            // picker. The glyph is already suppressed while picking; its hit region has to
+            // go with it.
+            if (playState && !picking) {
                 const cy = kind === "audio" ? ty + 80 : ty + 58;
                 regions.push({
                     type: "play",
@@ -2070,6 +2075,9 @@ function finishDrag(node, e) {
         return refs;
     });
     node._mmrpSelected = null;
+    // Same reason onConfigure clears it: this replaces the whole reference set under a
+    // picker that is pinned to an index.
+    node._mmrpPicker = null;
 }
 
 function onDragMove(node, e) {
@@ -2106,6 +2114,15 @@ function onCanvasMouseDown(node, e) {
         return;
     }
     if (hit.type === "subject") {
+        // MouseEvent.detail is the click ordinal, so `>= 2` is the second click of a
+        // double-click. Skipping the toggle there is what lets double-click keep meaning
+        // "insert the tag" on a tile whose picker is open, without a timer and without
+        // trying to undo a toggle afterwards.
+        //
+        // Honest limit: when the picker was ALREADY open, the pair's first click is an
+        // ordinary single click and its toggle stands. Nothing can know a second click is
+        // coming without delaying the first, and a laggy toggle is worse than this.
+        if (e.detail >= 2) return;
         // Cells TOGGLE and the picker stays open, so several subjects can be set in one
         // visit. Closing after each pick would make the multi-subject case - the reason
         // this is a set and not a single value - four gestures instead of one.
@@ -2213,13 +2230,12 @@ function onCanvasDblClick(node, e) {
     // goes on to insert the tag. Double-click means "insert" everywhere on the tile, and
     // a single click still means "toggle this subject".
     if (hit && hit.type === "subject") {
-        const next = cloneRefs(node._mmrpRefs);
-        const target = next[`${hit.kind}s`][hit.index];
-        if (target) {
-            target.subjects = toggleSubject(target.subjects, hit.n);
-            if (!target.subjects.length) delete target.subjects;
-        }
-        applyRefs(node, next);
+        // No revert here any more. It assumed the pair's FIRST click had opened the
+        // picker, so only the second toggled; with the picker already open both clicks
+        // toggle (netting zero) and the revert applied a third, silently changing the
+        // grouping sent to the model. The second click is suppressed at source instead -
+        // see the `detail` check in onCanvasMouseDown - so by the time this runs the pair
+        // has toggled at most once and there is nothing to undo.
         const tagged = assignTags(node._mmrpRefs)[`${hit.kind}s`][hit.index];
         if (tagged) insertIntoDirection(node, tagged.tag);
         return;
