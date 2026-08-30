@@ -35,7 +35,7 @@ REGISTRY_ID = "comfyui-minimaxrefpack"
 
 def _package_version() -> str:
     """The version pyproject declares, which is what `comfy node publish` uploads."""
-    text = (REPO_ROOT / "pyproject.toml").read_text()
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     match = re.search(r'^version = "([^"]+)"', text, re.M)
     assert match, "no version in pyproject.toml"
     return match.group(1)
@@ -51,7 +51,7 @@ def _widget_spec():
 
 
 def _pack_nodes(path):
-    graph = json.loads(path.read_text())
+    graph = json.loads(path.read_text(encoding="utf-8"))
     return [n for n in graph.get("nodes", []) if n.get("type") == "MiniMaxH3ReferencePack"]
 
 
@@ -61,7 +61,7 @@ def test_there_is_at_least_one_example_workflow():
 
 @pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
 def test_every_workflow_is_valid_json(path):
-    json.loads(path.read_text())
+    json.loads(path.read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
@@ -150,7 +150,7 @@ def test_the_workflows_claim_registry_provenance_not_a_git_checkout(path):
 @pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
 def test_no_link_points_at_a_node_that_is_not_there(path):
     """Deleting a node by hand can leave a link behind, which breaks the graph on load."""
-    graph = json.loads(path.read_text())
+    graph = json.loads(path.read_text(encoding="utf-8"))
     ids = {n["id"] for n in graph.get("nodes", [])}
     dangling = [l for l in graph.get("links", []) if l[1] not in ids or l[3] not in ids]
     assert not dangling, f"{path.name}: {len(dangling)} link(s) reference a missing node"
@@ -166,7 +166,7 @@ PREVIEW_NODES = ("Display Any (rgthree)", "PreviewAny", "ShowText|pysssss", "Not
 
 @pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
 def test_preview_nodes_ship_empty(path):
-    graph = json.loads(path.read_text())
+    graph = json.loads(path.read_text(encoding="utf-8"))
     for node in graph.get("nodes", []):
         if node.get("type") not in PREVIEW_NODES:
             continue

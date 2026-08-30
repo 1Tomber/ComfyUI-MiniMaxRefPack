@@ -43,7 +43,7 @@ def test_a_comfyignore_exists():
 @pytest.mark.parametrize("pattern", MUST_NOT_SHIP)
 def test_development_apparatus_is_excluded_from_the_package(pattern):
     lines = [
-        line.strip() for line in COMFYIGNORE.read_text().splitlines()
+        line.strip() for line in COMFYIGNORE.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.strip().startswith("#")
     ]
     assert pattern in lines, f".comfyignore must exclude {pattern!r}; it lists {lines}"
@@ -58,7 +58,7 @@ def test_the_shipped_package_never_executes_anything_dynamically(path):
     If a future change genuinely needs a subprocess, that is a deliberate decision worth
     making loudly rather than discovering when a release sits in Pending for a day.
     """
-    for number, line in enumerate(path.read_text().splitlines(), 1):
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         code = line.split("#", 1)[0]
         assert not DYNAMIC_EXECUTION.search(code), (
             f"{path.name}:{number} uses dynamic execution in SHIPPED code:\n  {line.strip()}"
@@ -69,7 +69,7 @@ def test_the_web_assets_ship():
     """The inverse failure: over-broad ignores that drop something the node needs."""
     for needed in ("web/refpack.js", "web/refpack.css", "__init__.py", "requirements.txt"):
         lines = [
-            line.strip() for line in COMFYIGNORE.read_text().splitlines()
+            line.strip() for line in COMFYIGNORE.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.strip().startswith("#")
         ]
         assert needed not in lines, f"{needed} is required at runtime and must ship"
