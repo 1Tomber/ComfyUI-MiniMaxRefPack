@@ -692,6 +692,7 @@ def test_the_cap_is_declared_last_so_old_workflows_restore_unchanged():
         "openrouter_api_key", "openrouter_model", "reasoning_effort", "api_base",
         "local_model_slug", "job_type", "width", "height", "length_seconds",
         "max_reference_edge",
+        "system_prompt_replacement",
     ]
 
 

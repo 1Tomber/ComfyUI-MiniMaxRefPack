@@ -1133,3 +1133,76 @@ def test_the_logged_payload_size_counts_the_video():
     ]
 
     assert prompt._payload_bytes(parts) == 10 + len("data:video/mp4;base64,") + 1000
+
+
+# ---- one system prompt override per register ---------------------------------------
+#
+# There used to be a single `system_prompt` applied to whichever register ran, which
+# quietly defeated the reason the two are separate files: customising for `standard`
+# handed that same text to `replacement`, and with job_type on `auto` you could not even
+# predict which one would get it.
+
+
+def _system_message(calls):
+    return calls[-1]["json"]["messages"][0]["content"]
+
+
+@pytest.fixture
+def posted(monkeypatch):
+    seen = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):  # noqa: A002
+        seen.append({"url": url, "json": json})
+
+        class R:
+            status_code = 200
+            text = "ok"
+            headers = {}
+
+            def json(self):
+                return {"choices": [{"message": {"content": "written"}}]}
+
+        return R()
+
+    monkeypatch.setattr(prompt.requests, "post", fake_post)
+    return seen
+
+
+def _write(tmp_path, **kw):
+    kw.setdefault("job_type", "standard")
+    return prompt.write_prompt(references=ReferenceSet([]), input_dir=str(tmp_path),
+                               direction="d", api_key="k", model="m", **kw)
+
+
+def test_the_standard_override_is_used_for_a_standard_job(posted, tmp_path):
+    _write(tmp_path, system_prompt="MY STANDARD")
+    assert _system_message(posted) == "MY STANDARD"
+
+
+def test_a_standard_override_does_not_leak_into_the_replacement_register(posted, tmp_path):
+    """The bug. One override served both, so customising the scene writer silently
+    replaced the object-swap instructions with scene-writing ones."""
+    _write(tmp_path, job_type="replacement", system_prompt="MY STANDARD")
+    assert _system_message(posted) == prompt._read_system_prompt("replacement")
+
+
+def test_the_replacement_override_is_used_for_a_replacement_job(posted, tmp_path):
+    _write(tmp_path, job_type="replacement", system_prompt_replacement="MY REPLACEMENT")
+    assert _system_message(posted) == "MY REPLACEMENT"
+
+
+def test_a_replacement_override_does_not_leak_into_the_standard_register(posted, tmp_path):
+    _write(tmp_path, system_prompt_replacement="MY REPLACEMENT")
+    assert _system_message(posted) == prompt._read_system_prompt("standard")
+
+
+def test_both_can_be_set_and_each_register_gets_its_own(posted, tmp_path):
+    _write(tmp_path, system_prompt="S", system_prompt_replacement="R")
+    assert _system_message(posted) == "S"
+    _write(tmp_path, job_type="replacement", system_prompt="S", system_prompt_replacement="R")
+    assert _system_message(posted) == "R"
+
+
+def test_a_blank_override_still_falls_back_to_that_register_s_packaged_file(posted, tmp_path):
+    _write(tmp_path, job_type="replacement", system_prompt="S", system_prompt_replacement="   ")
+    assert _system_message(posted) == prompt._read_system_prompt("replacement")

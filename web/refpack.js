@@ -170,11 +170,27 @@ const ORDER_0_3_3 = [
     "max_reference_edge",
 ];
 
+// system_prompt_replacement was APPENDED rather than filed next to system_prompt where
+// it belongs by meaning: widgets_values is positional, so inserting mid-list re-points
+// every widget after it in every saved workflow - the failure 0.3.3 caused and needed
+// remapWidgetValues to dig out of.
+//
+// The useful consequence: the current layout is the 0.3.3 layout PLUS a tail, so a 0.3.3
+// array restores correctly by position with no remapping at all.
+const ORDER_CURRENT = ORDER_0_3_3.concat(["system_prompt_replacement"]);
+
+// True when restoring this layout positionally already lands every value in the right
+// widget - it is the current order, or an earlier one the current merely extends.
+function isPrefixOfCurrent(order) {
+    return Array.isArray(order) && order.every((name, i) => ORDER_CURRENT[i] === name);
+}
+
 function detectLayout(values) {
     if (!Array.isArray(values)) return null;
-    // 0.3.3 already: slot 3 holds a provider string.
+    // Slot 3 holds a provider string in 0.3.3 and everything after it; LENGTH separates
+    // them, since appending is the only change since.
     if (PROVIDER_VALUES.includes(String(values[3] ?? "").trim().toLowerCase())) {
-        return ORDER_0_3_3;
+        return values.length > ORDER_0_3_3.length ? ORDER_CURRENT : ORDER_0_3_3;
     }
     // 0.3.1: use_openrouter was a boolean at slot 8. 0.3.2: a provider string there.
     const slot8 = values[8];
@@ -2920,8 +2936,13 @@ function openLocalServerModal(node, anchorBtn) {
 
 
 function openSystemPromptModal(node) {
-    const systemPromptWidget = widgetByName(node, "system_prompt");
-    const mode = systemPromptModeOf(node);
+    // One widget per register. `system_prompt` is the STANDARD one - it keeps its name
+    // and its meaning, so an existing workflow's override is untouched.
+    const WIDGET_FOR = { standard: "system_prompt", replacement: "system_prompt_replacement" };
+    // The tab that opens is the register this workflow will actually use, so the modal
+    // starts on the prompt the next queue will read rather than on an arbitrary one.
+    let tab = systemPromptModeOf(node);
+    const widgetFor = (which) => widgetByName(node, WIDGET_FOR[which]);
     const jobType = String(widgetByName(node, "job_type")?.value ?? "").trim().toLowerCase();
     // Only `auto` is ambiguous, and only `auto` gets the caveat — saying "assuming
     // standard" under an explicit job_type: standard would be noise about a certainty.
@@ -2931,7 +2952,6 @@ function openSystemPromptModal(node) {
               `classifier: this is the \`${which}\` prompt, and a job routed to the other ` +
               "register uses a different one."
             : ` This is the \`${which}\` prompt, matching job_type.`;
-    const modeNote = noteFor(mode);
 
     const overlay = document.createElement("div");
     overlay.className = "mmrp-overlay";
@@ -2950,39 +2970,80 @@ function openSystemPromptModal(node) {
 
     const hint = document.createElement("div");
     hint.className = "mmrp-modal-hint";
-    hint.textContent = "Empty = use the built-in default." + modeNote;
+    // Filled by render(), which knows which tab is showing.
     modal.appendChild(hint);
+
+    // Two tabs, because the two registers are deliberately separate 20KB+ files and
+    // editing one must not touch the other.
+    const tabs = document.createElement("div");
+    tabs.className = "mmrp-tabs";
+    const tabButtons = {};
+    for (const which of ["standard", "replacement"]) {
+        const b = document.createElement("button");
+        b.className = "mmrp-btn mmrp-tab";
+        b.textContent = which;
+        b.onclick = () => selectTab(which);
+        tabs.appendChild(b);
+        tabButtons[which] = b;
+    }
+    modal.appendChild(tabs);
 
     const textarea = document.createElement("textarea");
     textarea.className = "mmrp-modal-textarea";
     textarea.spellcheck = false;
-    textarea.value = systemPromptWidget ? systemPromptWidget.value || "" : "";
     modal.appendChild(textarea);
 
     // A blank widget means "use the packaged default", but an empty box hides WHICH
     // prompt is running. Show it, so the modal is the node's prompt rather than a
     // guess about it. Saving an untouched prefill is a no-op: Save writes the
     // textarea back only if it differs from the default (see saveBtn).
-    let prefilledDefault = "";
-    if (!textarea.value.trim()) {
-        hint.textContent =
-            "Showing the built-in default. Edit to override it for this workflow." + modeNote;
-        apiSystemPromptDefault(mode)
-            .then(({ text, mode: served }) => {
-                // Don't clobber anything the user typed while the fetch was in flight.
-                if (!textarea.value.trim()) {
-                    prefilledDefault = text;
+    // Per-tab, because switching tabs mid-edit must not compare this tab's text against
+    // the OTHER tab's prefill and conclude the user typed it.
+    const prefilled = { standard: "", replacement: "" };
+
+    // Everything the user typed stays in the modal until Save, on both tabs, so switching
+    // to check the other register does not throw away an edit.
+    const draft = {};
+    const stash = () => { draft[tab] = textarea.value; };
+
+    function selectTab(which) {
+        if (which === tab) return;
+        stash();
+        tab = which;
+        render();
+    }
+
+    function render() {
+        for (const [which, b] of Object.entries(tabButtons)) {
+            b.classList.toggle("mmrp-active", which === tab);
+        }
+        const w = widgetFor(tab);
+        textarea.value = draft[tab] !== undefined ? draft[tab] : (w ? w.value || "" : "");
+        loadDefaultBtn.textContent = `Load ${tab} default`;
+        hint.textContent = "Empty = use the built-in default." + noteFor(tab);
+        if (!textarea.value.trim()) {
+            const asked = tab;
+            hint.textContent =
+                "Showing the built-in default. Edit to override it for this workflow."
+                + noteFor(asked);
+            apiSystemPromptDefault(asked)
+                .then(({ text, mode: served }) => {
+                    // Two guards: the user may have typed while this was in flight, and
+                    // they may have switched tabs - landing another register's 26KB
+                    // prompt in this box would be worse than showing nothing.
+                    if (tab !== asked || textarea.value.trim()) return;
+                    prefilled[asked] = text;
                     textarea.value = text;
-                }
-                if (served !== mode) {
-                    hint.textContent =
-                        "Showing the built-in default. Edit to override it for this "
-                        + "workflow." + noteFor(served);
-                }
-            })
-            .catch(() => {
-                hint.textContent = "Empty = use the built-in default." + modeNote;
-            });
+                    if (served !== asked) {
+                        hint.textContent =
+                            "Showing the built-in default. Edit to override it for this "
+                            + "workflow." + noteFor(served);
+                    }
+                })
+                .catch(() => {
+                    hint.textContent = "Empty = use the built-in default." + noteFor(asked);
+                });
+        }
     }
 
     const footer = document.createElement("div");
@@ -2990,18 +3051,20 @@ function openSystemPromptModal(node) {
 
     const loadDefaultBtn = document.createElement("button");
     loadDefaultBtn.className = "mmrp-btn";
-    loadDefaultBtn.textContent = mode === "replacement" ? "Load default (replacement)" : "Load default";
+    loadDefaultBtn.textContent = "Load default";
     loadDefaultBtn.onclick = async () => {
         try {
-            const { text, mode: served } = await apiSystemPromptDefault(mode);
+            const asked = tab;
+            const { text, mode: served } = await apiSystemPromptDefault(asked);
+            if (tab !== asked) return;
             textarea.value = text;
             // 7: this used to leave prefilledDefault at "" - so Save & close saw an
             // edited-looking box and froze the whole packaged prompt into the workflow,
             // which is exactly what its own comment says it is trying to avoid. It
             // matters more now that the text is register-specific: a frozen replacement
             // prompt would then be used for a standard run.
-            prefilledDefault = text;
-            if (served !== mode) {
+            prefilled[asked] = text;
+            if (served !== asked) {
                 hint.textContent = "Showing the built-in default. Edit to override it "
                     + "for this workflow." + noteFor(served);
             }
@@ -3015,7 +3078,9 @@ function openSystemPromptModal(node) {
     resetBtn.textContent = "Reset";
     resetBtn.title = "Discard edits, revert to the last-saved value";
     resetBtn.onclick = () => {
-        textarea.value = systemPromptWidget ? systemPromptWidget.value || "" : "";
+        const w = widgetFor(tab);
+        delete draft[tab];
+        textarea.value = w ? w.value || "" : "";
     };
 
     const cancelBtn = document.createElement("button");
@@ -3027,14 +3092,23 @@ function openSystemPromptModal(node) {
     saveCloseBtn.className = "mmrp-btn mmrp-btn-primary";
     saveCloseBtn.textContent = "Save & close";
     saveCloseBtn.onclick = () => {
-        if (systemPromptWidget) {
+        // BOTH registers are written, not just the visible one: the other tab may hold
+        // an edit made before switching, and silently dropping it would be the worst
+        // possible reading of "Save".
+        stash();
+        for (const [which, name] of Object.entries(WIDGET_FOR)) {
+            const w = widgetByName(node, name);
+            if (!w || draft[which] === undefined) continue;
+            const v = draft[which];
             // An untouched prefill saves as blank, so the workflow keeps tracking the
             // packaged prompt instead of freezing today's copy into the graph.
-            const v = textarea.value;
-            systemPromptWidget.value = prefilledDefault && v === prefilledDefault ? "" : v;
+            w.value = prefilled[which] && v === prefilled[which] ? "" : v;
+            if (w.callback) w.callback(w.value);
         }
         overlay.remove();
     };
+
+    render();
 
     footer.appendChild(loadDefaultBtn);
     footer.appendChild(resetBtn);
@@ -3200,11 +3274,15 @@ app.registerExtension({
 
             const systemPromptWidget = widgetByName(node, "system_prompt");
             const ivSystemPrompt = hideWidget(systemPromptWidget);
+            // The replacement register's prompt is hidden the same way: 20KB+ of text has
+            // no business on the node body, and it is edited behind the gear like its
+            // pair.
+            const ivSystemPromptRepl = hideWidget(widgetByName(node, "system_prompt_replacement"));
 
             // Cleared early in installSelectionHandlers' onRemoved wrapper so a deleted
             // node doesn't leave a hide-poll timer running (they also self-clear after
             // 1s regardless, this just avoids the wait on an early delete).
-            node._mmrpHideIntervals = [ivRefs, ivDirection, ivSystemPrompt].filter((id) => id !== undefined);
+            node._mmrpHideIntervals = [ivRefs, ivDirection, ivSystemPrompt, ivSystemPromptRepl].filter((id) => id !== undefined);
 
             const bodyEl = buildCustomBlock(node);
             // hideOnZoom defaults to TRUE. Below the frontend's LOD threshold the whole
@@ -3258,7 +3336,11 @@ app.registerExtension({
                 // layout it was actually written in.
                 const saved = info && info.widgets_values;
                 const byName = remapWidgetValues(saved);
-                if (byName && detectLayout(saved) !== ORDER_0_3_3) {
+                // Was `!== ORDER_0_3_3`. A 0.3.3 array is now a strict PREFIX of the
+                // current layout, so positional restore has already put every value in
+                // the right widget; remapping would be a no-op that still logged
+                // "migrated_layout" and made a workflow needing nothing look repaired.
+                if (byName && !isPrefixOfCurrent(detectLayout(saved))) {
                     for (const [name, value] of Object.entries(byName)) {
                         setWidget(this, name, value);
                     }
