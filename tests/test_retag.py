@@ -307,6 +307,46 @@ def test_dropping_past_the_end_of_a_short_last_row_appends():
     assert _drop_at(5, 3, x=500, y=150) == 5
 
 
+def _off_strip(x, y, view_w=560, view_h=290):
+    """The real droppedOffStrip, over a slab of the given size."""
+    script = (_extract_drop()
+              + f"\nconsole.log(JSON.stringify(droppedOffStrip("
+              + f"{{x: {x}, y: {y}}}, {view_w}, {view_h})));\n")
+    proc = subprocess.run([NODE, "--input-type=module", "-e", script],
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, f"node failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip())
+
+
+@requires_node
+def test_releasing_off_the_slab_is_an_abort():
+    """Dragging a tile out of the node and letting go on empty canvas has to mean "never
+    mind". Without this it silently committed the reorder and retagged the prompt to
+    match, leaving Escape as the only way out of a drag."""
+    assert _off_strip(1500, 150) is True      # far to the right
+    assert _off_strip(280, -400) is True      # above the node
+    assert _off_strip(-600, 150) is True      # left of it
+    assert _off_strip(280, 900) is True       # below it
+
+
+@requires_node
+def test_a_drop_just_past_the_edge_still_counts():
+    """The slack matters as much as the bound: aiming at the empty space after the last
+    tile is how a drop is normally made, and a near miss must not read as an abort."""
+    assert _off_strip(280, 150) is False      # squarely inside
+    assert _off_strip(600, 150) is False      # past the right edge, within one tile
+    assert _off_strip(280, -60) is False      # just above the top edge
+    assert _off_strip(280, 350) is False      # just below the bottom edge
+
+
+@requires_node
+def test_an_unmeasurable_slab_never_aborts():
+    """Before the DOM widget has been laid out the canvas reports zero, and every drop
+    would look "off the slab". Reordering degrades to its old always-drop behaviour rather
+    than becoming impossible."""
+    assert _off_strip(280, 150, view_w=0, view_h=0) is False
+
+
 @requires_node
 def test_dropping_past_the_end_of_a_full_single_row_appends():
     assert _drop_at(3, 3, x=800, y=8 + 65) == 3
