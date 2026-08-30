@@ -345,8 +345,34 @@ export function assignTags(refs) {
 export function tagRemap(before, after) {
     const map = {};
     for (const kind of ["images", "videos", "audios"]) {
+        // Paired by the Nth OCCURRENCE of a file name, not by the first one carrying it.
+        //
+        // Two references to the same file are legal and not unusual: addFiles does no
+        // de-duplication, and an upload with an existing name overwrites on the server and
+        // comes back under that name. They are not interchangeable either - the same file
+        // can appear twice with different crops, rotations or subjects, which is a
+        // reasonable thing to want.
+        //
+        // Matching on the first entry with that name collapsed them: deleting b from
+        // [a, b, a] mapped <Picture 3> to <Picture 1> instead of <Picture 2>, so the
+        // prompt ended up pointing at the wrong one of the two and the survivor was left
+        // with no tag referring to it at all.
+        //
+        // Occurrence order is the honest pairing. It cannot collapse two entries onto one
+        // tag, and for a genuine reorder of identical files it produces a permutation
+        // rather than a wrong answer.
+        const consumed = new Map();
         for (const wasTagged of before[kind]) {
-            const now = after[kind].find((t) => t.ref.file === wasTagged.ref.file);
+            const file = wasTagged.ref.file;
+            const nth = consumed.get(file) || 0;
+            consumed.set(file, nth + 1);
+            let seen = 0;
+            let now = null;
+            for (const candidate of after[kind]) {
+                if (candidate.ref.file !== file) continue;
+                if (seen === nth) { now = candidate; break; }
+                seen++;
+            }
             if (!now) continue;
             if (now.tag !== wasTagged.tag) map[wasTagged.tag] = now.tag;
             // A video's soundtrack tag renumbers independently of its <Video N>.
