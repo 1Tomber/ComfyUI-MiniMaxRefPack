@@ -339,8 +339,20 @@ class MiniMaxH3ReferencePack:
         # the reasoning field, arbitrary extra keys), and a changed request can change the
         # completion, so they move the key like every other payload input. Leaving them
         # out would serve a cached prompt written under the old settings.
+        # The CANONICAL reference list, not the raw widget text.
+        #
+        # references_json is an envelope, and the browser stores UI preferences in it
+        # alongside the references - the prompt box's height, whether tags are rewritten.
+        # Folding the raw string in meant that DRAGGING THE PROMPT BOX TALLER moved this
+        # key, so ComfyUI re-ran the node: a fresh billed VLM call for a cosmetic gesture,
+        # and a different prompt out the other side, since the model rewrites it each time.
+        # Python reads nothing but `references`, so nothing else belongs in the key.
+        #
+        # It also makes the key insensitive to formatting: two spellings of the same
+        # reference list now agree instead of busting the cache.
+        canonical = reference_set.to_json()
         return "|".join([
-            sig, direction, openrouter_model, references_json, system_prompt,
+            sig, direction, openrouter_model, canonical, system_prompt,
             str(width), str(height), str(length_seconds),
             _provider_of(prompt_provider, use_openrouter),
             str(reasoning_effort), str(job_type), str(max_reference_edge),
