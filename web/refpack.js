@@ -1993,6 +1993,32 @@ const DRAG_THRESHOLD = 4;
 // regions are whatever draw() actually painted, so this reads correctly whether a section
 // is one row or several - there is no second copy of the layout maths to drift out of
 // step with the first, and nothing here to revisit if the tiles start wrapping.
+// Was the tile let go somewhere that means "never mind"?
+//
+// dropIndexAt answers just as confidently 900px away as 9px away - it has no notion of
+// distance, and it should not: horizontal position inside a row is meaningful at ANY
+// distance, because past the end of a row means the end of that row. So the abort cannot
+// be expressed as "far from the tiles" without breaking the drop that aims at the empty
+// space after the last one.
+//
+// What it is instead is "off the slab". Dragging a tile out of the node and releasing it
+// on empty canvas is the natural way to change your mind, and before this it silently
+// committed the reorder AND rewrote every <Picture N> in the prompt to match, with Escape
+// as the only way out. Measured: released 900px right and 200px above the node, and the
+// tile moved.
+//
+// Coordinates are canvas-relative (getMousePos divides through by offsetWidth/Height), so
+// the slab is 0..viewW by 0..viewH. One tile of slack keeps a deliberate drop just past
+// the edge working.
+function droppedOffStrip(pos, viewW, viewH) {
+    if (!Number.isFinite(viewW) || !Number.isFinite(viewH) || viewW <= 0 || viewH <= 0) {
+        return false;   // no measurable slab: fall back to the old always-drop behaviour
+    }
+    const slack = CL.tile;
+    return pos.x < -slack || pos.x > viewW + slack
+        || pos.y < -slack || pos.y > viewH + slack;
+}
+
 function dropIndexAt(node, kind, x, y) {
     const regions = (node && node._mmrpHit && node._mmrpHit.regions) || [];
     const tiles = regions.filter((r) => r.type === "tile" && r.kind === kind);
@@ -2061,7 +2087,13 @@ function finishDrag(node, e) {
         scheduleDraw(node);
         return;
     }
-    const pos = getMousePos(node._mmrpBody.canvas, e);
+    const view = node._mmrpBody.canvas;
+    const pos = getMousePos(view, e);
+    // Released off the slab: an abort, exactly as Escape is.
+    if (droppedOffStrip(pos, view.offsetWidth, view.offsetHeight)) {
+        scheduleDraw(node);
+        return;
+    }
     const to = dropIndexAt(node, drag.kind, pos.x, pos.y);
     if (to === drag.index || to === drag.index + 1) {
         scheduleDraw(node);   // dropped back on itself
@@ -2098,7 +2130,12 @@ function onDragMove(node, e) {
         node._mmrpSelected = null;
         node._mmrpPicker = null;
     }
-    drag.insertAt = dropIndexAt(node, drag.kind, pos.x, pos.y);
+    // null while off the slab: draw()'s gap indicator is gated on
+    // `typeof insertAt === "number"`, so it vanishes and the abort is visible in advance.
+    const view = node._mmrpBody.canvas;
+    drag.insertAt = droppedOffStrip(pos, view.offsetWidth, view.offsetHeight)
+        ? null
+        : dropIndexAt(node, drag.kind, pos.x, pos.y);
     scheduleDraw(node);
 }
 
