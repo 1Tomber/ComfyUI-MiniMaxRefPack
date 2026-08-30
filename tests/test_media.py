@@ -818,3 +818,131 @@ def test_the_thumbnail_applies_the_exif_rotation_like_the_socket_does(tmp_path):
         assert thumb.size == (20, 40), (
             "the thumbnail must be upright, matching what load_image puts on the socket"
         )
+
+# ---- a crop that rounds down to one pixel --------------------------------------------
+
+
+def test_widen_to_grows_a_span_to_the_minimum():
+    """h264 needs an even count on each axis, and the encoder rounds down to get one - so
+    a 1px axis becomes 0, which is an empty array av rejects with an IndexError from
+    inside the encoder. The reference that produces it is one the node otherwise accepts:
+    _crop_box guarantees a pixel, validate_crop only checks the fraction is positive, and
+    the socket path emits it happily. Widening beats crashing."""
+    assert media._widen_to(5, 6, 2, 100) == (5, 7)
+    assert media._widen_to(0, 1, 2, 100) == (0, 2)
+    # against the right edge it has to grow LEFTWARDS instead
+    assert media._widen_to(99, 100, 2, 100) == (98, 100)
+
+
+def test_widen_to_leaves_a_wide_enough_span_exactly_alone():
+    assert media._widen_to(10, 40, 2, 100) == (10, 40)
+    assert media._widen_to(0, 100, 2, 100) == (0, 100)
+
+
+def test_widen_to_cannot_exceed_the_frame():
+    """A source smaller than the minimum cannot be widened into one - the whole frame is
+    the best available answer, and it must not return an out-of-bounds slice."""
+    assert media._widen_to(0, 1, 2, 1) == (0, 1)
+    assert media._widen_to(0, 0, 2, 0) == (0, 0)
+
+
+@pytest.mark.parametrize("frac", [0.001, 0.004, 0.0001])
+def test_a_sub_pixel_crop_still_leaves_two_pixels_to_encode(frac):
+    """End to end through the real _crop_box: the fraction a hand-edited references_json
+    can carry, then the widening the encoder needs."""
+    width = height = 640
+    left, top, right, bottom = media._crop_box([0.5, 0.5, frac, frac], width, height)
+    left, right = media._widen_to(left, right, 2, width)
+    top, bottom = media._widen_to(top, bottom, 2, height)
+    assert right - left >= 2 and bottom - top >= 2
+    assert 0 <= left < right <= width
+    assert 0 <= top < bottom <= height
+    # and what the encoder derives from it is even and non-zero
+    assert (right - left) - ((right - left) % 2) >= 2
+    assert (bottom - top) - ((bottom - top) % 2) >= 2
+
+
+# ---- a stream that does not start at pts 0 -------------------------------------------
+
+
+class _FakeStreamAt:
+    def __init__(self, start_time, time_base):
+        from fractions import Fraction
+
+        self.start_time = start_time
+        self.time_base = Fraction(1, time_base)
+
+
+def test_stream_origin_reads_a_shifted_start():
+    """A stream copy out of a transport stream keeps its original timestamps, so the video
+    stream starts at a non-zero pts. A trim means seconds from the start of THIS clip -
+    which is what the frame-index path in _decode_video takes it to mean - so the
+    pts-based paths have to subtract that origin instead of reading raw stamps."""
+    seconds, pts = media._stream_origin(_FakeStreamAt(12288, 12288))
+    assert seconds == 1.0
+    assert pts == 12288
+
+
+def test_stream_origin_of_an_ordinary_stream_is_zero():
+    seconds, pts = media._stream_origin(_FakeStreamAt(0, 12288))
+    assert (seconds, pts) == (0.0, 0)
+
+
+def test_stream_origin_tolerates_a_stream_that_declares_none():
+    """Not every container reports one, and a missing start is not an error - it is zero."""
+    assert media._stream_origin(_FakeStreamAt(None, 12288)) == (0.0, 0)
+
+
+class _NoStartTime:
+    def __init__(self):
+        from fractions import Fraction
+
+        self.time_base = Fraction(1, 1000)
+
+
+def test_stream_origin_tolerates_a_stream_without_the_attribute_at_all():
+    assert media._stream_origin(_NoStartTime()) == (0.0, 0)
+
+
+def test_thumbnail_png_counts_at_seconds_from_the_clips_own_start(monkeypatch):
+    """The behavioural half of the origin fix.
+
+    A stream copy out of a transport stream keeps its original timestamps, so the video
+    stream starts at a non-zero pts. `at_seconds` means "into this clip", not "at this
+    presentation stamp" - which is what the frame-index path in _decode_video already
+    takes it to mean. Reading raw stamps made 0.5s land on the clip's FIRST frame.
+    """
+    from io import BytesIO
+
+    from PIL import Image
+
+    tb = 90000
+    # the clip runs 1.0..2.5s in absolute stream time; its own start is 1.0s
+    fake = _FakeAv(frame_times=[1.0, 1.5, 2.0, 2.5], time_base=tb)
+    fake.stream.start_time = int(1.0 * tb)
+    _install_fake_av(monkeypatch, fake)
+
+    out = media.thumbnail_png("clip.mp4", at_seconds=0.5)
+
+    # 0.5s INTO the clip is absolute 1.5s
+    assert fake.seeks == [(int(1.5 * tb), fake.stream)]
+    with Image.open(BytesIO(out)) as thumb:
+        # frame_times[1] is the second colour in _FakeAv's cycle: green
+        assert thumb.getpixel((5, 5)) == (0, 128, 0)
+
+
+def test_thumbnail_png_is_unchanged_when_the_stream_starts_at_zero(monkeypatch):
+    """The ordinary case must not have moved: an origin of zero subtracts nothing."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    fake = _FakeAv(frame_times=[0.0, 1.0, 2.0, 3.0], time_base=90000)
+    fake.stream.start_time = 0
+    _install_fake_av(monkeypatch, fake)
+
+    out = media.thumbnail_png("clip.mp4", at_seconds=2.0)
+
+    assert fake.seeks == [(180000, fake.stream)]
+    with Image.open(BytesIO(out)) as thumb:
+        assert thumb.getpixel((5, 5)) == (0, 0, 255)
