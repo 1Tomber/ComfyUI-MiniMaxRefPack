@@ -538,11 +538,27 @@ function fileUrl(file) {
 // on the user's own machine (download + file picker, see "Config save/load" below),
 // so the /minimax_refpack/packs routes are no longer called from the UI at all.
 
-async function apiSystemPromptDefault() {
-    const res = await fetch("/minimax_refpack/system_prompt");
+// `mode` is which packaged prompt to hand back — the two registers are separate files.
+// Omitted, the route answers `standard`, which is what it always did and is why a
+// replacement workflow used to be shown the wrong one.
+async function apiSystemPromptDefault(mode) {
+    const qs = mode ? `?mode=${encodeURIComponent(mode)}` : "";
+    const res = await fetch(`/minimax_refpack/system_prompt${qs}`);
     if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
     const data = await res.json();
     return data.default || "";
+}
+
+// Which packaged prompt this workflow is actually going to use.
+//
+// `auto` is genuinely unanswerable here: it is resolved at queue time by a classifier
+// that reads the reference set and the direction text, so the browser cannot know. It
+// resolves to `standard` because that is what auto falls back to on every failure path
+// (prompt.classify_mode) and what it picks for almost every job — but the modal SAYS so
+// rather than presenting a guess as a fact.
+function systemPromptModeOf(node) {
+    const jobType = String(widgetByName(node, "job_type")?.value ?? "").trim().toLowerCase();
+    return jobType === "replacement" ? "replacement" : "standard";
 }
 
 // Deliberately asks the SERVER to probe rather than probing from here. Two reasons, and
@@ -2555,6 +2571,14 @@ function openLocalServerModal(node, anchorBtn) {
 
 function openSystemPromptModal(node) {
     const systemPromptWidget = widgetByName(node, "system_prompt");
+    const mode = systemPromptModeOf(node);
+    const jobType = String(widgetByName(node, "job_type")?.value ?? "").trim().toLowerCase();
+    // Only `auto` is ambiguous, and only `auto` gets the caveat — saying "assuming
+    // standard" under an explicit job_type: standard would be noise about a certainty.
+    const modeNote = jobType === "auto"
+        ? " job_type is `auto`, so the register is picked at queue time by a classifier: " +
+          "this is the `standard` prompt, and a job routed to `replacement` uses a different one."
+        : ` This is the \`${mode}\` prompt, matching job_type.`;
 
     const overlay = document.createElement("div");
     overlay.className = "mmrp-overlay";
@@ -2573,7 +2597,7 @@ function openSystemPromptModal(node) {
 
     const hint = document.createElement("div");
     hint.className = "mmrp-modal-hint";
-    hint.textContent = "Empty = use the built-in default.";
+    hint.textContent = "Empty = use the built-in default." + modeNote;
     modal.appendChild(hint);
 
     const textarea = document.createElement("textarea");
@@ -2588,8 +2612,9 @@ function openSystemPromptModal(node) {
     // textarea back only if it differs from the default (see saveBtn).
     let prefilledDefault = "";
     if (!textarea.value.trim()) {
-        hint.textContent = "Showing the built-in default. Edit to override it for this workflow.";
-        apiSystemPromptDefault()
+        hint.textContent =
+            "Showing the built-in default. Edit to override it for this workflow." + modeNote;
+        apiSystemPromptDefault(mode)
             .then((text) => {
                 // Don't clobber anything the user typed while the fetch was in flight.
                 if (!textarea.value.trim()) {
@@ -2598,7 +2623,7 @@ function openSystemPromptModal(node) {
                 }
             })
             .catch(() => {
-                hint.textContent = "Empty = use the built-in default.";
+                hint.textContent = "Empty = use the built-in default." + modeNote;
             });
     }
 
@@ -2607,10 +2632,10 @@ function openSystemPromptModal(node) {
 
     const loadDefaultBtn = document.createElement("button");
     loadDefaultBtn.className = "mmrp-btn";
-    loadDefaultBtn.textContent = "Load default";
+    loadDefaultBtn.textContent = mode === "replacement" ? "Load default (replacement)" : "Load default";
     loadDefaultBtn.onclick = async () => {
         try {
-            textarea.value = await apiSystemPromptDefault();
+            textarea.value = await apiSystemPromptDefault(mode);
         } catch (e) {
             alert(`Couldn't load the default: ${e.message}`);
         }

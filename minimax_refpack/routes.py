@@ -136,8 +136,28 @@ async def list_files_route(request: web.Request) -> web.Response:
 async def system_prompt_route(request: web.Request) -> web.Response:
     """Read-only: the modal's "Load default" button. The user's edit lives in the
     workflow's `system_prompt` widget, never written back here - there is no write
-    route for this on purpose."""
-    return web.json_response({"default": prompt._read_system_prompt()})
+    route for this on purpose.
+
+    `mode` picks WHICH packaged prompt. This route used to call _read_system_prompt() with
+    no argument at all, so the parameter's own "standard" default always won: with
+    job_type on `replacement`, Load default handed back system_prompt.md - the wrong file,
+    at 26KB, with no indication anything was off. The two registers are deliberately
+    separate files (prompt.py: "putting both in context produces hybrids"), which is
+    exactly why handing over the other one is worth catching.
+
+    An unrecognised mode resolves to standard rather than 400ing, mirroring
+    _read_system_prompt's own dict.get and the way an unknown provider or reasoning effort
+    is absorbed elsewhere: a typo must not cost someone their prompt. `auto` resolves to
+    standard too - which register auto picks is decided at run time, by a classifier, and
+    this route has no reference set to classify.
+
+    The resolved mode is echoed back so the modal can label what it is showing instead of
+    assuming it got what it asked for.
+    """
+    mode = (request.query.get("mode") or "standard").strip().lower()
+    if mode not in prompt._PROMPT_PATHS:
+        mode = "standard"
+    return web.json_response({"default": prompt._read_system_prompt(mode), "mode": mode})
 
 
 async def detect_route(request):

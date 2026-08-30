@@ -12,7 +12,7 @@ import os
 
 import pytest
 
-from minimax_refpack import routes
+from minimax_refpack import prompt, routes
 from minimax_refpack.refs import Reference, ReferenceSet
 
 
@@ -209,6 +209,41 @@ def test_no_write_route_exists_for_system_prompt():
     assert ("POST", "/minimax_refpack/system_prompt") not in paths
     assert ("PUT", "/minimax_refpack/system_prompt") not in paths
     assert ("DELETE", "/minimax_refpack/system_prompt") not in paths
+
+
+def test_the_default_route_answers_standard_when_no_mode_is_given():
+    """Unchanged contract: a browser sending no ?mode still gets standard."""
+    body = body_json(run(routes.system_prompt_route(FakeRequest())))
+    assert body["mode"] == "standard"
+    assert body["default"] == prompt._read_system_prompt("standard")
+
+
+def test_the_default_route_answers_the_replacement_prompt_when_asked():
+    """The bug: this route called _read_system_prompt() with no argument at all, so the
+    parameter's own "standard" default always won and a replacement workflow's Load
+    default button silently handed back the wrong 26KB file."""
+    body = body_json(run(routes.system_prompt_route(FakeRequest(query={"mode": "replacement"}))))
+    assert body["mode"] == "replacement"
+    assert body["default"] == prompt._read_system_prompt("replacement")
+
+
+def test_the_two_packaged_prompts_are_actually_different():
+    """Keeps the test above from passing vacuously. If the two files ever became the
+    same text, every assertion about picking between them would stay green while the
+    thing they check had quietly stopped existing."""
+    assert prompt._read_system_prompt("standard") != prompt._read_system_prompt("replacement")
+
+
+@pytest.mark.parametrize("mode", ["auto", "", "STANDARD", "nonsense", "../../etc/passwd"])
+def test_an_unusable_mode_falls_back_to_standard_rather_than_erroring(mode):
+    """`auto` is resolved at queue time by a classifier over the reference set, which
+    this route does not have. Junk resolves the same way, for the same reason an unknown
+    provider does: a typo must not cost someone their prompt. The traversal string is in
+    the table because `mode` indexes a dict of PATHS - it must never reach the filesystem,
+    and a fallback is what guarantees that rather than a check that could be forgotten."""
+    body = body_json(run(routes.system_prompt_route(FakeRequest(query={"mode": mode}))))
+    assert body["mode"] == "standard"
+    assert body["default"] == prompt._read_system_prompt("standard")
 
 
 # ---- import safety -------------------------------------------------------------
