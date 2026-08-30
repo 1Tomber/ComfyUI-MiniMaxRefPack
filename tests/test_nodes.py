@@ -856,3 +856,92 @@ def test_an_actual_reference_change_still_moves_the_key(fake_folder_paths):
 def test_an_edit_to_a_reference_still_moves_the_key(fake_folder_paths):
     edited = [{"kind": "image", "file": "a.png", "crop": [0, 0, 0.5, 0.5]}]
     assert _key(json.dumps({"references": REFS})) != _key(json.dumps({"references": edited}))
+
+# ---- a silent video must not mint an <Audio N> ---------------------------------------
+
+
+def _set(*entries):
+    from minimax_refpack.refs import ReferenceSet
+
+    return ReferenceSet.from_obj(list(entries))
+
+
+def _tags(reference_set):
+    return [(t.tag, t.audio_tag) for t in reference_set.assign_tags()]
+
+
+def test_a_silent_video_does_not_take_an_audio_tag(monkeypatch):
+    """use_soundtrack defaults ON and assign_tags trusts it, so a clip with no audio
+    track told the model "<Audio 1>: the soundtrack inside <Video 1>". The comment on the
+    default says the probe clears the flag - but the only probe is on the browser route,
+    so it never runs for a headless queue."""
+    monkeypatch.setattr(nodes.media, "probe", lambda path: {"has_audio": False})
+    refset = _set({"kind": "video", "file": "silent.mp4"})
+
+    silenced = nodes._clear_silent_soundtracks(refset, "/in")
+
+    assert silenced == ["silent.mp4"]
+    assert _tags(refset) == [("<Video 1>", None)]
+
+
+def test_a_silent_video_does_not_shift_the_real_audio_numbering(monkeypatch):
+    """The consequence that actually bites: a video's soundtrack claims its audio tag
+    BEFORE any standalone audio does, so one phantom renumbers every real one after it -
+    while the sockets do not shift, because the emit is already guarded on the decoded
+    audio being present. Prompt and sockets then name different files."""
+    monkeypatch.setattr(nodes.media, "probe", lambda path: {"has_audio": False})
+    refset = _set(
+        {"kind": "video", "file": "silent.mp4"},
+        {"kind": "audio", "file": "voice.wav"},
+    )
+
+    before = _tags(refset)
+    assert before == [("<Video 1>", "<Audio 1>"), ("<Audio 2>", None)], (
+        "the bug, stated: the real voice-over is <Audio 2> because a silent clip took 1"
+    )
+
+    nodes._clear_silent_soundtracks(refset, "/in")
+    assert _tags(refset) == [("<Video 1>", None), ("<Audio 1>", None)]
+
+
+def test_a_video_with_sound_keeps_its_tag(monkeypatch):
+    monkeypatch.setattr(nodes.media, "probe", lambda path: {"has_audio": True})
+    refset = _set({"kind": "video", "file": "talkie.mp4"})
+
+    assert nodes._clear_silent_soundtracks(refset, "/in") == []
+    assert _tags(refset) == [("<Video 1>", "<Audio 1>")]
+
+
+def test_a_flag_the_user_turned_off_is_not_probed(monkeypatch):
+    """No point opening a container to confirm something nobody asked for."""
+    def explode(path):
+        raise AssertionError("must not probe a video whose soundtrack is already off")
+
+    monkeypatch.setattr(nodes.media, "probe", explode)
+    refset = _set({"kind": "video", "file": "muted.mp4", "use_soundtrack": False})
+    assert nodes._clear_silent_soundtracks(refset, "/in") == []
+
+
+@pytest.mark.parametrize("failure", [
+    lambda path: (_ for _ in ()).throw(RuntimeError("av is not installed")),
+    lambda path: (_ for _ in ()).throw(OSError("no such file")),
+    lambda path: {},                      # a probe that cannot say
+    lambda path: {"has_audio": None},     # ...or says it does not know
+])
+def test_a_probe_that_cannot_tell_leaves_the_flag_alone(monkeypatch, failure):
+    """This exists to correct a confident wrong answer, not to invent a new way for a
+    build to fail. Anything other than a definite "no audio" changes nothing."""
+    monkeypatch.setattr(nodes.media, "probe", failure)
+    refset = _set({"kind": "video", "file": "clip.mp4"})
+
+    assert nodes._clear_silent_soundtracks(refset, "/in") == []
+    assert _tags(refset) == [("<Video 1>", "<Audio 1>")]
+
+
+def test_images_and_audio_are_never_probed(monkeypatch):
+    def explode(path):
+        raise AssertionError("only videos carry a soundtrack flag")
+
+    monkeypatch.setattr(nodes.media, "probe", explode)
+    refset = _set({"kind": "image", "file": "a.png"}, {"kind": "audio", "file": "v.wav"})
+    assert nodes._clear_silent_soundtracks(refset, "/in") == []

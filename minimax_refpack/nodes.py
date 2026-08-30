@@ -119,6 +119,40 @@ def _files_signature(reference_set: refs.ReferenceSet, input_dir: str) -> str:
     return h.hexdigest()
 
 
+def _clear_silent_soundtracks(reference_set, input_dir: str) -> list[str]:
+    """Turn off use_soundtrack for videos that have no audio track. Returns their names.
+
+    The flag defaults to ON, and assign_tags trusts it: it mints an <Audio N> for every
+    video that carries it, without ever asking whether the file has a soundtrack. The
+    comment on the default says the probe clears it - but the only probe lives on the
+    browser route, so it runs asynchronously, only when someone has the node open, and
+    never at all for a headless queue.
+
+    A silent clip therefore told the model "<Audio 1>: the soundtrack inside <Video 1>",
+    and - because a video's soundtrack claims its audio tag before any standalone audio
+    does - shifted the numbering of every real <Audio N> after it. The sockets did not
+    shift, because the emit below is already guarded on the decoded audio being present.
+    So the prompt and the sockets disagreed about which file each audio tag named.
+
+    Probing costs one container open per video that claims a soundtrack, once per queue,
+    and only for videos. If it cannot tell - av missing, an unreadable file - the flag is
+    left exactly as it was: this exists to correct a confident wrong answer, not to
+    invent a new way for a build to fail.
+    """
+    silenced = []
+    for ref in reference_set.references:
+        if ref.kind != "video" or not ref.use_soundtrack:
+            continue
+        try:
+            has_audio = media.probe(os.path.join(input_dir, ref.file)).get("has_audio")
+        except Exception:
+            continue
+        if has_audio is False:
+            ref.use_soundtrack = False
+            silenced.append(ref.file)
+    return silenced
+
+
 class MiniMaxH3ReferencePack:
     """Owns a reference set (images/videos/audio) and fans it out to image_1..9,
     video_1..3, video_audio_1..3, audio_1..3 plus a VLM-written prompt. Wire the 19
@@ -401,6 +435,12 @@ class MiniMaxH3ReferencePack:
             cap=max_reference_edge or None, provider=provider,
             api_base=api_base or None, model=model, job_type=job_type,
         )
+
+        # Before any tag is assigned: a silent clip must not mint an <Audio N>, because
+        # every real audio tag after it is numbered relative to that one.
+        silenced = _clear_silent_soundtracks(reference_set, input_dir)
+        if silenced:
+            logs.log("soundtrack_absent", files=", ".join(silenced))
 
         outputs = refs.empty_outputs()
         for tagged in reference_set.assign_tags():
