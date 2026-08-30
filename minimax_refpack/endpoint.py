@@ -95,17 +95,66 @@ _TTL_FIELD_BY_PORT = {1234: "ttl", 11434: "keep_alive"}
 
 
 def is_loopback(url: str) -> bool:
-    """True when this URL names the machine ComfyUI itself is running on, literally."""
+    """True when this URL names the machine ComfyUI itself is running on, literally.
+
+    Deliberately strict about the AUTHORITY rather than clever about it, because this
+    function is a security gate and the thing it guards is dialled by a DIFFERENT parser.
+
+    That gap was exploitable. `urlparse` reads `http://evil.com\\@127.0.0.1/v1` as
+    userinfo `evil.com\\` and host `127.0.0.1`, so the gate passed it - while urllib3,
+    which is what requests actually dials with, ends the authority at the backslash and
+    connects to `evil.com`. Validating with one parser and connecting with another is the
+    whole bug class; a single crafted query turned this route into a working SSRF probe and
+    internal port scanner against a ComfyUI that usually has no auth in front of it.
+
+    So rather than trying to out-parse the attacker, anything whose authority is not
+    boringly unambiguous is refused:
+
+      * characters that make parsers disagree (backslash, whitespace, control characters)
+      * userinfo at all - `http://anything@127.0.0.1/` has no legitimate use for a local
+        model server, and it is the delivery mechanism for the confusion above
+      * and finally the host itself, checked twice: once through urlparse and once through
+        the parser the HTTP client will really use, which must agree.
+
+    A false negative here costs a user one manual paste into api_base. A false positive
+    costs them an open proxy.
+    """
     from urllib.parse import urlparse
 
+    raw = (url or "").strip()
+    if not raw:
+        return False
+    # Reject before parsing: these are exactly the characters that make two parsers read
+    # one string as two different hosts.
+    if any(c in raw for c in "\\ \t\r\n") or any(ord(c) < 0x20 for c in raw):
+        return False
     try:
-        parsed = urlparse((url or "").strip())
+        parsed = urlparse(raw)
     except ValueError:
         return False
     if parsed.scheme not in ("http", "https"):
         return False
+    # Userinfo is the vector, so it is refused whole rather than parsed around.
+    if "@" in parsed.netloc:
+        return False
     host = (parsed.hostname or "").strip().lower()
-    return host in _LOOPBACK_HOSTS
+    if host not in _LOOPBACK_HOSTS:
+        return False
+    # Second opinion from the parser that will do the dialling. The checks above already
+    # close the known differential; this is here so that the NEXT one - some future
+    # normalisation quirk in urllib3 - fails closed instead of silently reopening the hole.
+    # Best-effort: if urllib3 is not importable the strict authority rules still stand on
+    # their own, and refusing outright would break detection on a machine that can still
+    # perfectly well run the node.
+    try:
+        import urllib3
+
+        dialled = (urllib3.util.parse_url(raw).host or "").strip().lower()
+    except ImportError:
+        return True
+    except Exception:
+        return False
+    return dialled.strip("[]") in {h.strip("[]") for h in _LOOPBACK_HOSTS}
 
 
 @dataclass(frozen=True)

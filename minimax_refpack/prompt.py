@@ -168,7 +168,14 @@ def _models_at(base: str, timeout: float = _DETECT_TIMEOUT) -> list[str] | None:
     reported as [], which is why the check is `is None` at the call site.
     """
     try:
-        resp = requests.get(f"{base.rstrip('/')}/models", timeout=timeout)
+        # allow_redirects=False: this is reached from the detect route with a
+        # user-supplied base, and is_loopback only ever vets the base ITSELF. With
+        # redirects followed, a loopback server that answers 302 - an open redirect,
+        # or simply a hostile one on a port the user was told to try - walks this
+        # process straight off the box to anywhere, including 169.254.169.254.
+        # A real OpenAI-compatible /models answers 200 directly.
+        resp = requests.get(f"{base.rstrip('/')}/models", timeout=timeout,
+                            allow_redirects=False)
         if resp.status_code != 200:
             return None
         data = resp.json().get("data")
