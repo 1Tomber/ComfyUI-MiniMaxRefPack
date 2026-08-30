@@ -4032,10 +4032,12 @@ function installSelectionHandlers(node) {
 }
 
 // ---------------------------------------------------------------------------
-// Fixed-size enforcement. resizable = false removes litegraph's resize handle;
-// the three overrides are belt and braces so NOTHING — a restored workflow, a
-// paste, a frontend quirk — can put the node at any other size. This supersedes
-// the old "never stomp a restored size" rule: there is no user-chosen size.
+// Size enforcement. The node is resizable now, so these three overrides no longer pin it
+// to one size - they keep WIDTH the user's (floored at what the button row needs) and
+// HEIGHT derived from the content, with a height drag re-read as a prompt-box resize.
+//
+// They are still belt and braces about everything else: a restored workflow, a paste or a
+// frontend quirk cannot put the node at a size its content does not support.
 // ---------------------------------------------------------------------------
 
 // A height drag, turned into a prompt-box height and remembered.
@@ -4058,19 +4060,71 @@ function installSelectionHandlers(node) {
 // returns to the height you started from instead of over-shooting by whatever the clamp
 // swallowed. The frontend clamps the drag to computeSize() anyway, so it cannot run far
 // below the floor.
+// Is the user actually dragging THIS node's resize handle right now?
+//
+// The only reliable answer, and it has to be asked. The frontend calls setSize for its own
+// reasons constantly - most damagingly from `_arrangeWidgets`, which runs on every draw
+// and pushes the node taller to make room for the widget stack. Treating those as height
+// drags was catastrophic: each one grew the prompt, which grew the node, which made
+// _arrangeWidgets push again. Measured on a fresh, untouched node: the prompt box settled
+// at 1736px and the node at 2978, and every save/reload cycle added another 1626px - which
+// was then persisted into references_json, so the corruption was written into the workflow.
+//
+// `resizing_node` is set on the resize drag's onDragStart and cleared in its finally
+// (verified in the 1.51.9 bundle), so it is exactly "a human is dragging this node's
+// handle". A frontend that does not have it gets no height-drag support rather than the
+// runaway - the feature degrades, which is the right way round.
+function isUserResizing(node) {
+    const canvas = app.canvas;
+    if (!canvas || !("resizing_node" in canvas)) return false;
+    return canvas.resizing_node === node;
+}
+
+// The frontend hands setSize a Float64Array-backed view, not an Array.
+//
+// 1.51.9's resize drag builds a `Rectangle extends Float64Array` and passes `rect.size`,
+// a subarray of it. `Array.isArray` is FALSE for that, so guards written against it
+// skipped every real drag while passing every hand-written `setSize([w, h])` from a
+// console - which is exactly how this shipped "verified" and did nothing. Duck-typing on
+// length accepts both.
+function isSizePair(size) {
+    return !!size && typeof size.length === "number" && size.length >= 2;
+}
+
 function absorbHeightIntoPrompt(node, requestedH) {
     if (!Number.isFinite(requestedH)) return;
-    // Nothing before the node has settled. A delta is only meaningful against a height
-    // that means something, and at creation node.size[1] is still litegraph's default -
-    // so the first real setSize produced a delta of well over a thousand pixels and
-    // dumped all of it into the prompt box. Measured on a fresh node: 1164px tall
-    // instead of 110.
+    // Nothing before the node has settled. At creation node.size[1] is still litegraph's
+    // default, so an early call would hand the prompt box a delta of over a thousand
+    // pixels. Measured on a fresh node before this guard: 1164px tall instead of 110.
     if (!node._mmrpSizeReady) return;
-    const current = (node.size && node.size[1]) || 0;
-    const delta = requestedH - current;
-    if (!delta) return;
-    const raw = (Number.isFinite(node._mmrpPromptRaw) ? node._mmrpPromptRaw
-                                                      : promptHeightOf(node)) + delta;
+    // Clamped to the floor first. The frontend clamps an interactive drag to computeSize()
+    // before it gets here, but nothing clamps a programmatic setSize - and an unclamped
+    // value drove _mmrpPromptRaw hundreds of pixels negative, after which the box would
+    // not grow again until the whole debt had been dragged back.
+    requestedH = Math.max(requestedH, minNodeHeight(node));
+
+    // ANCHORED TO THE START OF THE DRAG, not to the previous frame.
+    //
+    // The frontend's drag is ABSOLUTE: every mousemove passes the size the node had when
+    // the drag began plus the pointer's total movement. Measuring against the previous
+    // frame therefore breaks as soon as the derived height moves under it - narrowing the
+    // node wraps a tile onto a new line, the media grows, and the next frame's difference
+    // comes out negative, collapsing the prompt to its 44px floor mid-drag. That is the
+    // exact failure the delta was introduced to fix, reappearing one level down.
+    //
+    // Against the anchor, the prompt is always "where it started, plus how far the pointer
+    // has moved" - independent of anything the content did in between.
+    let anchor = node._mmrpDragAnchor;
+    if (!anchor) {
+        anchor = node._mmrpDragAnchor = {
+            height: (node.size && node.size[1]) || 0,
+            prompt: Number.isFinite(node._mmrpPromptRaw)
+                ? node._mmrpPromptRaw
+                : promptHeightOf(node),
+        };
+    }
+    const raw = anchor.prompt + (requestedH - anchor.height);
+    if (raw === node._mmrpPromptRaw) return;
     node._mmrpPromptRaw = raw;
     node._mmrpPromptH = Math.max(CONTENT.minPromptH, Math.round(raw));
     syncPromptHeight(node);
@@ -4104,11 +4158,12 @@ function installSizeGuards(node) {
     // from computeSize — the hottest of the three — costs two property writes.
     const origOnResize = node.onResize;
     node.onResize = function (size) {
-        // Downstream of setSize on this frontend (`setSize(e){this.size=e,this.onResize?.(
-        // this.size)}`), so by the time this runs the height is already the derived one
-        // and the absorb below is a no-op. It stays for a frontend that calls onResize
-        // directly — the delta form makes calling it twice harmless.
-        if (!this._mmrpInternalResize) absorbHeightIntoPrompt(this, size[1]);
+        // Deliberately does NOT absorb. onResize runs downstream of setSize on this
+        // frontend (`setSize(e){this.size=e,this.onResize?.(this.size)}`), so the height
+        // it is handed is the DERIVED one this wrapper just wrote - not anything the user
+        // asked for. Absorbing it fed the node's own output back in as a request and drove
+        // the prompt to its floor on a drag that should have grown it. setSize is the one
+        // place a user's height is real, and it is the only place that reads it.
         // A width drag re-wraps the tiles, so the slab's height can change with no change
         // to the content at all.
         applyCanvasHeight(this);
@@ -4137,17 +4192,26 @@ function installSizeGuards(node) {
         // has to be read HERE — before it is replaced by the derived one two lines down.
         // Reading it in onResize instead was an identity: onResize only ever sees what
         // this function already wrote.
-        if (!this._mmrpInternalResize && Array.isArray(size)) {
+        // The anchor lives only for the duration of one drag.
+        if (!isUserResizing(this)) this._mmrpDragAnchor = null;
+        if (!this._mmrpInternalResize && isUserResizing(this) && isSizePair(size)) {
             absorbHeightIntoPrompt(this, size[1]);
         }
-        if (Array.isArray(size) && Number.isFinite(size[0])) {
+        if (isSizePair(size) && Number.isFinite(size[0])) {
             this.size[0] = Math.max(size[0], minNodeWidth(this));
         }
         const f = nodeSize(this);
-        size[0] = f[0];
-        size[1] = f[1];
-        if (origSetSize) origSetSize.call(this, size);
-        else this.size = size;
+        // Written back into the caller's own object so the drag sees the clamp...
+        if (isSizePair(size)) {
+            size[0] = f[0];
+            size[1] = f[1];
+        }
+        // ...but litegraph is handed a plain array. The drag passes a Float64Array view of
+        // its own rectangle, and storing that as node.size would leave the node aliasing a
+        // buffer the next mousemove overwrites.
+        const plain = [f[0], f[1]];
+        if (origSetSize) origSetSize.call(this, plain);
+        else this.size = plain;
         syncDomWidgetSize(this);
     };
 }
