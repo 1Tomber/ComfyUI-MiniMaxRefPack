@@ -291,6 +291,38 @@ function fixedSize(node) {
     return [CONTENT.width, Math.max(widgetY + CONTENT.height + CONTENT.pad, outputsMin)];
 }
 
+// The DOM block is sized from `widget.width` / `widget.computedHeight`, NOT from
+// computeSize(). ComfyUI_frontend src/components/graph/DomWidgets.vue::updateWidgets():
+//
+//     const newWidth  = (widget.width ?? posNode.width) - margin * 2
+//     const newHeight = (widget.computedHeight ?? 50)   - margin * 2
+//
+// computeSize() is still assigned on the widget below because litegraph consults it for
+// the node's own layout, but it has never had anything to do with the block's size, and
+// reading it as though it did is what hid this for four releases.
+//
+// Measured on frontend 1.51.9, dpr 1, node [1340, 1318]: `width` sat at 274 and `margin`
+// at 10, so the black slab rendered 254px wide inside a node whose CSS is written for
+// 1320 — the reference strip was 19% of the node. `computedHeight` sat at 714, leaving
+// the block 694px against the 710 its flex column needs, and the 16px came out of
+// .mmrp-direction, the one child with no pinned height.
+//
+// Both are derived from the frontend's own formula rather than hardcoded, so a frontend
+// that changes `margin` stays correct: width spans the node less its widget margin, and
+// height is exactly CONTENT.height once the margin is subtracted back off.
+function syncDomWidgetSize(node) {
+    const w = node._mmrpDomWidget;
+    if (!w) return;
+    const margin = typeof w.margin === "number" ? w.margin : 10;
+    // try/catch for the same reason hideWidget()'s property writes have it: assigning
+    // `domWidget.node` directly once hit a getter-only accessor on the V3 BaseWidget and
+    // threw a TypeError that aborted loading ANY workflow containing this node. Measured
+    // `width` as a plain property on 1.51.9, but a frontend is free to make it an
+    // accessor tomorrow, and a mis-sized node beats an unloadable one.
+    try { w.width = fixedSize(node)[0]; } catch (e) { /* frontend owns it */ }
+    try { w.computedHeight = CONTENT.height + margin * 2; } catch (e) { /* ditto */ }
+}
+
 // ---------------------------------------------------------------------------
 // The tag rule. Mirrors minimax_refpack/refs.py ReferenceSet.assign_tags() exactly:
 //   1. images, slot order -> <Picture 1..n>
@@ -2712,11 +2744,16 @@ function installSelectionHandlers(node) {
 function installSizeGuards(node) {
     node.resizable = false;
 
+    // The block's own size rides along with all three: the node size and the DOM widget
+    // size are one decision, and letting them drift is what produced a 254px slab in a
+    // 1340px node. syncDomWidgetSize is idempotent and does no layout, so calling it
+    // from computeSize — the hottest of the three — costs two property writes.
     const origOnResize = node.onResize;
     node.onResize = function (size) {
         const f = fixedSize(this);
         size[0] = f[0];
         size[1] = f[1];
+        syncDomWidgetSize(this);
         if (origOnResize) origOnResize.call(this, size);
     };
 
@@ -2727,6 +2764,7 @@ function installSizeGuards(node) {
         if (origComputeSize) origComputeSize.apply(this, arguments);
         const f = fixedSize(this);
         this.min_size = [f[0], f[1]];
+        syncDomWidgetSize(this);
         return [f[0], f[1]];
     };
 
@@ -2737,6 +2775,7 @@ function installSizeGuards(node) {
         size[1] = f[1];
         if (origSetSize) origSetSize.call(this, size);
         else this.size = size;
+        syncDomWidgetSize(this);
     };
 }
 
@@ -2772,11 +2811,23 @@ app.registerExtension({
             node._mmrpHideIntervals = [ivRefs, ivDirection, ivSystemPrompt].filter((id) => id !== undefined);
 
             const bodyEl = buildCustomBlock(node);
-            const domWidget = node.addDOMWidget("mmrp_block", "custom", bodyEl, { serialize: false });
+            // hideOnZoom defaults to TRUE. Below the frontend's LOD threshold the whole
+            // block is then hidden outright (DomWidgets.vue gates visibility on
+            // `!(widget.options.hideOnZoom && lowQuality)`), so zooming out leaves this
+            // node as a tall slab of bare grey body with no references and no prompt on
+            // it. Independently found by semmlerino (PR #2), verified there against
+            // frontend 1.48.6 and here against 1.51.9.
+            const domWidget = node.addDOMWidget("mmrp_block", "custom", bodyEl, {
+                serialize: false,
+                hideOnZoom: false,
+            });
             node._mmrpDomWidget = domWidget;
             // Constant, by construction: the CSS pins the DOM heights this arithmetic
             // assumes (uploadsH/promptH/gap), the canvas height is CANVAS_ROWS.height.
+            // Read by litegraph for the node's layout — NOT by the frontend for the
+            // block's size, which comes from width/computedHeight. See syncDomWidgetSize.
             domWidget.computeSize = () => [CONTENT.width - CONTENT.pad * 2, CONTENT.height];
+            syncDomWidgetSize(node);
             liveNodes.add(node);
 
             node._mmrpBody.directionInput.value = directionWidget ? directionWidget.value || "" : "";
