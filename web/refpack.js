@@ -344,7 +344,13 @@ export function fromReferencesList(list) {
         else if (r.kind === "video")
             refs.videos.push({
                 file: r.file,
-                use_soundtrack: !!r.use_soundtrack,
+                // Absent means ON, matching refs.Reference.from_dict. `!!r.use_soundtrack`
+                // made it OFF, so the two halves disagreed about a hand-written config or
+                // references_json: queued headless it emitted the soundtrack, opened in a
+                // browser first it did not. Both serialisers always write the key, so this
+                // only shows up on a file somebody wrote themselves - which is exactly
+                // what a portable config is.
+                use_soundtrack: r.use_soundtrack !== false,
                 missing: !!r.missing,
                 crop: takeEdit(r.crop),
                 trim: takeEdit(r.trim),
@@ -1676,7 +1682,11 @@ function buildConfig(node, name) {
         version: 1,
         name,
         direction: w("direction"),
-        model: w("model"),
+        // The widget is `openrouter_model`. It was renamed from `model` in 0.3.3 and this
+        // was not, so every config written since has carried `model: ""` and the model
+        // choice has simply not been saved. Still WRITTEN under the old key, so a config
+        // made here can be loaded by an older build.
+        model: w("openrouter_model"),
         reasoning_effort: w("reasoning_effort"),
         references: toReferencesList(node._mmrpRefs),
     };
@@ -1823,7 +1833,13 @@ async function applyConfig(node, data, sourceLabel) {
         return null;
     };
     const unavailable = [
-        restore("model", data.model),
+        // Reads the file's `model` key - its name in the config format, unchanged for
+        // compatibility - into the widget that actually holds it. Loading pointed at a
+        // widget called `model`, which has not existed since 0.3.3: restore() found
+        // nothing, returned null, and the model was silently not restored AND not
+        // reported as unavailable, because an empty value returns early before the
+        // lookup. README promises Load restores the model.
+        restore("openrouter_model", data.model),
         restore("reasoning_effort", data.reasoning_effort),
     ].filter(Boolean);
 
