@@ -288,7 +288,20 @@ CONTENT.height =
 function fixedSize(node) {
     const widgetY = (node._mmrpDomWidget && node._mmrpDomWidget.last_y) || 80;
     const outputsMin = ((node.outputs && node.outputs.length) || 1) * 20 + 40;
-    return [CONTENT.width, Math.max(widgetY + CONTENT.height + CONTENT.pad, outputsMin)];
+    // The DOM widget occupies computedHeight, which is CONTENT.height PLUS its margin on
+    // both edges (that is the frontend's own formula - see syncDomWidgetSize). Budgeting
+    // only CONTENT.pad here left the block's bottom margin eating the node's bottom
+    // inset, so .mmrp-direction sat flush against the node frame.
+    const margin = domWidgetMargin(node);
+    return [CONTENT.width, Math.max(widgetY + CONTENT.height + margin * 2, outputsMin)];
+}
+
+// The frontend's per-widget margin, which it subtracts from both axes when it sizes the
+// element. Read from the widget rather than assumed, and defaulted to the 10 it has been
+// on every frontend measured.
+function domWidgetMargin(node) {
+    const m = node._mmrpDomWidget && node._mmrpDomWidget.margin;
+    return typeof m === "number" ? m : 10;
 }
 
 // The DOM block is sized from `widget.width` / `widget.computedHeight`, NOT from
@@ -308,18 +321,26 @@ function fixedSize(node) {
 // .mmrp-direction, the one child with no pinned height.
 //
 // Both are derived from the frontend's own formula rather than hardcoded, so a frontend
-// that changes `margin` stays correct: width spans the node less its widget margin, and
-// height is exactly CONTENT.height once the margin is subtracted back off.
+// that changes `margin` stays correct: each is the size the BLOCK must end up, with the
+// margin the frontend is about to subtract added back on.
 function syncDomWidgetSize(node) {
     const w = node._mmrpDomWidget;
     if (!w) return;
-    const margin = typeof w.margin === "number" ? w.margin : 10;
+    const margin = domWidgetMargin(node);
     // try/catch for the same reason hideWidget()'s property writes have it: assigning
     // `domWidget.node` directly once hit a getter-only accessor on the V3 BaseWidget and
     // threw a TypeError that aborted loading ANY workflow containing this node. Measured
     // `width` as a plain property on 1.51.9, but a frontend is free to make it an
     // accessor tomorrow, and a mis-sized node beats an unloadable one.
-    try { w.width = fixedSize(node)[0]; } catch (e) { /* frontend owns it */ }
+    // The BLOCK should end up CONTENT.width - 2*CONTENT.pad wide, which is what
+    // refpack.css is written for and what the no-scroll invariant needs (1295px of row
+    // viewport for nine image tiles plus the add square). The frontend subtracts its own
+    // margin, so add it back rather than passing the node width and hoping margin is 10 -
+    // at margin 12 that would leave the block 1316 and clip the ninth tile, silently,
+    // because there is deliberately no scroll machinery to reveal it.
+    try {
+        w.width = CONTENT.width - CONTENT.pad * 2 + margin * 2;
+    } catch (e) { /* frontend owns it */ }
     try { w.computedHeight = CONTENT.height + margin * 2; } catch (e) { /* ditto */ }
 }
 
