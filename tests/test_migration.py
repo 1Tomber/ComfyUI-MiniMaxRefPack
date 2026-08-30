@@ -33,7 +33,7 @@ requires_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
 
 def _extract_migration_js() -> str:
     """The marked block from the shipped file, or a hard failure if the markers moved."""
-    text = REFPACK_JS.read_text()
+    text = REFPACK_JS.read_text(encoding="utf-8")
     start = text.find("// >>> MMRP-MIGRATE")
     end = text.find("// <<< MMRP-MIGRATE")
     assert start != -1 and end != -1, (
@@ -276,7 +276,7 @@ def test_the_js_layout_matches_the_python_declaration_order():
 # were visible. Suppressing draw and dropping last_y is the fix, and this pins it.
 
 def _extract_visibility_js() -> str:
-    text = REFPACK_JS.read_text()
+    text = REFPACK_JS.read_text(encoding="utf-8")
     start = text.find("// >>> MMRP-VISIBILITY")
     end = text.find("// <<< MMRP-VISIBILITY")
     assert start != -1 and end != -1, "the MMRP-VISIBILITY markers are gone from refpack.js"
