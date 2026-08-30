@@ -15,6 +15,7 @@ Pure stdlib — no torch, no ComfyUI — so every other module can import it unc
 from __future__ import annotations
 
 import logging
+import re
 import time
 from contextlib import contextmanager
 
@@ -29,6 +30,29 @@ logger = logging.getLogger(LOGGER_NAME)
 # Matched on the last underscore-separated segment, not as a substring: `api_key` and
 # `access_token` are credentials, `prompt_tokens` and `keyframes` are not.
 _SECRET_SEGMENTS = frozenset({"key", "token", "secret", "password", "authorization"})
+
+# The name guard above reads FIELD NAMES and never looks at values, which leaves the other
+# way a credential arrives: inside a URL. `api_base` is a perfectly ordinary field name, so
+# http://user:s3cret@127.0.0.1:1234/v1 was printed verbatim - by the `build` event on every
+# queue, and by the `chat` event on both success and failure.
+#
+# Userinfo in an api_base is not exotic. It is how you reach a local model server sitting
+# behind a reverse proxy with basic auth, which is a normal thing to do on a pod.
+#
+# Anchored at the scheme and stopping at the first "/" so it can only ever match a real
+# authority: a query string like ?to=a@b has a "/" before it and is left alone.
+_URL_USERINFO = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)([^/\s@]+)@")
+
+
+def redact_url(value):
+    """Strip userinfo out of any URL in `value`, leaving everything else as it was.
+
+    Used for log lines AND for the strings that reach the user - see Endpoint.describe(),
+    whose output lands in PromptError text that people paste into bug reports.
+    """
+    if not isinstance(value, str) or "://" not in value or "@" not in value:
+        return value
+    return _URL_USERINFO.sub(r"\1***@", value)
 
 
 def _number(value: float) -> str:
@@ -63,7 +87,9 @@ def format_event(event: str, **fields) -> str:
         if key.lower().rsplit("_", 1)[-1] in _SECRET_SEGMENTS:
             parts.append(f"{key}=***")
             continue
-        parts.append(f"{key}={_value(value)}")
+        # ...and the same guard applied to the VALUE, for the credential that arrives
+        # inside a URL under an innocent field name like api_base.
+        parts.append(f"{key}={_value(redact_url(value))}")
     return " ".join(parts)
 
 

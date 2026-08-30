@@ -18,6 +18,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# logs is pure stdlib and imports nothing from this package, so this cannot cycle.
+from . import logs
+
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
 PROVIDERS = ("openrouter", "local", "none")
@@ -206,7 +209,13 @@ class Endpoint:
         """One short phrase for a log line or a node warning."""
         if self.is_openrouter:
             return "openrouter"
-        return f"local ({self.chat_url})"
+        # Redacted, because this string is not confined to logs: it is inlined
+        # into PromptError messages, which ComfyUI shows in the UI and which
+        # people paste into bug reports. The RequestException handler in prompt.py
+        # already suppresses str(e) to keep the Authorization header out of that
+        # text, and was leaking the equivalent basic credentials through here in
+        # the same f-string.
+        return f"local ({logs.redact_url(self.chat_url)})"
 
     def describe_extras(self) -> str:
         """What this endpoint adds to the payload beyond the messages, and who decided.

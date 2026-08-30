@@ -131,3 +131,47 @@ def test_timed_fields_added_inside_the_block_are_logged_after_the_openers(caplog
             fields["status"] = 200
 
     assert "event=call model=m status=200 ms=" in caplog.records[0].getMessage()
+
+
+# ---- credentials inside a URL value --------------------------------------------------
+
+
+def test_a_credential_in_a_url_value_is_redacted():
+    """The name guard reads FIELD NAMES and never looks at values, which leaves the other
+    way a credential arrives: inside a URL. `api_base` is an ordinary field name, so
+    http://user:s3cret@host was printed verbatim - by the `build` event on every queue and
+    by the `chat` event on both success and failure.
+
+    Userinfo in an api_base is not exotic; it is how you reach a local model server behind
+    a reverse proxy with basic auth.
+    """
+    line = logs.format_event("build", api_base="http://user:s3cret@127.0.0.1:1234/v1",
+                             provider="local")
+    assert "s3cret" not in line
+    assert "user" not in line
+    assert "api_base=http://***@127.0.0.1:1234/v1" in line
+    assert "provider=local" in line, "the rest of the line is untouched"
+
+
+def test_the_host_survives_redaction():
+    """Redacting the whole URL would make the log useless for the thing logs are for -
+    which server did it talk to."""
+    line = logs.format_event("chat", endpoint="local (http://u:p@10.0.0.5:8000/v1)")
+    assert "10.0.0.5:8000" in line
+    assert "p@" not in line
+
+
+def test_a_url_without_credentials_is_left_exactly_alone():
+    for url in ["http://127.0.0.1:1234/v1", "https://openrouter.ai/api/v1",
+                "http://host/path?to=a@b", "not a url at all", ""]:
+        assert logs.redact_url(url) == url
+
+
+def test_redact_url_passes_through_what_is_not_a_string():
+    for value in [42, 0.5, True, None, ["http://u:p@h/"], {"a": 1}]:
+        assert logs.redact_url(value) == value
+
+
+def test_the_name_guard_still_wins_outright():
+    """A field NAMED like a credential is still blanked entirely, not merely de-userinfo'd."""
+    assert "api_key=***" in logs.format_event("x", api_key="http://u:p@h/v1")

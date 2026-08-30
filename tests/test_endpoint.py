@@ -248,3 +248,30 @@ def test_extra_body_may_not_set_the_fields_the_node_owns(raw):
     with pytest.raises(ValueError) as e:
         ep.resolve("local", LOCAL, local_extra_body=raw)
     assert "may not set" in str(e.value)
+
+# ---- describe() is user-facing, not just log-facing ----------------------------------
+
+
+def test_describe_does_not_carry_url_credentials():
+    """describe() is inlined into PromptError messages, which ComfyUI shows in the UI and
+    which people paste into bug reports. prompt.py's RequestException handler already
+    suppresses str(e) to keep the Authorization header out of that text, and was leaking
+    the equivalent basic credentials through this in the same f-string."""
+    resolved = ep.resolve("local", api_base="http://user:s3cret@127.0.0.1:1234/v1")
+    described = resolved.describe()
+    assert "s3cret" not in described
+    assert "user" not in described
+    assert "127.0.0.1:1234" in described, "which server it was is the point of describe()"
+
+
+def test_describe_is_unchanged_without_credentials():
+    resolved = ep.resolve("local", api_base="http://127.0.0.1:1234/v1")
+    assert "127.0.0.1:1234" in resolved.describe()
+    assert "***" not in resolved.describe()
+
+
+def test_the_error_text_a_user_sees_carries_no_credential():
+    """The whole point: the string that reaches the UI."""
+    resolved = ep.resolve("local", api_base="http://user:s3cret@127.0.0.1:1234/v1")
+    message = f"{resolved.describe()} request failed: ConnectionError"
+    assert "s3cret" not in message
