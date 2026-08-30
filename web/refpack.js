@@ -337,10 +337,20 @@ function takeEdit(v) {
 
 export function fromReferencesList(list) {
     const refs = { images: [], videos: [], audios: [] };
+    // Everything beyond kind/file/use_soundtrack that must survive the round trip. Both
+    // directions whitelist, so a field missing from here is dropped between the widget and
+    // the working state - which presents as "the edit did not save" rather than as an
+    // error, and is worth naming in one place for that reason.
+    const extras = (r) => ({
+            ...(Number.isFinite(r.rotate) && r.rotate ? { rotate: r.rotate } : {}),
+            ...(r.flip ? { flip: r.flip } : {}),
+            ...(r.rotate_expand === false ? { rotate_expand: false } : {}),
+    });
     for (const r of list || []) {
         if (!r || typeof r.file !== "string") continue;
         if (r.kind === "image")
-            refs.images.push({ file: r.file, missing: !!r.missing, crop: takeEdit(r.crop) });
+            refs.images.push({ file: r.file, missing: !!r.missing, crop: takeEdit(r.crop),
+                               ...extras(r) });
         else if (r.kind === "video")
             refs.videos.push({
                 file: r.file,
@@ -348,9 +358,11 @@ export function fromReferencesList(list) {
                 missing: !!r.missing,
                 crop: takeEdit(r.crop),
                 trim: takeEdit(r.trim),
+                ...extras(r),
             });
         else if (r.kind === "audio")
-            refs.audios.push({ file: r.file, missing: !!r.missing, trim: takeEdit(r.trim) });
+            refs.audios.push({ file: r.file, missing: !!r.missing, trim: takeEdit(r.trim),
+                               ...extras(r) });
     }
     return refs;
 }
@@ -360,12 +372,19 @@ export function toReferencesList(refs) {
     const withEdits = (d, r) => {
         if (Array.isArray(r.crop)) d.crop = r.crop.slice();
         if (Array.isArray(r.trim)) d.trim = r.trim.slice();
+        if (Number.isFinite(r.rotate) && r.rotate) d.rotate = r.rotate;
+        if (r.flip) d.flip = r.flip;
+        if (r.rotate_expand === false) d.rotate_expand = false;
         return d;
     };
-    for (const r of refs.images) out.push(withEdits({ kind: "image", file: r.file }, { crop: r.crop }));
+    // The whole reference is handed to withEdits now, not a hand-picked subset of it.
+    // Passing { crop: r.crop } meant every field added later was silently dropped for
+    // images and audio while working for video, which is the sort of asymmetry nobody
+    // finds by reading.
+    for (const r of refs.images) out.push(withEdits({ kind: "image", file: r.file }, r));
     for (const r of refs.videos)
         out.push(withEdits({ kind: "video", file: r.file, use_soundtrack: !!r.use_soundtrack }, r));
-    for (const r of refs.audios) out.push(withEdits({ kind: "audio", file: r.file }, { trim: r.trim }));
+    for (const r of refs.audios) out.push(withEdits({ kind: "audio", file: r.file }, r));
     return out;
 }
 
