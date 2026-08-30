@@ -20,7 +20,7 @@ import os
 
 from aiohttp import web
 
-from .refs import ReferenceError, validate_crop
+from .refs import ReferenceError, validate_crop, validate_flip, validate_rotate
 from . import endpoint, logs, media, prompt
 
 try:
@@ -125,6 +125,28 @@ def _parse_crop_param(raw: str | None) -> list[float] | None:
         raise ValueError(str(e)) from None
 
 
+def _parse_flip_param(raw: str | None) -> str | None:
+    """`flip=h|v|hv` -> validated string; None when absent."""
+    if raw is None or raw == "":
+        return None
+    try:
+        return validate_flip(raw)
+    except ReferenceError as e:
+        raise ValueError(str(e)) from None
+
+
+def _parse_rotate_param(raw: str | None) -> float | None:
+    """`rotate=<degrees>` -> validated float; None when absent."""
+    if raw is None or raw == "":
+        return None
+    try:
+        return validate_rotate(float(raw))
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"rotate must be a number of degrees, got {raw!r}") from None
+    except ReferenceError as e:
+        raise ValueError(str(e)) from None
+
+
 def _parse_seconds_param(raw: str | None) -> float | None:
     """`t=<seconds>` -> float; None when absent. Raises ValueError on junk."""
     if raw is None:
@@ -150,13 +172,20 @@ async def thumb_route(request: web.Request) -> web.Response:
     try:
         crop = _parse_crop_param(request.query.get("crop"))
         at_seconds = _parse_seconds_param(request.query.get("t"))
+        # The tile and the editor's frame both come through here, so the preview has to
+        # carry the orientation too - otherwise the thumbnail shows the source while the
+        # socket emits the rotated frame.
+        flip = _parse_flip_param(request.query.get("flip"))
+        rotate = _parse_rotate_param(request.query.get("rotate"))
+        expand = request.query.get("expand", "1") not in ("0", "false", "False")
     except ValueError as e:
         logs.warn("thumb", file=name, status=400, reason=str(e))
         return web.Response(status=400, text=str(e))
     # One line per tile per redraw - DEBUG, or a full reference set drowns the console.
-    logs.debug("thumb", file=name, crop=crop, t=at_seconds)
+    logs.debug("thumb", file=name, crop=crop, t=at_seconds, flip=flip, rotate=rotate)
     return web.Response(
-        body=media.thumbnail_png(path, crop=crop, at_seconds=at_seconds),
+        body=media.thumbnail_png(path, crop=crop, at_seconds=at_seconds, flip=flip,
+                                 rotate=rotate, rotate_expand=expand),
         content_type="image/png",
     )
 

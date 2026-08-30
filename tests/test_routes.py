@@ -62,8 +62,9 @@ class FakeMedia:
     def probe(self, path):
         return {"kind": "image", "width": 4, "height": 4, "fps": None, "duration": None, "has_audio": False}
 
-    def thumbnail_png(self, path, max_edge=256, crop=None, at_seconds=None):
-        self.thumb_calls.append({"path": path, "crop": crop, "at_seconds": at_seconds})
+    def thumbnail_png(self, path, max_edge=256, crop=None, at_seconds=None, flip=None, rotate=None, rotate_expand=True):
+        self.thumb_calls.append({"path": path, "crop": crop, "at_seconds": at_seconds,
+                                 "flip": flip, "rotate": rotate})
         return b"\x89PNG\r\nfake"
 
 

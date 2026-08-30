@@ -339,7 +339,8 @@ def _evenly_spaced(n: int, count: int) -> list[int]:
     return [round(i * (n - 1) / (count - 1)) for i in range(count)]
 
 
-def _sampled_frame_b64s(path: str, crop=None, trim=None, count: int = _DEGRADED_FRAMES):
+def _sampled_frame_b64s(path: str, crop=None, trim=None, count: int = _DEGRADED_FRAMES,
+                        flip=None, rotate=None, rotate_expand: bool = True):
     """A clip reduced to stills, for an endpoint that cannot take video.
 
     Goes through the same loader the sockets use, so the frames carry the reference's
@@ -347,7 +348,8 @@ def _sampled_frame_b64s(path: str, crop=None, trim=None, count: int = _DEGRADED_
     is dropped on the floor here by design: this path exists precisely because the
     endpoint takes neither video nor audio.
     """
-    frames, _audio = media.load_video(path, target_fps=24, crop=crop, trim=trim)
+    frames, _audio = media.load_video(path, target_fps=24, crop=crop, trim=trim,
+                                      flip=flip, rotate=rotate, rotate_expand=rotate_expand)
     n = len(frames)
     picked = _evenly_spaced(n, count)
     logs.log("degraded_video", file=os.path.basename(path), src_frames=n, sent=len(picked))
@@ -509,7 +511,9 @@ def _build_content(
         # crop/trim go through the same loaders build() uses, so the VLM sees exactly
         # the media the pack's sockets will emit - never the untrimmed original.
         if t.kind == "image":
-            tensor = media.load_image(path, crop=t.ref.crop)
+            tensor = media.load_image(path, crop=t.ref.crop, flip=t.ref.flip,
+                                      rotate=t.ref.rotate,
+                                      rotate_expand=t.ref.rotate_expand)
             if concise:
                 groups["Images"].append(t.tag)
                 parts.append(_text_part(f"{t.tag}:"))
@@ -522,7 +526,9 @@ def _build_content(
             # deliberately absent: the model can only ever address a reference by tag, so
             # repeating a 108-character name next to every frame is noise it has to read
             # past. It stays once, on the `files:` line, for whoever is reading `debug`.
-            b64s = _sampled_frame_b64s(path, crop=t.ref.crop, trim=t.ref.trim)
+            b64s = _sampled_frame_b64s(path, crop=t.ref.crop, trim=t.ref.trim,
+                                       flip=t.ref.flip, rotate=t.ref.rotate,
+                                       rotate_expand=t.ref.rotate_expand)
             groups["Videos"].append(f"{t.tag} ({len(b64s)} still frames, no sound)")
             parts.append(_text_part(
                 f"{t.tag} - the next {len(b64s)} images are still frames from ONE video, "
@@ -538,7 +544,9 @@ def _build_content(
             # soundtrack included and nothing decoded; a cropped/trimmed one is the
             # re-encoded window, which is video-only and therefore still needs its
             # soundtrack sent separately below.
-            data, mime = media.video_clip_bytes(path, crop=t.ref.crop, trim=t.ref.trim)
+            data, mime = media.video_clip_bytes(path, crop=t.ref.crop, trim=t.ref.trim,
+                                                flip=t.ref.flip, rotate=t.ref.rotate,
+                                                rotate_expand=t.ref.rotate_expand)
             edited = t.ref.crop is not None or t.ref.trim is not None
             parts.append(
                 _text_part(f"video_reference {t.tag} ({t.file}) - the next video, whole:")

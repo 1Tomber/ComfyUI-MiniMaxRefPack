@@ -37,6 +37,123 @@ def resample_indices(n_src: int, src_fps: float, target_fps: int = 24) -> list[i
     return [min(max(round(i * src_fps / target_fps), 0), n_src - 1) for i in range(n_out)]
 
 
+def _orient_pil(img, flip, rotate, expand: bool = True):
+    """Apply flip then rotation to a PIL image. Returns it unchanged when both are unset.
+
+    ORDER IS THE CONTRACT: flip, then rotate, then (at the call site) crop. The crop rect
+    is expressed in the frame the editor drew, and the editor draws the oriented frame, so
+    cropping first would select a different region than the user boxed. semmlerino hit
+    exactly this on a portrait phone clip and wrote it down: the preview showed one region
+    and the node emitted another.
+
+    Quarter turns go through Image.transpose, which is lossless and needs no resampling.
+    Everything else resamples once, filling anything outside the source with BLACK - the
+    same thing MiniMax will see as absent frame, and a far better default than the white
+    PIL would give.
+    """
+    if not flip and not rotate:
+        return img
+
+    from PIL import Image
+
+    if flip:
+        if "h" in flip:
+            img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        if "v" in flip:
+            img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+    if not rotate:
+        return img
+    turns = _quarter_turns(rotate)
+    if turns is not None:
+        if turns:
+            img = img.transpose(
+                (Image.Transpose.ROTATE_270, Image.Transpose.ROTATE_180,
+                 Image.Transpose.ROTATE_90)[turns - 1]
+            )
+        return img
+    # PIL rotates COUNTER-clockwise and `rotate` is clockwise, so it is negated here -
+    # once, at the single place the angle is applied.
+    return img.rotate(-float(rotate), expand=bool(expand), resample=Image.BICUBIC,
+                      fillcolor=(0, 0, 0))
+
+
+def _quarter_turns(rotate) -> int | None:
+    """0/1/2/3 quarter turns clockwise, or None when the angle is not a multiple of 90.
+
+    The tolerance is float noise from a UI that rounds, nothing more: a slider parked on
+    89.9 is a free angle and must resample, or the result would not match the preview.
+    """
+    if not rotate:
+        return 0
+    value = float(rotate) % 360.0
+    nearest = round(value / 90.0)
+    if abs(value - nearest * 90.0) > 1e-6:
+        return None
+    return int(nearest) % 4
+
+
+def _orient_array(arr, flip, rotate, expand: bool = True):
+    """The same transform for a decoded video frame (H, W, 3 uint8).
+
+    Quarter turns use numpy so a clip does not pay a PIL round trip per frame; a free
+    angle has to resample, so it borrows _orient_pil.
+    """
+    if not flip and not rotate:
+        return arr
+
+    import numpy as np
+
+    if flip:
+        if "h" in flip:
+            arr = arr[:, ::-1]
+        if "v" in flip:
+            arr = arr[::-1]
+    if not rotate:
+        return np.ascontiguousarray(arr)
+    turns = _quarter_turns(rotate)
+    if turns is not None:
+        # np.rot90 turns COUNTER-clockwise; negate for clockwise.
+        return np.ascontiguousarray(np.rot90(arr, -turns))
+    from PIL import Image
+
+    out = _orient_pil(Image.fromarray(np.ascontiguousarray(arr)), None, rotate, expand)
+    return np.ascontiguousarray(np.array(out))
+
+
+def _orient_tensor(frames, flip, rotate, expand: bool = True):
+    """The same transform for a decoded frame batch, (N, H, W, C) float in 0..1.
+
+    Quarter turns and flips are strides - torch does them without touching pixel data, so
+    a whole clip costs nothing. A free angle has to resample every frame through PIL,
+    which is why the editor snaps to the quarter turns unless the user asks otherwise.
+    """
+    # Nothing to do is the common case by far, and it must cost nothing - including not
+    # importing torch, which this module is careful never to require unless a tensor is
+    # actually being touched.
+    if not flip and not rotate:
+        return frames
+
+    import torch
+
+    if flip:
+        if "h" in flip:
+            frames = torch.flip(frames, dims=[2])
+        if "v" in flip:
+            frames = torch.flip(frames, dims=[1])
+    if not rotate:
+        return frames.contiguous()
+    turns = _quarter_turns(rotate)
+    if turns is not None:
+        # torch.rot90 turns COUNTER-clockwise over (H, W); negate for clockwise.
+        return torch.rot90(frames, -turns, dims=(1, 2)).contiguous() if turns else frames.contiguous()
+
+    import numpy as np
+
+    src = (frames.detach().cpu().numpy() * 255.0).clip(0, 255).astype("uint8")
+    out = np.stack([_orient_array(f, None, rotate, expand) for f in src])
+    return torch.from_numpy(out.astype("float32") / 255.0)
+
+
 def _crop_box(crop, width: int, height: int) -> tuple[int, int, int, int]:
     """Fraction rect [x, y, w, h] -> integer (left, top, right, bottom) pixel box.
 
@@ -86,7 +203,8 @@ def _audio_load_fn():
     return _load
 
 
-def load_image(path: str, crop=None, max_edge: int = 0):
+def load_image(path: str, crop=None, max_edge: int = 0, flip=None, rotate=None,
+               rotate_expand: bool = True):
     """[1, H, W, 3] float32 in 0..1. Plain PIL decode - references are single stills
     (not animated), so we skip the ImageSequence handling CU/nodes.py:1734 LoadImage
     needs for animated webp.
@@ -114,6 +232,10 @@ def load_image(path: str, crop=None, max_edge: int = 0):
         img = ImageOps.exif_transpose(img)
         img = img.convert("RGB")
         fields["src"] = f"{img.width}x{img.height}"
+        # EXIF transpose -> flip -> rotate -> crop -> max_edge. The crop rect is drawn on
+        # the ORIENTED frame in the editor, so it has to be applied to the oriented frame
+        # here or it selects a different region than the user boxed.
+        img = _orient_pil(img, flip, rotate, rotate_expand)
         if crop is not None:
             img = img.crop(_crop_box(crop, img.width, img.height))
         if max_edge:
@@ -139,7 +261,8 @@ def load_audio(path: str, trim=None) -> dict:
         return audio
 
 
-def load_video(path: str, target_fps: int = 24, crop=None, trim=None):
+def load_video(path: str, target_fps: int = 24, crop=None, trim=None, flip=None,
+               rotate=None, rotate_expand: bool = True):
     """(frames [N,H,W,3] resampled to target_fps, audio dict or None).
 
     CU/comfy_api/latest/_input_impl/video_types.py:118 VideoFromFile.get_components().
@@ -160,10 +283,12 @@ def load_video(path: str, target_fps: int = 24, crop=None, trim=None):
     import os
 
     with logs.timed("load_video", file=os.path.basename(path), crop=crop, trim=trim) as fields:
-        return _decode_video(path, target_fps, crop, trim, fields)
+        return _decode_video(path, target_fps, crop, trim, fields, flip, rotate,
+                             rotate_expand)
 
 
-def _decode_video(path, target_fps, crop, trim, fields):
+def _decode_video(path, target_fps, crop, trim, fields, flip=None, rotate=None,
+                  rotate_expand=True):
     """The body of load_video. Split out only so the timing/logging wrapper above stays
     a plain `with` block instead of wrapping 30 lines."""
     components = _video_from_file_cls()(path).get_components()
@@ -192,6 +317,9 @@ def _decode_video(path, target_fps, crop, trim, fields):
             f"(source: {n_src} frames, {duration:.2f}s) - MiniMax H3 needs at least 5"
         )
     out = frames[[first + i for i in indices]]
+    # Orient before cropping, for the reason in _orient_pil: the rect was drawn on the
+    # oriented frame.
+    out = _orient_tensor(out, flip, rotate, rotate_expand)
     if crop is not None:
         left, top, right, bottom = _crop_box(crop, out.shape[2], out.shape[1])
         out = out[:, top:bottom, left:right, :]
@@ -213,7 +341,8 @@ VLM_VIDEO_MIMES = {
 }
 
 
-def video_clip_bytes(path: str, crop=None, trim=None) -> tuple[bytes, str]:
+def video_clip_bytes(path: str, crop=None, trim=None, flip=None, rotate=None,
+                     rotate_expand: bool = True) -> tuple[bytes, str]:
     """(bytes, mime) of the WHOLE clip, for the VLM's `video_url` part.
 
     The VLM reads video natively - one 10s 1080p clip cost 660 video tokens plus 250
@@ -228,19 +357,25 @@ def video_clip_bytes(path: str, crop=None, trim=None) -> tuple[bytes, str]:
 
     with logs.timed("video_bytes", file=os.path.basename(path), crop=crop, trim=trim) as fields:
         mime = VLM_VIDEO_MIMES.get(os.path.splitext(path)[1].lower())
-        if crop is None and trim is None and mime is not None:
+        # An ORIENTED clip must never take the raw-bytes fast path. The sockets emit the
+        # rotated frames, so sending the untouched file would show the VLM a different
+        # video from the one being generated with - silently, since nothing downstream
+        # compares them.
+        oriented = bool(flip) or bool(rotate)
+        if crop is None and trim is None and not oriented and mime is not None:
             with open(path, "rb") as f:
                 data = f.read()
             fields["mode"] = "file"
             fields["bytes"] = len(data)
             return data, mime
-        data = _transcode_window(path, crop, trim)
+        data = _transcode_window(path, crop, trim, flip, rotate, rotate_expand)
         fields["mode"] = "re-encoded"
         fields["bytes"] = len(data)
         return data, "video/mp4"
 
 
-def _transcode_window(path: str, crop, trim) -> bytes:
+def _transcode_window(path: str, crop, trim, flip=None, rotate=None,
+                      rotate_expand: bool = True) -> bytes:
     """The cropped/trimmed window as an in-memory mp4, video only.
 
     Decodes only the window: `container.seek` lands on the keyframe at or before the
@@ -272,6 +407,7 @@ def _transcode_window(path: str, crop, trim) -> bytes:
                 if end is not None and t >= end - 1e-9:
                     break
                 arr = frame.to_ndarray(format="rgb24")
+                arr = _orient_array(arr, flip, rotate, rotate_expand)
                 if crop is not None:
                     left, top, right, bottom = _crop_box(crop, arr.shape[1], arr.shape[0])
                     arr = arr[top:bottom, left:right]
@@ -323,7 +459,8 @@ def probe(path: str) -> dict:
     return {"kind": "audio", "width": None, "height": None, "fps": None, "duration": duration, "has_audio": True}
 
 
-def thumbnail_png(path: str, max_edge: int = 256, crop=None, at_seconds=None) -> bytes:
+def thumbnail_png(path: str, max_edge: int = 256, crop=None, at_seconds=None, flip=None,
+                  rotate=None, rotate_expand: bool = True) -> bytes:
     """One frame for a video, downscaled full image for a still. `crop` (fraction
     rect) is applied before the downscale, through the same _crop_box rule the
     loaders use, so the tile always previews exactly what the pack will emit.
@@ -359,6 +496,10 @@ def thumbnail_png(path: str, max_edge: int = 256, crop=None, at_seconds=None) ->
     else:
         img = Image.open(path).convert("RGB")
 
+    # Same order as every other apply point: orient, then crop. This is the one the user
+    # SEES - the tile and the editor's frame both come through here - so a mismatch with
+    # the socket path would show one thing and emit another.
+    img = _orient_pil(img, flip, rotate, rotate_expand)
     if crop is not None:
         img = img.crop(_crop_box(crop, img.width, img.height))
     img.thumbnail((max_edge, max_edge))

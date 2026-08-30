@@ -40,8 +40,8 @@ def test_slot_placement_for_a_mixed_set(fake_folder_paths, monkeypatch):
     tmp_path = fake_folder_paths
     _touch(tmp_path, "i1.jpg", "i2.jpg", "v1.mp4", "a1.wav")
 
-    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0: f"IMG:{path}")
-    monkeypatch.setattr(nodes.media, "load_video", lambda path, crop=None, trim=None: (f"VIDEO:{path}", f"AUDIO:{path}"))
+    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True: f"IMG:{path}")
+    monkeypatch.setattr(nodes.media, "load_video", lambda path, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True: (f"VIDEO:{path}", f"AUDIO:{path}"))
     monkeypatch.setattr(nodes.media, "load_audio", lambda path, trim=None: f"AUD:{path}")
     _stub_prompt(monkeypatch)
 
@@ -73,7 +73,7 @@ def test_slot_placement_for_a_mixed_set(fake_folder_paths, monkeypatch):
 def test_video_without_use_soundtrack_leaves_video_audio_slot_empty(fake_folder_paths, monkeypatch):
     tmp_path = fake_folder_paths
     _touch(tmp_path, "v1.mp4")
-    monkeypatch.setattr(nodes.media, "load_video", lambda path, crop=None, trim=None: (f"VIDEO:{path}", f"AUDIO:{path}"))
+    monkeypatch.setattr(nodes.media, "load_video", lambda path, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True: (f"VIDEO:{path}", f"AUDIO:{path}"))
     _stub_prompt(monkeypatch)
 
     # use_soundtrack now defaults to True, so the OFF case has to be explicit
@@ -92,7 +92,7 @@ def test_video_without_use_soundtrack_leaves_video_audio_slot_empty(fake_folder_
 def test_system_prompt_widget_is_passed_through_to_write_prompt(fake_folder_paths, monkeypatch):
     tmp_path = fake_folder_paths
     _touch(tmp_path, "i1.jpg")
-    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0: f"IMG:{path}")
+    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True: f"IMG:{path}")
 
     captured = {}
 
@@ -161,11 +161,11 @@ def test_crop_and_trim_reach_the_loaders(fake_folder_paths, monkeypatch):
     _touch(tmp_path, "i1.jpg", "v1.mp4", "a1.wav")
     calls = {}
 
-    def li(path, crop=None, max_edge=0):
+    def li(path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True):
         calls["image"] = crop
         return "IMG"
 
-    def lv(path, crop=None, trim=None):
+    def lv(path, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True):
         calls["video"] = (crop, trim)
         return ("V", None)
 
@@ -198,7 +198,7 @@ def test_unedited_references_pass_no_crop_or_trim(fake_folder_paths, monkeypatch
     _touch(tmp_path, "i1.jpg")
     calls = {}
 
-    def li(path, crop=None, max_edge=0):
+    def li(path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True):
         calls["image"] = crop
         return "IMG"
 
@@ -247,7 +247,7 @@ def _forbid_http(monkeypatch):
 def test_opt_out_returns_direction_verbatim_and_calls_nothing(fake_folder_paths, monkeypatch):
     tmp_path = fake_folder_paths
     _touch(tmp_path, "i1.jpg")
-    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0: f"IMG:{path}")
+    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True: f"IMG:{path}")
     _forbid_http(monkeypatch)
 
     def never(*a, **k):
@@ -288,7 +288,7 @@ def test_opt_out_passes_direction_even_with_an_empty_reference_set(fake_folder_p
 def test_opt_in_still_calls_the_prompt_writer(fake_folder_paths, monkeypatch):
     tmp_path = fake_folder_paths
     _touch(tmp_path, "i1.jpg")
-    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0: f"IMG:{path}")
+    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True: f"IMG:{path}")
     _stub_prompt(monkeypatch, text="written by the VLM")
 
     references_json = json.dumps({"references": [{"kind": "image", "file": "i1.jpg"}]})
@@ -306,7 +306,7 @@ def test_opt_in_still_calls_the_prompt_writer(fake_folder_paths, monkeypatch):
 def test_build_passes_width_height_length_to_write_prompt(fake_folder_paths, monkeypatch):
     tmp_path = fake_folder_paths
     _touch(tmp_path, "i1.jpg")
-    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0: f"IMG:{path}")
+    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True: f"IMG:{path}")
 
     captured = {}
 
@@ -331,7 +331,7 @@ def test_build_defaults_width_height_length_to_unspecified_when_absent(fake_fold
     """An old workflow without the new widgets calls build() without them."""
     tmp_path = fake_folder_paths
     _touch(tmp_path, "i1.jpg")
-    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0: f"IMG:{path}")
+    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True: f"IMG:{path}")
 
     captured = {}
 
@@ -471,7 +471,7 @@ def test_is_changed_key_moves_when_target_format_changes(fake_folder_paths):
 
 def test_api_key_never_appears_in_a_raised_message(fake_folder_paths, monkeypatch):
     _touch(fake_folder_paths, "i1.jpg")
-    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0: f"IMG:{path}")
+    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True: f"IMG:{path}")
     secret = "sk-super-secret-key"
 
     class FakePromptError(Exception):
@@ -501,7 +501,7 @@ def test_debug_carries_the_rendered_payload_and_the_settings(fake_folder_paths, 
     """The debug socket exists to answer "what exactly did the model get?" - so it must
     carry the real payload, not a re-derivation of it."""
     _touch(fake_folder_paths, "i1.jpg")
-    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0: f"IMG:{path}")
+    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True: f"IMG:{path}")
 
     def fake_write_prompt(**kwargs):
         # stand in for what write_prompt really appends: the rendered payload
@@ -535,7 +535,7 @@ def test_a_legacy_use_openrouter_false_still_passes_through(fake_folder_paths, m
     quietly running a paid call the user switched off.
     """
     _touch(fake_folder_paths, "i1.jpg")
-    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0: f"IMG:{path}")
+    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True: f"IMG:{path}")
 
     def boom(*a, **k):
         raise AssertionError("write_prompt must not run when auto-prompting is off")
@@ -558,7 +558,7 @@ def test_a_legacy_use_openrouter_false_still_passes_through(fake_folder_paths, m
 
 def test_debug_reports_unspecified_dimensions(fake_folder_paths, monkeypatch):
     _touch(fake_folder_paths, "i1.jpg")
-    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0: f"IMG:{path}")
+    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True: f"IMG:{path}")
     monkeypatch.setattr(nodes.prompt, "write_prompt", lambda **k: "p", raising=False)
 
     references_json = json.dumps({"references": [{"kind": "image", "file": "i1.jpg"}]})
@@ -572,7 +572,7 @@ def test_debug_reports_unspecified_dimensions(fake_folder_paths, monkeypatch):
 def test_api_key_never_appears_in_the_debug_socket(fake_folder_paths, monkeypatch):
     """`debug` is the socket most likely to end up in a screenshot."""
     _touch(fake_folder_paths, "i1.jpg")
-    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0: f"IMG:{path}")
+    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True: f"IMG:{path}")
     secret = "sk-or-v1-never-show-this"
 
     def leaky_write_prompt(**kwargs):
@@ -592,7 +592,7 @@ def test_debug_header_shows_what_auto_resolved_to(fake_folder_paths, monkeypatch
     """With job_type=auto the header alone would only say "auto". Which register
     actually ran decides the entire output format, so it belongs at the top."""
     _touch(fake_folder_paths, "i1.jpg")
-    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0: f"IMG:{path}")
+    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True: f"IMG:{path}")
 
     def fake_write_prompt(**kwargs):
         kwargs["debug"].append(
@@ -615,7 +615,7 @@ def test_debug_header_shows_what_auto_resolved_to(fake_folder_paths, monkeypatch
 def test_debug_header_keeps_the_raw_job_type_when_no_call_is_made(fake_folder_paths, monkeypatch):
     """Nothing resolved, so nothing to hoist - the header still reports the setting."""
     _touch(fake_folder_paths, "i1.jpg")
-    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0: f"IMG:{path}")
+    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True: f"IMG:{path}")
     monkeypatch.setattr(
         nodes.prompt, "write_prompt",
         lambda **k: (_ for _ in ()).throw(AssertionError("must not run")), raising=False,
@@ -636,7 +636,7 @@ def test_max_reference_edge_reaches_the_image_loader(fake_folder_paths, monkeypa
     _touch(tmp_path, "i1.jpg")
     calls = {}
 
-    def li(path, crop=None, max_edge=0):
+    def li(path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True):
         calls["max_edge"] = max_edge
         return "IMG"
 
@@ -660,7 +660,7 @@ def test_the_cap_defaults_to_2048_when_the_widget_is_absent(fake_folder_paths, m
     _touch(tmp_path, "i1.jpg")
     calls = {}
 
-    def li(path, crop=None, max_edge=0):
+    def li(path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True):
         calls["max_edge"] = max_edge
         return "IMG"
 
@@ -720,7 +720,12 @@ def test_the_cap_never_reaches_the_video_loader(fake_folder_paths, monkeypatch):
         references_json=references_json, max_reference_edge=1024,
     )
 
-    assert calls["kwargs"] == {}
+    # Named rather than "no kwargs at all": other legitimate per-reference settings reach
+    # this loader (crop, trim, orientation), so an exact-empty assertion would break every
+    # time one is added while saying nothing about the cap. What must never appear is the
+    # cap, under either of its names.
+    assert "max_edge" not in calls["kwargs"]
+    assert "max_reference_edge" not in calls["kwargs"]
 
 
 def test_the_cap_moves_the_is_changed_key(fake_folder_paths):
@@ -748,8 +753,8 @@ def test_build_logs_a_summary_and_a_line_per_reference(fake_folder_paths, monkey
 
     tmp_path = fake_folder_paths
     _touch(tmp_path, "i1.jpg", "v1.mp4", "a1.wav")
-    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0: "IMG")
-    monkeypatch.setattr(nodes.media, "load_video", lambda path, crop=None, trim=None: ("V", "A"))
+    monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True: "IMG")
+    monkeypatch.setattr(nodes.media, "load_video", lambda path, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True: ("V", "A"))
     monkeypatch.setattr(nodes.media, "load_audio", lambda path, trim=None: "AUD")
     _stub_prompt(monkeypatch)
 

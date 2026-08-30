@@ -56,22 +56,22 @@ def aud(name):
     return Reference(kind="audio", file=name)
 
 
-def fake_load_image(path, crop=None):
+def fake_load_image(path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True):
     return np.random.rand(1, 4, 4, 3).astype(np.float32)
 
 
-def fake_video_clip_bytes(path, crop=None, trim=None):
+def fake_video_clip_bytes(path, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True):
     """The whole clip as bytes - what the VLM now receives instead of sampled stills."""
     return b"\x00\x00\x00 ftypmp42 fake", "video/mp4"
 
 
-def fake_load_video_with_audio(path, target_fps=24, crop=None, trim=None):
+def fake_load_video_with_audio(path, target_fps=24, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True):
     frames = np.random.rand(9, 4, 4, 3).astype(np.float32)
     audio = {"waveform": np.random.uniform(-1, 1, size=(1, 2, 480)).astype(np.float32), "sample_rate": 24000}
     return frames, audio
 
 
-def fake_load_video_no_audio(path, target_fps=24, crop=None, trim=None):
+def fake_load_video_no_audio(path, target_fps=24, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True):
     frames = np.random.rand(9, 4, 4, 3).astype(np.float32)
     return frames, None
 
@@ -543,7 +543,8 @@ def _decode_part(part):
     return head[len("data:") : head.find(";")], Image.open(io.BytesIO(base64.b64decode(b64)))
 
 
-def _oversized_image(path, crop=None):
+def _oversized_image(path, crop=None, max_edge=0, flip=None, rotate=None,
+                     rotate_expand=True):
     return np.random.rand(1, 1000, 2000, 3).astype(np.float32)
 
 
@@ -557,11 +558,11 @@ def _oversized_video(path, target_fps=24, crop=None, trim=None):
 def test_build_content_passes_crop_and_trim_to_the_loaders(monkeypatch, tmp_path):
     calls = {}
 
-    def li(path, crop=None):
+    def li(path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True):
         calls["image"] = crop
         return np.random.rand(1, 4, 4, 3).astype(np.float32)
 
-    def lv(path, crop=None, trim=None):
+    def lv(path, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True):
         calls["video"] = (crop, trim)
         return b"clip bytes", "video/mp4"
 
@@ -1051,7 +1052,7 @@ def test_a_failed_openrouter_call_is_logged_as_a_failure(monkeypatch, tmp_path, 
 
 def _fake_video_bytes(monkeypatch, data=b"MP4DATA", mime="video/mp4"):
     monkeypatch.setattr(prompt.media, "video_clip_bytes",
-                        lambda path, crop=None, trim=None: (data, mime), raising=False)
+                        lambda path, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True: (data, mime), raising=False)
 
 
 def test_a_video_reference_goes_as_one_video_part(monkeypatch, tmp_path):

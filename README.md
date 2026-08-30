@@ -160,6 +160,22 @@ character's clip and that character's voice are the same subject.
 **The numbers are yours.** Pick 1 and 5 and the prompt says `<Subject 5>` — nothing is
 renumbered or compacted behind your back.
 
+## Rotating and mirroring a reference
+
+The crop/trim editor (the scissors chip on a tile) has a **Rotate** row: ↺ ↻ for quarter
+turns and ↔ ↕ for mirrors. A phone clip that arrives sideways is two clicks from being
+right, and the turns are lossless — no resampling, the pixels are just re-indexed.
+
+Two things it does that are easy to miss:
+
+- **The crop rect turns with the frame.** A crop is stored as fractions, so turning the
+  media without turning the rect would silently select a different region. Rotating both
+  keeps the same pixels chosen.
+- **A rotated clip stops taking the fast path to the prompt writer.** An untouched video
+  is sent to the VLM as its own file bytes, which is right and quick. A rotated one is
+  re-encoded first, because the sockets emit the rotated frames and showing the model the
+  unrotated original would let it describe a video you are not generating.
+
 ## The tag rule
 
 Worth reading once, because the numbering is what your prompt text refers to and it is
