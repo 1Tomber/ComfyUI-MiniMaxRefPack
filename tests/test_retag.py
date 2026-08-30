@@ -290,3 +290,82 @@ def test_a_probe_finding_a_silent_clip_renumbers_the_audio_after_it():
     before = _refs(videos=[("v.mp4", True)], audios=["m.wav"])
     after = _refs(videos=[("v.mp4", False)], audios=["m.wav"])
     assert _remap(before, after) == {"<Audio 2>": "<Audio 1>"}
+
+
+# ---- where a drop lands, once a section spans several rows --------------------------
+
+
+def _extract_drop() -> str:
+    text = REFPACK_JS.read_text(encoding="utf-8")
+    start = text.find("// >>> MMRP-DROP")
+    end = text.find("// <<< MMRP-DROP")
+    assert start != -1 and end != -1, "the MMRP-DROP markers are gone from web/refpack.js"
+    return "const CL = { tile: 131, gap: 6 };\n" + text[start:end]
+
+
+def _drop_at(count, per_row, x, y):
+    """Tile regions laid out exactly as draw() paints them, then the real dropIndexAt."""
+    tiles = [
+        {"type": "tile", "kind": "image", "index": i,
+         "x": 10 + (i % per_row) * 137, "y": 8 + (i // per_row) * 137, "w": 131, "h": 131}
+        for i in range(count)
+    ]
+    node = {"_mmrpHit": {"regions": tiles}}
+    script = (_extract_drop()
+              + f"\nconst node = {json.dumps(node)};\n"
+              + f"console.log(JSON.stringify(dropIndexAt(node, 'image', {x}, {y})));\n")
+    proc = subprocess.run([NODE, "--input-type=module", "-e", script],
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, f"node failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip())
+
+
+@requires_node
+def test_dropping_past_the_end_of_a_short_last_row_appends():
+    """The bug: five tiles in rows of three leaves the last row short, and a drop in the
+    empty space to its right used to be won by a tile on the row ABOVE - returning 3, the
+    START of the last row, instead of 5. A single weighted distance cannot express "same
+    row"; the row has to be chosen first."""
+    # The coordinates matter, and are narrower than they look. Level with the last row's
+    # vertical CENTRE the old weighted distance happened to be right; only within about
+    # 17px of the row's TOP EDGE did the vertical term shrink enough for a tile on the row
+    # above to win on horizontal distance alone. Measured by running both versions over the
+    # whole area: they differ on 177 points, all in y 143..159.
+    assert _drop_at(5, 3, x=500, y=150) == 5
+
+
+@requires_node
+def test_dropping_past_the_end_of_a_full_single_row_appends():
+    assert _drop_at(3, 3, x=800, y=8 + 65) == 3
+
+
+@pytest.mark.parametrize("y", [143, 150, 159, 180, 210, 250, 275])
+@requires_node
+def test_the_whole_height_of_the_last_row_appends(y):
+    """The full band, not just the strip that used to be wrong - so a future rewrite
+    cannot fix the edge and break the middle."""
+    assert _drop_at(5, 3, x=500, y=y) == 5
+
+
+@requires_node
+def test_dropping_right_of_a_full_upper_row_stays_on_that_row():
+    """The other side of the same coin: a drop level with a FULL row belongs at that row's
+    end, not carried down to the last row."""
+    assert _drop_at(5, 3, x=800, y=8 + 65) == 3
+
+
+@requires_node
+def test_dropping_before_the_first_tile_is_index_zero():
+    assert _drop_at(5, 3, x=0, y=8 + 65) == 0
+
+
+@pytest.mark.parametrize("i,expected", [(0, 0), (1, 1), (2, 2)])
+@requires_node
+def test_a_drop_on_a_tiles_left_half_inserts_before_it(i, expected):
+    assert _drop_at(5, 3, x=10 + i * 137 + 20, y=8 + 65) == expected
+
+
+@pytest.mark.parametrize("i,expected", [(0, 1), (1, 2), (2, 3)])
+@requires_node
+def test_a_drop_on_a_tiles_right_half_inserts_after_it(i, expected):
+    assert _drop_at(5, 3, x=10 + i * 137 + 110, y=8 + 65) == expected
