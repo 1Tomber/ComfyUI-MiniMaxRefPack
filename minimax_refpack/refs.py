@@ -19,6 +19,8 @@ independently of <Audio N>. Ordinals are per-type, 1-based, over the COMPACTED l
 
 from __future__ import annotations
 
+import math
+
 import json
 import os
 from dataclasses import dataclass, field
@@ -39,6 +41,19 @@ class ReferenceError(ValueError):
     """A reference set that MiniMax could not accept."""
 
 
+# NaN fails EVERY comparison, so a range check written as `if x < 0 or x + w > 1` waves it
+# straight through - and infinity passes any check that only looks at one end. Both then
+# reach the pixel pipeline, where a NaN fraction becomes int(nan * width) and raises from
+# somewhere with no useful context, and an infinite trim end asks for a window that never
+# closes. Validators exist to turn that into one clear sentence at the boundary, so they
+# have to test for finiteness explicitly rather than relying on ordering.
+def _finite(values, what: str, original) -> list[float]:
+    out = [float(v) for v in values]
+    if not all(math.isfinite(v) for v in out):
+        raise ReferenceError(f"{what} must be finite numbers, got {original!r}")
+    return out
+
+
 def validate_crop(crop: Any) -> list[float]:
     """[x, y, w, h] as FRACTIONS of the source frame -> validated float list.
 
@@ -52,7 +67,7 @@ def validate_crop(crop: Any) -> list[float]:
         or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in crop)
     ):
         raise ReferenceError(f"crop must be [x, y, w, h] fractions of the source, got {crop!r}")
-    x, y, w, h = (float(v) for v in crop)
+    x, y, w, h = _finite(crop, "crop", crop)
     if w <= 0.0 or h <= 0.0:
         raise ReferenceError(f"crop has no area: {crop!r}")
     # The 1e-9 absorbs float noise from a UI that rounds to 4 decimals, nothing more.
@@ -68,7 +83,7 @@ def validate_trim(trim: Any) -> list[float]:
         or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in trim)
     ):
         raise ReferenceError(f"trim must be [start_seconds, end_seconds], got {trim!r}")
-    start, end = (float(v) for v in trim)
+    start, end = _finite(trim, "trim", trim)
     if start < 0.0:
         raise ReferenceError(f"trim start must be >= 0, got {start}")
     if end <= start:
