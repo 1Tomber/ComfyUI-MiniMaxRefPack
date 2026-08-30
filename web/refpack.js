@@ -546,7 +546,11 @@ async function apiSystemPromptDefault(mode) {
     const res = await fetch(`/minimax_refpack/system_prompt${qs}`);
     if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
     const data = await res.json();
-    return data.default || "";
+    // The route echoes back the mode it RESOLVED, which is the point of it echoing at
+    // all: it absorbs anything it does not recognise into `standard`, so what came back
+    // is not necessarily what was asked for. Returning it lets the caller label the text
+    // it is actually showing rather than the text it hoped for.
+    return { text: data.default || "", mode: data.mode || mode || "standard" };
 }
 
 // Which packaged prompt this workflow is actually going to use.
@@ -2575,10 +2579,13 @@ function openSystemPromptModal(node) {
     const jobType = String(widgetByName(node, "job_type")?.value ?? "").trim().toLowerCase();
     // Only `auto` is ambiguous, and only `auto` gets the caveat — saying "assuming
     // standard" under an explicit job_type: standard would be noise about a certainty.
-    const modeNote = jobType === "auto"
-        ? " job_type is `auto`, so the register is picked at queue time by a classifier: " +
-          "this is the `standard` prompt, and a job routed to `replacement` uses a different one."
-        : ` This is the \`${mode}\` prompt, matching job_type.`;
+    const noteFor = (which) =>
+        jobType === "auto"
+            ? " job_type is `auto`, so the register is picked at queue time by a " +
+              `classifier: this is the \`${which}\` prompt, and a job routed to the other ` +
+              "register uses a different one."
+            : ` This is the \`${which}\` prompt, matching job_type.`;
+    const modeNote = noteFor(mode);
 
     const overlay = document.createElement("div");
     overlay.className = "mmrp-overlay";
@@ -2615,11 +2622,16 @@ function openSystemPromptModal(node) {
         hint.textContent =
             "Showing the built-in default. Edit to override it for this workflow." + modeNote;
         apiSystemPromptDefault(mode)
-            .then((text) => {
+            .then(({ text, mode: served }) => {
                 // Don't clobber anything the user typed while the fetch was in flight.
                 if (!textarea.value.trim()) {
                     prefilledDefault = text;
                     textarea.value = text;
+                }
+                if (served !== mode) {
+                    hint.textContent =
+                        "Showing the built-in default. Edit to override it for this "
+                        + "workflow." + noteFor(served);
                 }
             })
             .catch(() => {
@@ -2635,7 +2647,18 @@ function openSystemPromptModal(node) {
     loadDefaultBtn.textContent = mode === "replacement" ? "Load default (replacement)" : "Load default";
     loadDefaultBtn.onclick = async () => {
         try {
-            textarea.value = await apiSystemPromptDefault(mode);
+            const { text, mode: served } = await apiSystemPromptDefault(mode);
+            textarea.value = text;
+            // 7: this used to leave prefilledDefault at "" - so Save & close saw an
+            // edited-looking box and froze the whole packaged prompt into the workflow,
+            // which is exactly what its own comment says it is trying to avoid. It
+            // matters more now that the text is register-specific: a frozen replacement
+            // prompt would then be used for a standard run.
+            prefilledDefault = text;
+            if (served !== mode) {
+                hint.textContent = "Showing the built-in default. Edit to override it "
+                    + "for this workflow." + noteFor(served);
+            }
         } catch (e) {
             alert(`Couldn't load the default: ${e.message}`);
         }
