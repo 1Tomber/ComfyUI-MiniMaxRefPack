@@ -1313,7 +1313,7 @@ function onCanvasMouseDown(node, e) {
     if (hit.type === "del") {
         removeRef(node, hit.kind, hit.index);
     } else if (hit.type === "sound") {
-        toggleSoundtrack(node, hit.file);
+        toggleSoundtrack(node, hit.index);
     } else if (hit.type === "play") {
         togglePreview(node, hit);
     } else if (hit.type === "edit") {
@@ -1337,12 +1337,45 @@ function onCanvasDblClick(node, e) {
     openEditModal(node, hit.kind, hit.index);
 }
 
-function toggleSoundtrack(node, file) {
-    if (probeResults.get(file) !== true) return; // pending/silent/unknown — not toggleable
-    const next = cloneRefs(node._mmrpRefs);
-    const target = next.videos.find((v) => v.file === file);
-    if (target) target.use_soundtrack = !target.use_soundtrack;
-    if (target) mlog("soundtrack", { file, on: target.use_soundtrack });
+// Addressed by INDEX, like every other tile action.
+//
+// Looking the video up by file name picks the FIRST reference with that name, and nothing
+// stops two of them existing: addFiles does no de-duplication, and an upload with the same
+// name overwrites on the server and comes back as the same name. So clicking the sound
+// chip on the second copy of a clip toggled the first one - the chip the user clicked did
+// not change, and a different tile did.
+//
+// The hit region has carried `index` all along (see the "sound" region in draw), and the
+// delete, edit and subject handlers beside this one all use it.
+// >>> MMRP-SOUND
+// Which video a sound-chip click means, and what flipping it produces.
+//
+// Pure and marker-delimited so tests/test_sound.py can run it under node, because the
+// interesting case is the one a mock would never catch: TWO references to the same file.
+// Nothing prevents that - addFiles does no de-duplication, and an upload with an existing
+// name overwrites on the server and comes back under that same name.
+function flipSoundtrackAt(videos, index) {
+    if (!Array.isArray(videos)) return null;
+    if (!Number.isInteger(index) || index < 0 || index >= videos.length) return null;
+    return videos.map((v, i) => (i === index ? { ...v, use_soundtrack: !v.use_soundtrack } : v));
+}
+// <<< MMRP-SOUND
+
+// Addressed by INDEX, like every other tile action.
+//
+// Looking the video up by file NAME picks the first reference carrying that name, so
+// clicking the sound chip on the second copy of a clip toggled the first one: the chip the
+// user clicked did not change, and a different tile did. The hit region has carried
+// `index` all along (see the "sound" region in draw), and the delete, edit and subject
+// handlers beside this one all use it.
+function toggleSoundtrack(node, index) {
+    const current = node._mmrpRefs.videos[index];
+    if (!current) return;
+    if (probeResults.get(current.file) !== true) return; // pending/silent/unknown
+    const videos = flipSoundtrackAt(cloneRefs(node._mmrpRefs).videos, index);
+    if (!videos) return;
+    const next = { ...cloneRefs(node._mmrpRefs), videos };
+    mlog("soundtrack", { file: current.file, index, on: videos[index].use_soundtrack });
     applyRefs(node, next);
 }
 
