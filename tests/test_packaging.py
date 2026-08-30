@@ -73,3 +73,69 @@ def test_the_web_assets_ship():
             if line.strip() and not line.strip().startswith("#")
         ]
         assert needed not in lines, f"{needed} is required at runtime and must ship"
+
+
+# ---- the declared Python floor is real ------------------------------------------
+#
+# pyproject declares requires-python >= 3.10, and ComfyUI imports this package at
+# startup. A SyntaxError is NOT an ImportError, so __init__.py's own try/except fallback
+# cannot catch one - a construct that only parses on a newer Python takes the whole node
+# pack down rather than degrading.
+#
+# This exists because that happened: a debug-header f-string whose replacement field
+# spanned a line break (PEP 701, 3.12+) compiled fine on the dev machine's 3.13 and
+# raised "unterminated string literal" on 3.11.
+#
+# It has to COMPILE under an old interpreter. ast.parse(feature_version=(3, 10)) accepts
+# that f-string happily - checked - because feature_version does not model the f-string
+# tokenizer change. So a real interpreter is the only honest check, and the test skips
+# rather than lying when one is not available.
+
+import re
+import shutil
+import subprocess
+import sys
+
+
+def _declared_floor() -> tuple[int, int]:
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    m = re.search(r'requires-python\s*=\s*"[><=~^]*\s*(\d+)\.(\d+)', text)
+    assert m, "requires-python is missing from pyproject.toml"
+    return int(m.group(1)), int(m.group(2))
+
+
+def _floor_interpreter(major: int, minor: int) -> list[str] | None:
+    """A command that runs the declared minimum Python, or None if we have none."""
+    if sys.version_info[:2] == (major, minor):
+        return [sys.executable]
+    if shutil.which("uv"):
+        return ["uv", "run", "--quiet", "--no-project", "--python",
+                f"{major}.{minor}", "python"]
+    exact = shutil.which(f"python{major}.{minor}")
+    return [exact] if exact else None
+
+
+def test_the_package_compiles_on_the_oldest_python_it_claims_to_support():
+    major, minor = _declared_floor()
+    runner = _floor_interpreter(major, minor)
+    if runner is None:
+        pytest.skip(f"no Python {major}.{minor} available to check against")
+    files = sorted(str(p) for p in (REPO_ROOT / "minimax_refpack").glob("*.py"))
+    files.append(str(REPO_ROOT / "__init__.py"))
+    script = (
+        "import py_compile, sys\n"
+        "bad = []\n"
+        "for f in sys.argv[1:]:\n"
+        "    try:\n"
+        "        py_compile.compile(f, cfile=None, doraise=True)\n"
+        "    except py_compile.PyCompileError as e:\n"
+        "        bad.append(str(e).strip().splitlines()[-1])\n"
+        "for b in bad:" + chr(10) + "    print(b)" + chr(10)
+    )
+    proc = subprocess.run(runner + ["-c", script] + files,
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+    assert not proc.stdout.strip(), (
+        f"does not compile on Python {major}.{minor}, which pyproject.toml claims to "
+        f"support:\n{proc.stdout}"
+    )
