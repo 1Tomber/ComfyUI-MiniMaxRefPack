@@ -132,3 +132,74 @@ def test_toggling_does_not_mutate_what_it_was_given():
 @requires_node
 def test_the_pill_summarises_rather_than_overflowing(subjects, expected):
     assert _run(f"subjectPillText({json.dumps(subjects)})") == expected
+
+
+# ---- hit priority: the cells have to beat the tile they are painted inside ----------
+#
+# This is the test that was missing. The picker cells sit INSIDE the tile's own rect, and
+# hitTest scans regions in reverse so the last one pushed wins. Pushed where they were
+# painted, the cells landed BEFORE the tile - so every click on a number resolved to the
+# tile and no subject could ever be set. The feature was completely unreachable and every
+# other test still passed, because they all covered geometry and toggling rather than
+# which region a click actually resolves to.
+
+
+def _hit_test_js() -> str:
+    """hitTest, extracted from the shipped file."""
+    text = REFPACK_JS.read_text(encoding="utf-8")
+    start = text.find("export function hitTest(node, x, y) {")
+    assert start != -1, "hitTest moved"
+    return text[start:text.find("\n}\n", start) + 3]
+
+
+def _resolve(regions, x, y):
+    script = (
+        _hit_test_js()
+        + f"\nconst node = {{ _mmrpHit: {{ regions: {json.dumps(regions)} }} }};\n"
+        + f"console.log(JSON.stringify(hitTest(node, {x}, {y})));\n"
+    )
+    proc = subprocess.run([NODE, "--input-type=module", "-e", script],
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, f"node failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip())
+
+
+def _tile_and_cells(tile_x=0, tile_y=0):
+    """The regions one tile contributes while its picker is open, in push order."""
+    cells = [
+        {"type": "subject", "n": c["n"], "x": tile_x + c["x"], "y": tile_y + c["y"],
+         "w": c["w"], "h": c["h"]}
+        for c in _cells()
+    ]
+    tile = {"type": "tile", "x": tile_x, "y": tile_y, "w": TILE, "h": TILE}
+    return tile, cells
+
+
+@requires_node
+@pytest.mark.parametrize("n", list(range(10)))
+def test_a_click_on_a_picker_cell_resolves_to_that_cell(n):
+    tile, cells = _tile_and_cells()
+    regions = [tile] + cells          # the order draw() must push them in
+    cell = cells[n]
+    hit = _resolve(regions, cell["x"] + cell["w"] // 2, cell["y"] + cell["h"] // 2)
+    assert hit["type"] == "subject", f"cell {n} is unreachable - it resolves to {hit['type']}"
+    assert hit["n"] == n
+
+
+@requires_node
+def test_pushing_the_cells_before_the_tile_makes_them_unreachable():
+    """Pins WHY the order matters, so a future refactor that reorders the pushes fails
+    here with an explanation rather than silently disabling the feature again."""
+    tile, cells = _tile_and_cells()
+    wrong = cells + [tile]            # what the code did before
+    cell = cells[3]
+    hit = _resolve(wrong, cell["x"] + cell["w"] // 2, cell["y"] + cell["h"] // 2)
+    assert hit["type"] == "tile", "this ordering is the bug; if it now works, update this test"
+
+
+@requires_node
+def test_a_click_on_the_tile_outside_every_cell_still_reaches_the_tile():
+    """Clicking the tile's own area closes the picker, so it must still resolve."""
+    tile, cells = _tile_and_cells()
+    regions = [tile] + cells
+    assert _resolve(regions, 4, 4)["type"] == "tile"
