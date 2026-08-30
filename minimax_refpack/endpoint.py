@@ -153,7 +153,13 @@ def is_loopback(url: str) -> bool:
     except ImportError:
         return True
     except Exception:
-        return False
+        # The dialling parser REFUSED the URL - a port out of range, a non-numeric port, a
+        # stray control character. requests raises InvalidURL on exactly these, so no
+        # connection can be made to anywhere and there is nothing to gate. Allowing it
+        # keeps the existing contract that a typo yields "no servers found" rather than a
+        # refusal that blames the wrong thing: telling someone who mistyped a port that
+        # only loopback addresses are allowed sends them looking for the wrong mistake.
+        return True
     return dialled.strip("[]") in {h.strip("[]") for h in _LOOPBACK_HOSTS}
 
 
