@@ -214,6 +214,21 @@ class MiniMaxH3ReferencePack:
                                "arrives huge and every sampling step pays for it. "
                                "Reference videos are already capped by the core node.",
                 }),
+
+                # APPENDED, not filed next to `system_prompt` where it belongs by
+                # meaning. This list is a WIRE FORMAT - litegraph restores widgets_values
+                # positionally - so inserting anything mid-list re-points every widget
+                # after it in every saved workflow. Appending is the one edit that is safe
+                # without a migration.
+                "system_prompt_replacement": ("STRING", {
+                    "multiline": True,
+                    "dynamicPrompts": False,
+                    "default": "",
+                    "tooltip": "VLM system prompt for the REPLACEMENT register, editable "
+                               "in the settings modal. `system_prompt` above is the "
+                               "standard register's. Blank falls back to the packaged "
+                               "default for that register.",
+                }),
             },
         }
 
@@ -228,7 +243,7 @@ class MiniMaxH3ReferencePack:
         system_prompt="", width=0, height=0, length_seconds=0.0,
         prompt_provider=endpoint.DEFAULT_PROVIDER,
         reasoning_effort=prompt.DEFAULT_REASONING_EFFORT, job_type="auto",
-        max_reference_edge=DEFAULT_MAX_REFERENCE_EDGE, api_base="", local_model_slug="",
+        max_reference_edge=DEFAULT_MAX_REFERENCE_EDGE, api_base="", local_model_slug="", system_prompt_replacement="",
         use_openrouter=None, model=None, model_override=None, **kwargs
     ):
         openrouter_model = openrouter_model or (model or "")
@@ -250,6 +265,8 @@ class MiniMaxH3ReferencePack:
             _provider_of(prompt_provider, use_openrouter),
             str(reasoning_effort), str(job_type), str(max_reference_edge),
             str(api_base), str(local_model_slug),
+            # A second override text decides the completion exactly as the first does.
+            system_prompt_replacement,
         ])
 
     def build(
@@ -257,7 +274,7 @@ class MiniMaxH3ReferencePack:
         system_prompt="", width=0, height=0, length_seconds=0.0,
         prompt_provider=endpoint.DEFAULT_PROVIDER,
         reasoning_effort=prompt.DEFAULT_REASONING_EFFORT, job_type="auto",
-        max_reference_edge=DEFAULT_MAX_REFERENCE_EDGE, api_base="", local_model_slug="",
+        max_reference_edge=DEFAULT_MAX_REFERENCE_EDGE, api_base="", local_model_slug="", system_prompt_replacement="",
         use_openrouter=None, model=None, model_override=None,
     ):
         # Legacy kwarg names, for an API client replaying a prompt stored before 0.3.2.
@@ -326,7 +343,9 @@ class MiniMaxH3ReferencePack:
             f"reasoning_effort: {reasoning_effort}",
             f"max_reference_edge: {max_reference_edge or 'off'}",
             f"job_type: {job_type}",   # rewritten below once auto has resolved
-            f"system_prompt: {'workflow override' if (system_prompt or '').strip() else 'packaged default'}",
+            f"system_prompt (standard): {'workflow override' if (system_prompt or '').strip() else 'packaged default'}",
+            f"system_prompt (replacement): "
+            f"{'workflow override' if (system_prompt_replacement or '').strip() else 'packaged default'}",
             f"references: {len(reference_set.references)} "
             f"({', '.join(f'{t.tag} {t.file}' for t in reference_set.assign_tags()) or 'none'})",
         ]
@@ -358,6 +377,7 @@ class MiniMaxH3ReferencePack:
                     api_key=openrouter_api_key,
                     model=model,
                     system_prompt=system_prompt,
+                    system_prompt_replacement=system_prompt_replacement,
                     width=width,
                     height=height,
                     length_seconds=length_seconds,

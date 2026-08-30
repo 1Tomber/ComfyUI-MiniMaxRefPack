@@ -491,3 +491,22 @@
 .mmrp-clear-btn {
     margin-left: auto;
 }
+
+/* Register tabs in the settings modal. Two 20KB+ prompts that must never be confused for
+   one another, so the active one is stated rather than implied. */
+.mmrp-tabs {
+    display: flex;
+    gap: 6px;
+    margin: 8px 0 6px;
+}
+
+.mmrp-tab {
+    text-transform: capitalize;
+    flex: 0 0 auto;
+}
+
+.mmrp-tab.mmrp-active {
+    background: #e0e0e0;
+    color: #111;
+    border-color: #000;
+}

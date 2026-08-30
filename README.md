@@ -31,7 +31,9 @@ No. `prompt_provider` picks who writes the prompt, and two of its three settings
 
 Whichever you pick, you keep the whole reference manager: the uploads, the previews, the crop and trim editor, the `<Picture 2>` / `<Video 1>` / `<Audio 1>` tags, the portable configs, all 20 outputs wired once.
 
-**Don't like the prompt it writes?** Open the node's settings modal and edit `system_prompt`. It holds the full instructions the model gets. Rewrite it however you like, and it saves with the workflow. Leave it blank to use the packaged default.
+**Don't like the prompt it writes?** Open the node's settings modal (⚙) and edit the system prompt. It holds the full instructions the model gets. Rewrite it however you like, and it saves with the workflow. Leave it blank to use the packaged default.
+
+There is **one prompt per register**, on their own tabs: `standard` writes a scene, `replacement` swaps one thing in a clip. They are separate 20KB+ files on purpose — the Ref2VA rules are hard formatting mandates, and putting both in context produces hybrids — so an override for one never reaches the other. The modal opens on whichever register your `job_type` will actually use.
 
 ## Running it locally
 

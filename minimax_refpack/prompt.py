@@ -735,7 +735,8 @@ def _short_reason(resp: requests.Response) -> str:
 
 def write_prompt(
     *, references, input_dir: str, direction: str, api_key: str, model: str,
-    system_prompt: str = "", width: int = 0, height: int = 0, length_seconds: float = 0.0,
+    system_prompt: str = "", system_prompt_replacement: str = "",
+    width: int = 0, height: int = 0, length_seconds: float = 0.0,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT, job_type: str = "auto",
     classifier_model: str = "", debug: list | None = None,
     provider: str = "openrouter", api_base: str = "",
@@ -761,11 +762,18 @@ def write_prompt(
             model=classifier, ep=ep,
         )
 
+    # ONE OVERRIDE PER REGISTER. There used to be a single `system_prompt` applied to
+    # whichever register ran, which quietly defeated the reason the two are separate files
+    # ("the Ref2VA rules are ~22KB of hard formatting mandates and putting both in context
+    # produces hybrids"): customising for `standard` handed that same text to
+    # `replacement`, and with job_type on `auto` you could not even predict which.
+    #
+    # `system_prompt` keeps meaning STANDARD, so an existing workflow is unaffected.
+    override = system_prompt if resolved == "standard" else system_prompt_replacement
     # Non-blank (after strip) -> the workflow's own edited prompt, used verbatim (not
     # stripped). Blank -> fall back to the packaged file for the resolved job type, read
     # at call time (not import time) so an edit on disk lands on the next queue.
-    if not (system_prompt and system_prompt.strip()):
-        system_prompt = _read_system_prompt(resolved)
+    system_prompt = override if (override and override.strip()) else _read_system_prompt(resolved)
     content = _build_content(
         references, input_dir, direction,
         width=width, height=height, length_seconds=length_seconds, accepts=ep.accepts,
