@@ -1755,6 +1755,26 @@ function onCanvasMouseDown(node, e) {
 function onCanvasDblClick(node, e) {
     const pos = getMousePos(node._mmrpBody.canvas, e);
     const hit = hitTest(node, pos.x, pos.y);
+    // The picker and the tag insert overlap on the same pixels: the first click of a
+    // double-click opens the picker, so the second one lands on a CELL. Left alone that
+    // means double-clicking the middle of a tile toggles a subject instead of inserting
+    // its tag - trading one gesture for another rather than supporting both.
+    //
+    // So a double-click on a cell reverts the toggle its second click just applied and
+    // goes on to insert the tag. Double-click means "insert" everywhere on the tile, and
+    // a single click still means "toggle this subject".
+    if (hit && hit.type === "subject") {
+        const next = cloneRefs(node._mmrpRefs);
+        const target = next[`${hit.kind}s`][hit.index];
+        if (target) {
+            target.subjects = toggleSubject(target.subjects, hit.n);
+            if (!target.subjects.length) delete target.subjects;
+        }
+        applyRefs(node, next);
+        const tagged = assignTags(node._mmrpRefs)[`${hit.kind}s`][hit.index];
+        if (tagged) insertIntoDirection(node, tagged.tag);
+        return;
+    }
     if (!hit || (hit.type !== "tile" && hit.type !== "edit")) return;
     const ref = node._mmrpRefs[`${hit.kind}s`][hit.index];
     if (!ref || ref.missing) return;
@@ -3293,6 +3313,9 @@ app.registerExtension({
                 const dw = widgetByName(this, "direction");
                 if (this._mmrpBody) this._mmrpBody.directionInput.value = dw ? dw.value || "" : "";
                 this._mmrpSelected = null;
+                // Pinned to an index, and this replaces every reference under it - an open
+                // picker would reopen on whatever now occupies that slot.
+                this._mmrpPicker = null;
                 // configure() writes the serialized size straight onto node.size,
                 // bypassing our setSize wrapper — re-assert the fixed size.
                 this.setSize(fixedSize(this));
