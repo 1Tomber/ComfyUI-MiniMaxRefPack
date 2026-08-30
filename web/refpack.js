@@ -337,10 +337,36 @@ const CONTENT = {
 // user's ComfyUI is running and on which buttons are currently shown (Local LLM hides
 // off `local`), and a hardcoded guess would either clip the row or refuse widths that
 // were fine. scrollWidth is the row's natural width because it is `flex-wrap: nowrap`.
+// The natural width of the button row: its CHILDREN laid end to end, not the row's own
+// box.
+//
+// scrollWidth is the obvious call here and it is wrong. `.mmrp-uploads` is width:100% of
+// the block, so unless the buttons actually overflow, scrollWidth reports the CONTAINER's
+// width - which makes the floor equal to the current width and the node can then never be
+// dragged narrower than it already is. Verified live on frontend 1.51.9: asking for 1128
+// inside a 1600px block came back 1620.
+//
+// Buttons that are hidden (Local LLM off `local`) and the hidden file inputs measure zero
+// and are skipped, so the floor tracks what is actually on screen.
+function uploadsNaturalWidth(row) {
+    if (!row || !row.children.length) return 0;
+    const style = getComputedStyle(row);
+    const gap = parseFloat(style.columnGap || style.gap) || 0;
+    let total = 0;
+    let shown = 0;
+    for (const child of row.children) {
+        const w = child.offsetWidth;
+        if (!w) continue;
+        total += w;
+        shown += 1;
+    }
+    return shown ? total + gap * (shown - 1) : 0;
+}
+
 function minNodeWidth(node) {
     const row = node._mmrpBody && node._mmrpBody.uploadRow;
-    const uploads = (row && row.scrollWidth) || CONTENT.fallbackUploadsW;
-    const slab = Math.max(uploads, CONTENT.minRowW + CL.x0 * 2);
+    const uploads = uploadsNaturalWidth(row) || CONTENT.fallbackUploadsW;
+    const slab = Math.max(uploads + CL.x0 * 2, CONTENT.minRowW + CL.x0 * 2);
     return Math.ceil(slab + domWidgetMargin(node) * 2);
 }
 
@@ -1290,8 +1316,7 @@ function draw(node) {
     // is resized by relayout() from the places that change the content instead.
     const layout = computeCanvasRows(node._mmrpRefs, cssW - CL.x0 * 2);
     node._mmrpLayout = layout;
-    const wantH = `${layout.height}px`;
-    if (canvas.style.height !== wantH) canvas.style.height = wantH;
+    applyCanvasHeight(node, layout);
 
     const cssH = canvas.clientHeight;
     if (!cssH) return;
@@ -1678,7 +1703,23 @@ function schedulePersistPromptH(node) {
 // Re-derive the node's size after something changed the CONTENT rather than the window.
 // Kept out of draw() on purpose: paint recursing into layout is the bug class the
 // fixed-size rewrite was built to kill, and it stays dead.
+// The slab element's own height. Applied from the layout the moment the content changes,
+// NOT only on the next paint: scheduleDraw goes through requestAnimationFrame, which a
+// hidden tab suspends, so leaving this to draw() alone left the block sized for a wrapped
+// layout while the canvas inside it was still the old height. Confirmed on frontend
+// 1.51.9 with the tab backgrounded: the block was 831 tall around a 554 canvas.
+//
+// Assigning only on a real change is what keeps this out of a loop with the
+// ResizeObserver watching the same element.
+function applyCanvasHeight(node, layout) {
+    const canvas = node._mmrpBody && node._mmrpBody.canvas;
+    if (!canvas) return;
+    const want = `${(layout || layoutOf(node)).height}px`;
+    if (canvas.style.height !== want) canvas.style.height = want;
+}
+
 function relayout(node) {
+    applyCanvasHeight(node);
     try {
         if (node.setSize) node.setSize(nodeSize(node));
     } catch (e) { /* pre-mount, before last_y exists */ }
@@ -2985,6 +3026,9 @@ function installSizeGuards(node) {
         // height as a request for the prompt box first, then re-derive: whatever the
         // prompt could not absorb (because the media needs it) is simply not granted.
         absorbHeightIntoPrompt(this, size[1]);
+        // A width drag re-wraps the tiles, so the slab's height can change with no change
+        // to the content at all.
+        applyCanvasHeight(this);
         const f = nodeSize(this);
         size[0] = f[0];
         size[1] = f[1];
