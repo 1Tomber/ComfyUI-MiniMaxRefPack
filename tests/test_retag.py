@@ -239,8 +239,15 @@ def test_subjects_survive_the_references_json_round_trip():
     start = text.find("export function fromReferencesList")
     end = text.find("export function editSummary")
     assert start != -1 and end != -1
-    helper = text.find("function takeEdit")
-    block = text[helper:text.find("\n}\n", helper) + 3] + text[start:end]
+    # pythonTruthy is a dependency of fromReferencesList - it is how the soundtrack
+    # flag is read the same way Python reads it - so running the converters means
+    # shipping it alongside them. See tests/test_soundtrack_parity.py.
+    def grab(name):
+        at = text.find(f"function {name}")
+        assert at != -1, f"{name} moved - this test runs the shipped code, not a copy"
+        return text[at:text.find("\n}\n", at) + 3]
+
+    block = grab("takeEdit") + grab("pythonTruthy") + text[start:end]
     proc = subprocess.run(
         [NODE, "--input-type=module", "-e", block + f"\nconsole.log(JSON.stringify({js}));\n"],
         capture_output=True, text=True, check=False,

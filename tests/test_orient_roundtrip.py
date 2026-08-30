@@ -27,13 +27,20 @@ requires_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
 
 def _converters() -> str:
     text = REFPACK_JS.read_text(encoding="utf-8")
-    helper = text.find("function takeEdit")
+    # pythonTruthy is a dependency of fromReferencesList - it is how the soundtrack
+    # flag is read the same way Python reads it - so running the converters means
+    # shipping it alongside them. See tests/test_soundtrack_parity.py.
+    def grab(name):
+        at = text.find(f"function {name}")
+        assert at != -1, f"{name} moved - this test runs the shipped code, not a copy"
+        return text[at:text.find("\n}\n", at) + 3]
+
     start = text.find("export function fromReferencesList")
     end = text.find("export function editSummary")
-    assert helper != -1 and start != -1 and end != -1, (
+    assert start != -1 and end != -1, (
         "the references_json converters moved - this test runs the shipped pair"
     )
-    return text[helper:text.find("\n}\n", helper) + 3] + text[start:end]
+    return grab("takeEdit") + grab("pythonTruthy") + text[start:end]
 
 
 def _round_trip(list_in):
