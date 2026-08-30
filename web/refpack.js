@@ -341,16 +341,49 @@ export function fromReferencesList(list) {
     // directions whitelist, so a field missing from here is dropped between the widget and
     // the working state - which presents as "the edit did not save" rather than as an
     // error, and is worth naming in one place for that reason.
-    const extras = (r) => ({
-            ...(Number.isFinite(r.rotate) && r.rotate ? { rotate: r.rotate } : {}),
-            ...(r.flip ? { flip: r.flip } : {}),
-            ...(r.rotate_expand === false ? { rotate_expand: false } : {}),
-    });
+    // Two things this has to get right, and it was getting both wrong.
+    //
+    // GATED ON THE KIND, matching refs.Reference.from_dict's
+    // `visual = kind in ("image", "video")`. Spread into every kind, an AUDIO reference in
+    // a hand-written references_json kept rotate/flip through the round trip and
+    // re-serialised them - the tile badge summarising an orientation the server had
+    // already dropped. crop and trim are gated per kind here; orientation was not.
+    //
+    // AND IT SAYS WHEN IT DISCARDS SOMETHING. Python RAISES for a value this quietly
+    // ignores, so a references_json written by hand with rotate: "90" renders as perfectly
+    // fine here and then fails the whole node the moment it is queued. Worse, the first
+    // edit rewrites the widget without the discarded value, so the evidence disappears
+    // along with it. Dropping is still the right outcome - coercing would make the browser
+    // accept something the server refuses - but it should not happen in silence.
+    const discard = (file, field, value) => {
+        console.warn(
+            `[MiniMaxRefPack] ignoring ${field}=${JSON.stringify(value)} on ${file}: ` +
+            "refs.py does not accept that value, so it was dropped rather than sent"
+        );
+    };
+    const extras = (r, kind) => {
+        const visual = kind === "image" || kind === "video";
+        const out = {};
+        if (r.rotate !== undefined && r.rotate !== null && r.rotate !== 0) {
+            if (!visual) discard(r.file, "rotate", r.rotate);
+            else if (Number.isFinite(r.rotate)) out.rotate = r.rotate;
+            else discard(r.file, "rotate", r.rotate);
+        }
+        if (r.flip) {
+            if (visual) out.flip = r.flip;
+            else discard(r.file, "flip", r.flip);
+        }
+        if (r.rotate_expand === false) {
+            if (visual) out.rotate_expand = false;
+            else discard(r.file, "rotate_expand", r.rotate_expand);
+        }
+        return out;
+    };
     for (const r of list || []) {
         if (!r || typeof r.file !== "string") continue;
         if (r.kind === "image")
             refs.images.push({ file: r.file, missing: !!r.missing, crop: takeEdit(r.crop),
-                               ...extras(r) });
+                               ...extras(r, "image") });
         else if (r.kind === "video")
             refs.videos.push({
                 file: r.file,
@@ -358,11 +391,11 @@ export function fromReferencesList(list) {
                 missing: !!r.missing,
                 crop: takeEdit(r.crop),
                 trim: takeEdit(r.trim),
-                ...extras(r),
+                ...extras(r, "video"),
             });
         else if (r.kind === "audio")
             refs.audios.push({ file: r.file, missing: !!r.missing, trim: takeEdit(r.trim),
-                               ...extras(r) });
+                               ...extras(r, "audio") });
     }
     return refs;
 }
