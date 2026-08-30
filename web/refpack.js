@@ -3078,7 +3078,6 @@ function absorbPointerIntoPrompt(node, size) {
 
     const canvas = app.canvas;
     const pointer = canvas && canvas.pointer;
-    const dir = pointer && pointer.resizeDirection;
     const y0 = pointer && pointer.eDown && pointer.eDown.canvasY;
     // eMove rather than graph_mouse: CanvasPointer.move() is gated on the PRIMARY pointer
     // and sets eMove immediately before dispatching onDrag, while graph_mouse is written
@@ -3087,11 +3086,29 @@ function absorbPointerIntoPrompt(node, size) {
     const yNow = pointer && (pointer.eMove ? pointer.eMove.canvasY : y0);
     // A frontend without these gets no height drag rather than a wrong one: the width
     // still resizes and the prompt simply stops being draggable. Degrades, never corrupts.
-    if (typeof dir !== "string" || !Number.isFinite(y0) || !Number.isFinite(yNow)) return;
+    if (!Number.isFinite(y0) || !Number.isFinite(yNow)) return;
 
     let anchor = node._mmrpDragAnchor;
     if (!anchor) {
+        // WHICH CORNER, derived from where the pointer went down rather than read off the
+        // canvas pointer's own resize-direction field.
+        //
+        // That field cannot be used here, and the reason is worth recording: it is set at
+        // pointerdown and wiped again on the first mousemove, by processMouseMove's
+        // group-hover branch (`resizeDirection &&= void 0`, with no eDown guard), while
+        // `resizing_node` is not set until the drag starts. So the two are NEVER valid
+        // together - at the first setSize the direction is readable but resizing_node is
+        // null, and from the second onwards resizing_node is set and the direction is
+        // gone. Reading it during the drag made this absorb dead code in the browser
+        // while every simulated scenario passed.
+        //
+        // eDown survives the whole drag. Only corners resize (resizeEdgeSize exists in
+        // the source but is used nowhere), so the pointer went down within a handful of
+        // pixels of the top or the bottom edge, and which one it was is not close.
+        const top = node.pos[1];
+        const north = Math.abs(y0 - top) < Math.abs(y0 - (top + (node.size[1] || 0)));
         anchor = node._mmrpDragAnchor = {
+            north,
             prompt: promptHeightOf(node),
             // N-corner drags keep the node's BOTTOM edge still and move its top. The
             // frontend does that itself by rewriting the rectangle's y - including on the
@@ -3100,7 +3117,7 @@ function absorbPointerIntoPrompt(node, size) {
             // makes the bottom recoverable from any frame at all, which is why this can be
             // captured lazily. But since this wrapper replaces the height with the derived
             // one, it has to re-pin the bottom itself further down, or the node slides.
-            bottom: dir.includes("N") && isSizePair(size) && Number.isFinite(size[1])
+            bottom: north && isSizePair(size) && Number.isFinite(size[1])
                 ? node.pos[1] + size[1]
                 : null,
         };
@@ -3108,7 +3125,7 @@ function absorbPointerIntoPrompt(node, size) {
 
     const dy = yNow - y0;
     // SE/SW grow downward with the pointer; NE/NW grow upward, so the sign flips.
-    const signedDy = dir.includes("N") ? -dy : dir.includes("S") ? dy : 0;
+    const signedDy = anchor.north ? -dy : dy;
     const next = Math.max(CONTENT.minPromptH, Math.round(anchor.prompt + signedDy));
     // Compared against the EFFECTIVE height, not the stored field. Merely grabbing the
     // handle produces a frame with dy 0, whose `next` is the height the box already has -

@@ -76,12 +76,12 @@ def test_the_harness_actually_discriminates():
     instead of shrinking it, and nothing else in the file compensates for it.
     """
     src = REFPACK_JS.read_text(encoding="utf-8")
-    marker = 'const signedDy = dir.includes("N") ? -dy : dir.includes("S") ? dy : 0;'
+    marker = "const signedDy = anchor.north ? -dy : dy;"
     assert marker in src, (
         "the direction-sign line this test perturbs has moved; update the perturbation "
         "rather than deleting the check"
     )
-    broken = src.replace(marker, "const signedDy = dy;", 1)
+    broken = src.replace(marker, "const signedDy = dy;  // PERTURBED", 1)
     assert broken != src
 
     tmp = HARNESS / "_perturbed_refpack.js"
