@@ -55,6 +55,40 @@ def _crop_box(crop, width: int, height: int) -> tuple[int, int, int, int]:
     return left, top, right, bottom
 
 
+def _stream_origin(stream):
+    """Where this stream's timeline actually begins: (seconds, pts units).
+
+    A trim means "seconds from the start of THIS clip", which is what the frame-index
+    path in _decode_video takes it to mean. But a container's video stream does not have
+    to start at pts 0 - a stream copy out of a transport stream, or any remux that
+    preserves timestamps, leaves start_time non-zero - and the pts-based paths were
+    reading raw presentation stamps as though they were clip-relative seconds.
+
+    The same trim then picked different frames depending on which path ran: the sockets
+    got one window from _decode_video and the VLM got another from _transcode_window. A
+    near-start trim on a shifted stream selected nothing at all, so the model was handed
+    an empty clip while the sockets emitted real frames - the two halves describing
+    different footage, with nothing to show anyone that they had diverged.
+    """
+    start_pts = getattr(stream, "start_time", None)
+    if start_pts is None:
+        return 0.0, 0
+    try:
+        return float(start_pts * stream.time_base), int(start_pts)
+    except (TypeError, ValueError):
+        return 0.0, 0
+
+
+def _widen_to(lo: int, hi: int, minimum: int, limit: int) -> tuple[int, int]:
+    """Grow the half-open span [lo, hi) to at least `minimum`, staying inside 0..limit."""
+    if limit <= minimum:
+        return 0, limit
+    if hi - lo >= minimum:
+        return lo, hi
+    hi = min(limit, lo + minimum)
+    return max(0, hi - minimum), hi
+
+
 def _slice_audio(audio: dict, trim) -> dict:
     """Slice a {"waveform","sample_rate"} dict to [start, end) seconds. Returns a NEW
     dict - callers may still hold the unsliced original."""
@@ -259,14 +293,18 @@ def _transcode_window(path: str, crop, trim) -> bytes:
     with av.open(path) as src:
         stream = src.streams.video[0]
         rate = stream.average_rate or stream.guessed_rate or 24
+        origin_seconds, origin_pts = _stream_origin(stream)
         if start:
-            src.seek(int(start / stream.time_base), stream=stream)
+            src.seek(int(start / stream.time_base) + origin_pts, stream=stream)
 
         out = av.open(out_buf, "w", format="mp4")
         enc = None
         try:
             for frame in src.decode(stream):
-                t = float(frame.pts * stream.time_base) if frame.pts is not None else 0.0
+                # Clip-relative, so a stream that does not start at pts 0 still
+                # trims from its own beginning - see _stream_origin.
+                t = (float(frame.pts * stream.time_base) - origin_seconds
+                     if frame.pts is not None else 0.0)
                 if t < start - 1e-9:
                     continue
                 if end is not None and t >= end - 1e-9:
@@ -274,6 +312,14 @@ def _transcode_window(path: str, crop, trim) -> bytes:
                 arr = frame.to_ndarray(format="rgb24")
                 if crop is not None:
                     left, top, right, bottom = _crop_box(crop, arr.shape[1], arr.shape[0])
+                    # h264 needs an EVEN count on each axis, and the rounding below turns
+                    # an odd 1 into 0 - an empty array that av rejects from inside the
+                    # encoder with an IndexError, on a reference the node otherwise
+                    # accepts: _crop_box guarantees one pixel, validate_crop only checks
+                    # that the fraction is positive, and the socket path emits it happily.
+                    # So the box is widened to two pixels here rather than crashing.
+                    left, right = _widen_to(left, right, 2, arr.shape[1])
+                    top, bottom = _widen_to(top, bottom, 2, arr.shape[0])
                     arr = arr[top:bottom, left:right]
                 if enc is None:
                     enc = out.add_stream("libx264", rate=rate)
@@ -345,7 +391,10 @@ def thumbnail_png(path: str, max_edge: int = 256, crop=None, at_seconds=None) ->
         with av.open(path) as container:
             stream = container.streams.video[0]
             if at_seconds:
-                target_pts = int(at_seconds / stream.time_base)
+                # Offset by the stream's own start, so `at_seconds` counts from
+                # the beginning of the clip rather than from pts 0.
+                origin_seconds, origin_pts = _stream_origin(stream)
+                target_pts = int(at_seconds / stream.time_base) + origin_pts
                 container.seek(target_pts, stream=stream)
                 frame = None
                 for frame in container.decode(stream):
