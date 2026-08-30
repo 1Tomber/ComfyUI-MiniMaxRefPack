@@ -714,7 +714,10 @@ def render_payload(payload: dict, ep=None) -> str:
     # this endpoint)". This output's whole contract is that it cannot drift from what went
     # over the wire, so it enumerates the payload rather than a list of what it expects to
     # find there.
-    for key in sorted(k for k in payload if k != "messages"):
+    # `model` is excluded because the line above already carries it: the header wants
+    # it first rather than alphabetically among the rest, and enumerating the payload
+    # without excluding it printed it twice.
+    for key in sorted(k for k in payload if k not in ("messages", "model")):
         lines.append(f"{key}: {payload[key]}")
     if not any(k.startswith("reasoning") for k in payload):
         lines.append("reasoning: (not sent to this endpoint)")
