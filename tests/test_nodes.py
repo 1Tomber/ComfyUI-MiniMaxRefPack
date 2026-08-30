@@ -797,3 +797,52 @@ def test_the_api_key_never_reaches_a_log_line(fake_folder_paths, monkeypatch, ca
         )
 
     assert not any("deadbeef" in ln for ln in _lines(caplog))
+
+
+# ---- the cache key must not move for a UI preference -------------------------------
+#
+# references_json is an ENVELOPE. The browser stores UI preferences in it beside the
+# references - the prompt box's height, whether tags are rewritten - and Python reads
+# nothing but `references`. Folding the raw string into the cache key meant a cosmetic
+# gesture re-ran the node: on OpenRouter that is a billed call, and the prompt that comes
+# back is different, because the model writes a new one every time.
+
+
+def _key(references_json, **kw):
+    kw.setdefault("direction", "d")
+    return nodes.MiniMaxH3ReferencePack.IS_CHANGED(references_json=references_json, **kw)
+
+
+REFS = [{"kind": "image", "file": "a.png"}]
+
+
+@pytest.mark.parametrize("preference", [
+    {"prompt_h": 260},          # the user dragged the prompt box taller
+    {"retag": False},           # the user turned tag rewriting off
+    {"prompt_h": 44, "retag": False},
+])
+def test_a_ui_preference_does_not_move_the_cache_key(fake_folder_paths, preference):
+    plain = _key(json.dumps({"references": REFS}))
+    withpref = _key(json.dumps({"references": REFS, **preference}))
+    assert plain == withpref, f"{preference} re-runs the node and bills a fresh VLM call"
+
+
+def test_reformatting_the_same_reference_list_does_not_move_the_key(fake_folder_paths):
+    """The same consequence from a different direction: the widget's exact text is not
+    the input, the reference list is."""
+    compact = json.dumps({"references": REFS}, separators=(",", ":"))
+    spaced = json.dumps({"references": REFS}, indent=2)
+    assert _key(compact) == _key(spaced)
+
+
+def test_an_actual_reference_change_still_moves_the_key(fake_folder_paths):
+    """The guard on the guard - a key that never moves would serve a stale prompt for a
+    reference set the user has genuinely changed."""
+    one = _key(json.dumps({"references": REFS}))
+    two = _key(json.dumps({"references": REFS + [{"kind": "image", "file": "b.png"}]}))
+    assert one != two
+
+
+def test_an_edit_to_a_reference_still_moves_the_key(fake_folder_paths):
+    edited = [{"kind": "image", "file": "a.png", "crop": [0, 0, 0.5, 0.5]}]
+    assert _key(json.dumps({"references": REFS})) != _key(json.dumps({"references": edited}))
