@@ -1303,3 +1303,63 @@ def test_an_untouched_clip_still_keeps_its_soundtrack_inside_the_file(tmp_path, 
     content = prompt._build_content(refs, str(tmp_path), "d")
     assert "soundtrack inside" in content[0]["text"]
     assert not any(p.get("type") == "input_audio" for p in content)
+
+# ---- the error path must not raise its own error ------------------------------------
+
+
+class _FakeResp:
+    """Just enough Response for _short_reason: a json() that may raise, and .text."""
+
+    def __init__(self, payload, text="raw body text"):
+        self._payload = payload
+        self.text = text
+
+    def json(self):
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+
+@pytest.mark.parametrize("payload,expected,why", [
+    ({"error": {"message": "context length exceeded"}}, "context length exceeded",
+     "the OpenAI shape"),
+    ({"error": "rate limited"}, "rate limited",
+     "LM Studio and llama.cpp send a bare string"),
+    ({"detail": "Not Found"}, "Not Found",
+     "FastAPI, and therefore vLLM"),
+    ({"object": "error", "message": "no model loaded"}, "no model loaded",
+     "a top-level message"),
+    ({"error": {"message": "  padded  "}}, "padded", "whitespace is trimmed"),
+])
+def test_short_reason_reads_the_shapes_servers_actually_send(payload, expected, why):
+    assert prompt._short_reason(_FakeResp(payload)) == expected, why
+
+
+@pytest.mark.parametrize("payload", [
+    ["a list"],
+    "a bare json string",
+    42,
+    None,
+    {"error": ["not", "a", "dict"]},
+    {"error": {"message": None}},
+    {},
+    ValueError("not json at all"),
+])
+def test_short_reason_never_raises_whatever_the_body_is(payload):
+    """It runs while RAISING a PromptError. An exception here replaces "the API returned
+    429: rate limited" with a traceback from the reporting code, and the real status is
+    lost. Before this, a bare string or a list produced AttributeError."""
+    out = prompt._short_reason(_FakeResp(payload))
+    assert isinstance(out, str)
+
+
+def test_short_reason_falls_back_to_the_body_text():
+    """An HTML error page from a proxy has no message to find, and showing the first
+    200 characters of it is more use than showing nothing."""
+    assert prompt._short_reason(
+        _FakeResp(ValueError("no json"), text="<html>502 Bad Gateway</html>")
+    ) == "<html>502 Bad Gateway</html>"
+
+
+def test_short_reason_is_bounded():
+    assert len(prompt._short_reason(_FakeResp({"error": {"message": "x" * 5000}}))) == 200

@@ -772,13 +772,45 @@ def _b64_size(b64: str) -> int:
     return max(0, len(b64) * 3 // 4)
 
 
+# Where the OpenAI-compatible servers actually put the human-readable reason. The nested
+# `error.message` is the OpenAI shape; the rest are what the local servers this node talks
+# to send instead, and none of them are exotic.
+_REASON_KEYS = ("message", "detail", "error_message", "msg")
+
+
 def _short_reason(resp: requests.Response) -> str:
+    """One sentence out of whatever the server actually sent.
+
+    This runs while RAISING an error, so it must not raise one of its own. It used to
+    assume `{"error": {"message": ...}}` and reach through both levels with .get, catching
+    only ValueError - so a body of `{"error": "rate limited"}` (LM Studio) or a bare JSON
+    array raised AttributeError from inside the error path, and the user lost the HTTP
+    status behind a traceback from the reporting code.
+
+    Falls back to the raw text, which is what an HTML error page or an empty body deserves.
+    """
     try:
-        msg = resp.json().get("error", {}).get("message")
-        if msg:
-            return str(msg)[:200]
-    except ValueError:
-        pass
+        body = resp.json()
+    except Exception:
+        body = None
+
+    if isinstance(body, dict):
+        err = body.get("error")
+        # {"error": {"message": ...}} - OpenAI, OpenRouter
+        if isinstance(err, dict):
+            for key in _REASON_KEYS:
+                value = err.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()[:200]
+        # {"error": "..."} - LM Studio, llama.cpp
+        elif isinstance(err, str) and err.strip():
+            return err.strip()[:200]
+        # {"detail": ...} - FastAPI, and so vLLM; {"message": ...} - several others
+        for key in _REASON_KEYS:
+            value = body.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:200]
+
     return (resp.text or "")[:200]
 
 
