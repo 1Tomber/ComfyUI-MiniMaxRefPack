@@ -1008,3 +1008,107 @@ def test_a_waveform_that_cannot_report_its_length_is_left_alone():
 
     out = media._slice_audio({"waveform": Opaque(), "sample_rate": 1000}, [9.0, 10.0])
     assert out["waveform"] == "sliced"
+
+# ---- a trim window that catches no frames --------------------------------------------
+
+
+class _FakeTranscodeAv:
+    """The av surface _transcode_window touches, for the case where no frame qualifies.
+
+    Deliberately minimal: when every frame falls outside the window the encoder is never
+    created and to_ndarray is never called, so none of that has to be faked. av is not
+    installed here, same as everywhere else in this file.
+    """
+
+    def __init__(self, frame_times, time_base=90000, average_rate=24):
+        from fractions import Fraction
+
+        outer = self
+
+        class FakeStream:
+            pass
+
+        stream = FakeStream()
+        stream.time_base = Fraction(1, time_base)
+        stream.average_rate = average_rate
+        stream.guessed_rate = average_rate
+        stream.start_time = 0
+        self.stream = stream
+        self.wrote = []
+
+        class FakeFrame:
+            def __init__(self, pts):
+                self.pts = pts
+
+            def to_ndarray(self, format=None):
+                raise AssertionError("no frame should be decoded for an empty window")
+
+        self.frames = [FakeFrame(int(x * time_base)) for x in frame_times]
+
+        class FakeStreams:
+            video = [stream]
+
+        class FakeReader:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            @property
+            def streams(self):
+                return FakeStreams()
+
+            def seek(self, offset, stream=None):
+                pass
+
+            def decode(self, stream):
+                yield from outer.frames
+
+        class FakeWriter:
+            def add_stream(self, *a, **k):
+                raise AssertionError("no stream should be added for an empty window")
+
+            def mux(self, packet):
+                outer.wrote.append(packet)
+
+            def close(self):
+                outer.closed = True
+
+        self.closed = False
+        self._reader = FakeReader()
+        self._writer = FakeWriter()
+
+    def open(self, target, mode="r", format=None):
+        return self._writer if mode == "w" else self._reader
+
+
+def test_a_trim_window_with_no_frames_is_refused(monkeypatch):
+    """It returned an mp4 container with nothing in it - zero bytes of video - and that
+    went to the model as a video part it cannot decode, logged as a success.
+
+    load_video REFUSES the very same trim for the very same file. One half of the node
+    complaining loudly while the other half silently sends nothing is the disagreement
+    this apply-point design exists to prevent. Reachable without doing anything strange:
+    a trim outliving a re-upload of a shorter file under the same name.
+    """
+    fake = _FakeTranscodeAv(frame_times=[0.0, 0.5, 1.0])
+    _install_fake_av(monkeypatch, fake)
+
+    with pytest.raises(ValueError) as excinfo:
+        media._transcode_window("clip.mp4", None, [8.0, 9.0])
+
+    message = str(excinfo.value)
+    assert "clip.mp4" in message, "the message has to name the file"
+    assert "8.00-9.00" in message, "and the window that found nothing"
+    assert fake.closed, "the container is still closed on the way out"
+
+
+def test_the_empty_window_message_mentions_the_likely_cause(monkeypatch):
+    """The user did not type this trim against this file - it survived a re-upload. Saying
+    so is the difference between a fixable message and a puzzling one."""
+    fake = _FakeTranscodeAv(frame_times=[0.0, 0.5])
+    _install_fake_av(monkeypatch, fake)
+
+    with pytest.raises(ValueError, match="left over from a longer version"):
+        media._transcode_window("clip.mp4", None, [30.0, 31.0])

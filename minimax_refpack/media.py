@@ -497,6 +497,22 @@ def _transcode_window(path: str, crop, trim, flip=None, rotate=None,
         finally:
             out.close()
 
+    if enc is None:
+        # Not one frame landed inside the window, so there is no video here - only an mp4
+        # container with nothing in it. Returned as-is, that went to the model as a video
+        # part it cannot decode, logged as a success with bytes=0, while load_video
+        # REFUSES the very same trim for the very same file. One half of the node
+        # complaining loudly and the other half sending nothing is the disagreement this
+        # whole apply-point design exists to prevent.
+        #
+        # Reachable without doing anything strange: a trim outlives a re-upload of a
+        # shorter file under the same name.
+        window = f" trimmed to {trim[0]:.2f}-{trim[1]:.2f}s" if trim is not None else ""
+        raise ValueError(
+            f"reference video {path!r}{window} has no frames in that window - "
+            f"the trim may be left over from a longer version of the file"
+        )
+
     return out_buf.getvalue()
 
 
