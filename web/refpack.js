@@ -754,6 +754,21 @@ function takeEdit(v) {
     return Array.isArray(v) ? v.slice() : null;
 }
 
+// Python's truthiness, for a flag that both halves have to read the same way.
+//
+// JS and Python agree on every scalar and disagree on containers: `!![]` is true while
+// `bool([])` is false, and the same for {}. A list is a malformed value for this flag, so
+// neither answer is meaningful - but "the two halves differ, though only on nonsense" is
+// exactly the caveat that turns into a bug report later, and matching outright costs three
+// lines. `absent` is the one case that is not truthiness at all: a missing key means the
+// default, which is why it is a parameter rather than another falsy value.
+function pythonTruthy(value, whenAbsent) {
+    if (value === undefined) return whenAbsent;
+    if (Array.isArray(value)) return value.length > 0;
+    if (value !== null && typeof value === "object") return Object.keys(value).length > 0;
+    return !!value;
+}
+
 export function fromReferencesList(list) {
     const refs = { images: [], videos: [], audios: [] };
     // Everything beyond kind/file/use_soundtrack that must survive the round trip. Both
@@ -783,13 +798,24 @@ export function fromReferencesList(list) {
         else if (r.kind === "video")
             refs.videos.push({
                 file: r.file,
-                // Absent means ON, matching refs.Reference.from_dict. `!!r.use_soundtrack`
-                // made it OFF, so the two halves disagreed about a hand-written config or
-                // references_json: queued headless it emitted the soundtrack, opened in a
-                // browser first it did not. Both serialisers always write the key, so this
-                // only shows up on a file somebody wrote themselves - which is exactly
-                // what a portable config is.
-                use_soundtrack: r.use_soundtrack !== false,
+                // ABSENT means on; PRESENT means whatever it is truthy as. Both halves
+                // of that matter, and the obvious spellings each get one of them wrong.
+                //
+                // refs.Reference.from_dict is `bool(d.get("use_soundtrack", True))`:
+                // missing key -> True, and anything else -> bool(value), so null, 0 and ""
+                // are all OFF. `!!r.use_soundtrack` matched the second half and broke the
+                // first (absent became OFF); `r.use_soundtrack !== false` matched the
+                // first and broke the second (null, 0 and "" became ON).
+                //
+                // Either way the two halves disagree about a hand-written config or
+                // references_json, and not harmlessly: a video's soundtrack claims its
+                // <Audio N> before any standalone audio does, so one falsy flag renumbers
+                // every audio tag after it. The browser then shows one numbering while the
+                // queued payload uses another, and the next edit round-trips the browser's
+                // answer back into the file. Both serialisers always write the key, so
+                // this only ever surfaces on a file somebody wrote themselves - which is
+                // exactly what a portable config is for.
+                use_soundtrack: pythonTruthy(r.use_soundtrack, true),
                 missing: !!r.missing,
                 crop: takeEdit(r.crop),
                 trim: takeEdit(r.trim),
