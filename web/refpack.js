@@ -1631,8 +1631,16 @@ function drawAddSquare(ctx, x, y, dimmed) {
 }
 
 // The subject picker, painted inside one tile and hit-tested from the same cell list.
-function drawSubjectPicker(ctx, ref, x, y, regions, kind, index) {
+// Paints the picker and RETURNS its cells rather than pushing them itself.
+//
+// hitTest scans regions in reverse, so the last one pushed wins - and these cells sit
+// inside the tile's own rect. Pushing them where they are painted put them BEFORE the
+// tile, so every click on a number resolved to the tile instead and no subject could ever
+// be set: the feature was completely unreachable. Returning them lets the caller push
+// them last, which is the only order that works.
+function drawSubjectPicker(ctx, ref, x, y, kind, index) {
     const T = CL.tile;
+    const out = [];
     ctx.save();
     pathRoundRect(ctx, x, y, T, T, 4);
     ctx.clip();
@@ -1658,10 +1666,11 @@ function drawSubjectPicker(ctx, ref, x, y, regions, kind, index) {
             ctx.textAlign = "center";
             ctx.fillText(String(cell.n), cx + cell.w / 2, cy + cell.h / 2 + 4);
         }
-        regions.push({ type: "subject", kind, index, n: cell.n,
-                       x: cx, y: cy, w: cell.w, h: cell.h });
+        out.push({ type: "subject", kind, index, n: cell.n,
+                   x: cx, y: cy, w: cell.w, h: cell.h });
     }
     ctx.restore();
+    return out;
 }
 
 function draw(node) {
@@ -1797,12 +1806,14 @@ function draw(node) {
             drawTile(ctx, kind, ref, lines, tx, ty, selected, soundState, badgeH,
                      picking ? null : playState);
             ctx.globalAlpha = 1;
-            if (picking) drawSubjectPicker(ctx, ref, tx, ty, regions, kind, i);
+            const pickerCells = picking
+                ? drawSubjectPicker(ctx, ref, tx, ty, kind, i)
+                : null;
 
             // Hit regions, most specific last — hitTest scans in reverse so the
             // play/delete/soundtrack/edit affordances win over the tile containing them.
             regions.push({ type: "tile", kind, index: i, file: ref.file, x: tx, y: ty, w: CL.tile, h: CL.tile });
-            if (!ref.missing) {
+            if (!ref.missing && !picking) {
                 regions.push({
                     type: "edit",
                     kind,
@@ -1814,7 +1825,7 @@ function draw(node) {
                     h: CL.del,
                 });
             }
-            if (soundState === "on" || soundState === "off") {
+            if ((soundState === "on" || soundState === "off") && !picking) {
                 regions.push({
                     type: "sound",
                     kind,
@@ -1826,7 +1837,7 @@ function draw(node) {
                     h: CL.sound,
                 });
             }
-            regions.push({
+            if (!picking) regions.push({
                 type: "del",
                 kind,
                 index: i,
@@ -1851,6 +1862,11 @@ function draw(node) {
                     tileY: ty,
                 });
             }
+            // LAST, so the cells beat the tile they are painted inside. The chips above
+            // are skipped entirely while the picker is open: the overlay hides them, and a
+            // control that is invisible but still clickable is how someone deletes a
+            // reference they were trying to label.
+            if (pickerCells) regions.push(...pickerCells);
         });
 
         // FIXED placement (UI review #2): always where the next tile would go —
