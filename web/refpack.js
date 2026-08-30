@@ -3058,7 +3058,8 @@ function absorbHeightIntoPrompt(node, requestedH) {
     // before it gets here, but nothing clamps a programmatic setSize - and an unclamped
     // value drove _mmrpPromptRaw hundreds of pixels negative, after which the box would
     // not grow again until the whole debt had been dragged back.
-    requestedH = Math.max(requestedH, minNodeHeight(node));
+    const floor = minNodeHeight(node);
+    requestedH = Math.max(requestedH, floor);
 
     // ANCHORED TO THE START OF THE DRAG, not to the previous frame.
     //
@@ -3080,6 +3081,18 @@ function absorbHeightIntoPrompt(node, requestedH) {
                 : promptHeightOf(node),
         };
     }
+    // A height that is merely the FLOOR, when the floor has risen above where the drag
+    // started, is the clamp talking rather than the user.
+    //
+    // The frontend clamps a drag up to computeSize() on BOTH axes. So dragging the node
+    // NARROWER wraps a tile onto a new line, the minimum height rises, and the height it
+    // passes becomes that new minimum - while the pointer never moved vertically at all.
+    // Absorbing it read a width-only drag as "grow the prompt", and the growth persisted:
+    // measured 110 -> 181, written into references_json and surviving reload.
+    //
+    // A genuine drag down to the floor is not caught by this, because there the floor is
+    // at or below where the drag started; only content growing mid-drag pushes it above.
+    if (requestedH <= floor && floor > anchor.height) return;
     const raw = anchor.prompt + (requestedH - anchor.height);
     if (raw === node._mmrpPromptRaw) return;
     node._mmrpPromptRaw = raw;
