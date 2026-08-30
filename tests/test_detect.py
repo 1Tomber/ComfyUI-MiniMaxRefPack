@@ -94,6 +94,24 @@ def test_a_url_two_parsers_read_differently_is_refused(url):
     assert endpoint.is_loopback(url) is False
 
 
+@pytest.mark.parametrize("base", [
+    "http://127.0.0.1:1234\v1",           # vertical tab
+    "http://127.0.0.1\r\nHost: evil.example/v1",  # header-injection shape
+])
+def test_a_control_character_in_the_base_is_refused_without_probing(monkeypatch, base):
+    """A control character in a URL is never a typo worth honouring.
+
+    Unlike a malformed port - which the dialling parser rejects on its own, so it is let
+    through to fail as "no servers found" - a control character is the shape of a
+    header-injection attempt, and is refused before any connection is considered.
+    """
+    monkeypatch.setattr(
+        prompt, "_models_at",
+        lambda *a, **k: pytest.fail("a control character must never be probed"))
+    resp = run(routes.detect_route(FakeRequest(base=base)))
+    assert resp.status == 400
+
+
 def test_a_backslash_alone_is_a_typo_not_an_attack():
     """A backslash only smuggles when it sits in front of userinfo.
 
