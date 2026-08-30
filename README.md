@@ -139,6 +139,27 @@ merged last, so it beats the node's own guess. It may not set `messages` or `mod
 node builds the first from your references and reports the second in `debug`, so
 overriding either would make it disagree with what it actually sent.
 
+## Telling it which references are the same subject
+
+The written prompt's `subject_definitions` section labels the things the video is about —
+`<Subject 1> is the woman in <Picture 1> and <Picture 2>` — and the model works out that
+grouping by **looking** at your references. It is often right and sometimes not: three
+photos of the same person from different angles are not always obviously three photos of
+the same person.
+
+Click a tile and a small grid appears inside it: an empty square for "none", then 1–9.
+Clicking a number puts that reference in `<Subject N>`. The cells toggle and the picker
+stays open, so a reference can join several subjects — a photo of a woman in a room is
+both the character and the location — and you can work along a row one click per tile.
+The numbers you have picked stay on the tile, bottom-right.
+
+Whatever you group is sent as an explicit block the model is told to use rather than
+re-derive. Videos carry their soundtrack's `<Audio N>` into the same subject, because a
+character's clip and that character's voice are the same subject.
+
+**The numbers are yours.** Pick 1 and 5 and the prompt says `<Subject 5>` — nothing is
+renumbered or compacted behind your back.
+
 ## The tag rule
 
 Worth reading once, because the numbering is what your prompt text refers to and it is

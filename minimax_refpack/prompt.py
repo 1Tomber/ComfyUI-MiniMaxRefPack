@@ -601,6 +601,29 @@ def _build_content(
             text += "\n\nfiles: " + " · ".join(files)
     elif manifest:
         text += "\n\nReference manifest:\n" + "\n".join(manifest)
+    # The user's own subject grouping, when they gave one.
+    #
+    # <Subject N> is a label the model invents in subject_definitions, and it works out
+    # which references belong together by LOOKING at them. Saying so instead is a real
+    # quality lever - "these three photos are the same woman" is not always obvious from
+    # three photos - and it is the one thing about the reference set the user knows for
+    # certain and the model can only infer.
+    #
+    # Emitted ONCE as a block rather than annotated onto every manifest line: the grouping
+    # is a statement about the set, and repeating a subject beside each of its members
+    # invites the model to read them as separate mentions of different things.
+    #
+    # Appended after BOTH manifest styles on purpose. `concise` is chosen whenever the
+    # endpoint cannot take video, which is every local server - so wiring only the
+    # OpenRouter branch would ship a feature that does nothing for the people most likely
+    # to want it.
+    groups_by_subject = references.subject_groups()
+    if groups_by_subject:
+        lines = [f"<Subject {n}> = {', '.join(tags)}" for n, tags in groups_by_subject.items()]
+        text += (
+            "\n\nSUBJECT GROUPING (given by the user - use exactly this grouping in "
+            "subject_definitions, do not regroup):\n" + "\n".join(lines)
+        )
     return [_text_part(text)] + parts
 
 

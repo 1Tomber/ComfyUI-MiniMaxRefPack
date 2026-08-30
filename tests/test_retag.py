@@ -221,3 +221,30 @@ def test_moving_an_image_renumbers_the_tags_and_rewrites_the_prompt():
     assert [r["file"] for r in after["images"]] == ["c.png", "a.png", "b.png"]
     assert _retag("<Picture 3> wears the jacket", before, after) == \
         "<Picture 1> wears the jacket"
+
+
+def test_subjects_survive_the_references_json_round_trip():
+    """Both converters WHITELIST fields, so anything not named in them is dropped between
+    the working state and the widget - which presents as "the grouping did not save"
+    rather than as an error. This is the guard for that whole class of bug."""
+    js = """
+        (() => {
+            const list = [{kind: "image", file: "a.png", subjects: [2, 1]},
+                          {kind: "video", file: "v.mp4", use_soundtrack: true, subjects: [3]},
+                          {kind: "audio", file: "s.wav", subjects: [1]}];
+            return toReferencesList(fromReferencesList(list));
+        })()
+    """
+    text = REFPACK_JS.read_text(encoding="utf-8")
+    start = text.find("export function fromReferencesList")
+    end = text.find("export function editSummary")
+    assert start != -1 and end != -1
+    helper = text.find("function takeEdit")
+    block = text[helper:text.find("\n}\n", helper) + 3] + text[start:end]
+    proc = subprocess.run(
+        [NODE, "--input-type=module", "-e", block + f"\nconsole.log(JSON.stringify({js}));\n"],
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip())
+    assert [r.get("subjects") for r in out] == [[1, 2], [3], [1]]

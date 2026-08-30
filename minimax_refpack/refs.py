@@ -76,6 +76,37 @@ def validate_trim(trim: Any) -> list[float]:
     return [start, end]
 
 
+MAX_SUBJECT = 9
+
+
+def validate_subjects(subjects: Any) -> list[int]:
+    """A reference's <Subject N> memberships -> a sorted, de-duplicated list of 1..9.
+
+    A LIST, not a single value, because one reference can define more than one subject:
+    a photo of a woman in a room is both the character and the location, and the packaged
+    prompt has a line for each.
+
+    The numbers are the USER'S. They are never renumbered and never compacted - pick 1 and
+    5 and the prompt says <Subject 5>, because a node that quietly renamed what someone
+    clicked would be worse than a gap in the numbering.
+    """
+    if isinstance(subjects, (int, float)) and not isinstance(subjects, bool):
+        subjects = [subjects]
+    if not isinstance(subjects, (list, tuple)):
+        raise ReferenceError(f"subjects must be a list of numbers 1-{MAX_SUBJECT}, got {subjects!r}")
+    out: set[int] = set()
+    for value in subjects:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ReferenceError(f"subject must be a whole number, got {value!r}")
+        if float(value) != int(value):
+            raise ReferenceError(f"subject must be a whole number, got {value!r}")
+        n = int(value)
+        if not 1 <= n <= MAX_SUBJECT:
+            raise ReferenceError(f"subject must be between 1 and {MAX_SUBJECT}, got {n}")
+        out.add(n)
+    return sorted(out)
+
+
 @dataclass
 class Reference:
     """One reference asset, named by its filename inside the ComfyUI input directory."""
@@ -93,6 +124,10 @@ class Reference:
     # v1 pack files keep loading and re-serialising unchanged (PACK_VERSION stays 1).
     crop: list[float] | None = None
     trim: list[float] | None = None
+    # Which <Subject N> labels this reference belongs to, if the user said. Empty means
+    # "you work it out", which is what the model did for every reference before this
+    # existed. Omitted from to_dict when empty, like crop and trim.
+    subjects: list[int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"kind": self.kind, "file": self.file}
@@ -102,6 +137,8 @@ class Reference:
             d["crop"] = list(self.crop)
         if self.trim is not None:
             d["trim"] = list(self.trim)
+        if self.subjects:
+            d["subjects"] = list(self.subjects)
         return d
 
     @classmethod
@@ -114,6 +151,7 @@ class Reference:
             raise ReferenceError("reference is missing a file name")
         crop = d.get("crop")
         trim = d.get("trim")
+        subjects = d.get("subjects")
         return cls(
             kind=kind,
             file=file.strip(),
@@ -121,6 +159,10 @@ class Reference:
             # like use_soundtrack, an inapplicable field is dropped rather than fatal
             crop=validate_crop(crop) if crop is not None and kind in ("image", "video") else None,
             trim=validate_trim(trim) if trim is not None and kind in ("video", "audio") else None,
+            # Allowed on every kind, because the packaged prompt already works that way:
+            # "Content taken out of a video is still a <Subject N>", and an audio clip can
+            # be a subject's voice reference.
+            subjects=validate_subjects(subjects) if subjects is not None else None,
         )
 
 
@@ -243,6 +285,22 @@ class ReferenceSet:
             tagged.append(TaggedReference(ref=ref, slot=i, tag=f"<Audio {audio_n}>"))
 
         return tagged
+
+    def subject_groups(self) -> dict[int, list[str]]:
+        """{subject number: [tags that define it]}, in tag order, for the prompt payload.
+
+        Built over assign_tags so the tags are exactly the ones the model will be given,
+        and so a video contributes BOTH its <Video N> and its soundtrack's <Audio N> when
+        it has one - a character's clip and that character's voice are the same subject.
+        """
+        groups: dict[int, list[str]] = {}
+        for tagged in self.assign_tags():
+            for n in tagged.ref.subjects or []:
+                entry = groups.setdefault(n, [])
+                entry.append(tagged.tag)
+                if tagged.audio_tag:
+                    entry.append(tagged.audio_tag)
+        return {n: groups[n] for n in sorted(groups)}
 
     def tag_map(self) -> dict[str, str]:
         """{filename: tag} for prompt context. A video with a soundtrack appears once,
