@@ -2572,8 +2572,23 @@ function openLocalServerModal(node, anchorBtn) {
         const probeable = typed !== "" && isLoopbackUrl(typed);
         hint.textContent = "Looking for a server on this machine...";
         list.replaceChildren();
+        let unprobed = probeable ? "" : typed;
         apiDetectServers(probeable ? typed : "")
-            .then((servers) => render(servers, probeable ? "" : typed))
+            .catch(() => {
+                // The server refused the base this side thought was fine. The two
+                // predicates CAN disagree — WHATWG `new URL` normalises hosts (IPv4
+                // shorthand, trailing dots, IDNA, percent-decoding) and Python's urlparse
+                // does not — and when they do, the sweep must still happen.
+                //
+                // Without this, one odd character in api_base turned the whole button
+                // into "Could not scan" with nothing listed, while LM Studio sat there
+                // answering on 127.0.0.1:1234. On main a bad api_base was simply ignored,
+                // so that would be a worse regression than the bug being fixed. Fall back
+                // to the plain sweep and explain, exactly as for a LAN address.
+                unprobed = typed;
+                return apiDetectServers("");
+            })
+            .then((servers) => render(servers, unprobed))
             .catch((e) => { hint.textContent = `Could not scan: ${e.message}`; });
     };
 

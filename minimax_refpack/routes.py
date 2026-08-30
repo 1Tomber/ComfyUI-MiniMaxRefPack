@@ -73,27 +73,39 @@ async def probe_route(request: web.Request) -> web.Response:
 
 
 def _same_server(a: str, b: str) -> bool:
-    """Do these two URLs name the same local server, however they were spelled?
+    """Do these two URLs name the same endpoint, spelled the same way?
 
-    PRESENTATION ONLY. This exists so that typing `http://localhost:1234/v1` into
-    api_base does not list LM Studio twice, once as "custom" and once under its own
-    name. It is NOT a security check and must never be used as one: the decision about
-    what may be probed stays with endpoint.is_loopback, on the literal string the user
-    sent, precisely because normalising a host is where SSRF filters go wrong.
+    PRESENTATION ONLY, and deliberately timid. It exists so that a typed api_base which
+    is character-for-character one of the candidates is not listed twice, once as
+    "custom" and once under its own name. It is NOT a security check and must never be
+    used as one: what may be probed is decided by endpoint.is_loopback, on the literal
+    string, because normalising a host is where SSRF filters go wrong.
+
+    It does NOT fold localhost, ::1 and 127.0.0.1 together, though an earlier version
+    did. They are distinct bind addresses: a server can listen on 127.0.0.1 and not on
+    ::1. Folding them meant that typing `http://[::1]:1234/v1` DROPPED the 127.0.0.1
+    candidate from the sweep, and then the IPv6 probe found nothing - so a running LM
+    Studio vanished from the list entirely. Listing one server twice is a blemish;
+    hiding a running one is the bug this button exists to prevent.
+
+    What is folded is textual only: the case of the host (DNS is case-insensitive, so it
+    is genuinely the same target) and a trailing slash.
     """
     from urllib.parse import urlparse
 
     def key(url: str) -> tuple:
+        text = (url or "").strip().rstrip("/")
         try:
-            p = urlparse((url or "").strip().rstrip("/"))
+            p = urlparse(text)
+            # .port parses lazily and raises on a malformed authority - `p.port` on
+            # "http://127.0.0.1:1234\\v1" throws ValueError, which reached aiohttp as an
+            # uncaught 500 and a traceback in the console. It has to be INSIDE the guard;
+            # having it outside is what made a stray backslash - routine on Windows - kill
+            # the whole sweep. Falling back to the raw text just means "not equal to
+            # anything but itself", which is the safe answer for a URL we cannot parse.
+            return (p.scheme, (p.hostname or "").lower(), p.port, p.path)
         except ValueError:
-            return (url,)
-        host = (p.hostname or "").lower()
-        # Only the loopback spellings are folded together. Two different hosts that
-        # happen to share a port are different servers and stay that way.
-        if host in ("localhost", "::1"):
-            host = "127.0.0.1"
-        return (p.scheme, host, p.port, p.path)
+            return (text,)
 
     return key(a) == key(b)
 

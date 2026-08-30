@@ -229,13 +229,53 @@ def test_a_typed_base_that_is_already_a_candidate_is_listed_once(monkeypatch, ty
     assert keyed.count(True) == 1, _json(resp)["servers"]
 
 
-def test_same_server_folds_only_the_loopback_spellings():
-    assert routes._same_server("http://localhost:1234/v1", "http://127.0.0.1:1234/v1")
-    assert routes._same_server("http://[::1]:1234/v1", "http://127.0.0.1:1234/v1")
-    # ...and nothing else. Two hosts sharing a port are two servers.
+def test_same_server_folds_spellings_of_one_address_and_nothing_more():
+    # Case of the host, and a trailing slash. DNS is case-insensitive, so it really is
+    # the same target.
+    assert routes._same_server("http://127.0.0.1:1234/v1", "http://127.0.0.1:1234/v1/")
+    assert routes._same_server("http://LOCALHOST:1234/v1", "http://localhost:1234/v1")
+    # Two hosts sharing a port are two servers.
     assert not routes._same_server("http://127.0.0.1:1234/v1", "http://127.0.0.1:8080/v1")
     assert not routes._same_server("http://192.168.1.5:1234/v1", "http://10.0.0.5:1234/v1")
     assert not routes._same_server("http://127.0.0.1:1234/v1", "https://127.0.0.1:1234/v1")
+
+
+@pytest.mark.parametrize("other", ["http://localhost:1234/v1", "http://[::1]:1234/v1"])
+def test_the_loopback_spellings_are_NOT_folded_together(other):
+    """An earlier version folded localhost and ::1 onto 127.0.0.1 to avoid listing one
+    server twice. That hid running servers: they are distinct BIND addresses, so a
+    server can answer on 127.0.0.1 and not on ::1. With the fold, typing
+    http://[::1]:1234/v1 dropped the 127.0.0.1 candidate from the sweep, the IPv6 probe
+    then found nothing, and a running LM Studio disappeared from the modal entirely.
+
+    Listing one server twice is a blemish. Hiding a running one defeats the button."""
+    assert not routes._same_server(other, "http://127.0.0.1:1234/v1")
+
+
+def test_a_server_on_127_0_0_1_survives_a_typed_ipv6_base(monkeypatch):
+    """The scenario above, end to end: only the IPv4 address answers."""
+    monkeypatch.setattr(prompt, "_models_at",
+                        lambda base, *a, **k: ["m"] if "127.0.0.1:1234" in base else None)
+    resp = run(routes.detect_route(FakeRequest(base="http://[::1]:1234/v1")))
+    bases = [s["base"] for s in _json(resp)["servers"]]
+    assert "http://127.0.0.1:1234/v1" in bases, "the running server must not vanish"
+
+
+@pytest.mark.parametrize("base", [
+    "http://127.0.0.1:1234\v1",   # backslash instead of slash - routine on Windows
+    "http://127.0.0.1:99999/v1",     # port out of range
+    "http://localhost:abc/v1",       # port not a number
+    "http://127.0.0.1:-1/v1",
+])
+def test_a_loopback_base_with_an_unparseable_port_does_not_500(monkeypatch, base):
+    """urlparse().port parses LAZILY and raises on a malformed authority, so reading it
+    outside the try turned a stray character into an uncaught ValueError - HTTP 500 and a
+    traceback in the ComfyUI console, with the modal showing "Could not scan". On main
+    the same input returned 200 and an empty list, so this was a regression, not a
+    pre-existing sharp edge."""
+    monkeypatch.setattr(prompt, "_models_at", lambda *a, **k: None)
+    resp = run(routes.detect_route(FakeRequest(base=base)))
+    assert resp.status == 200
 
 
 def test_a_non_loopback_base_is_still_refused_even_though_the_sweep_now_merges(monkeypatch):
