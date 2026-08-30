@@ -344,3 +344,81 @@ def test_every_provider_field_is_a_real_declared_widget():
     for fields in _run_vis_js("PROVIDER_FIELDS").values():
         for name in fields:
             assert name in declared, name
+
+
+# ---- widgets the old layout never mentioned -----------------------------------------
+
+
+@requires_node
+def test_a_widget_the_old_layout_never_had_is_reset_not_left_holding_a_neighbour():
+    """configure() dumps the saved array onto the current widgets POSITIONALLY before any
+    of this runs, so a shorter old layout leaves every newer widget holding whatever
+    landed in it. Re-placing by name repairs only the slots the old layout names.
+
+    Loading a 0.3.1 graph left `api_base` holding 8 - that is length_seconds - and
+    `local_model_slug` holding true, the old use_openrouter boolean. Both then serialise
+    into every later save, and api_base is read verbatim the moment the provider is
+    switched to local, so a graph that never had one ends up pointing at "8".
+    """
+    out = _run_js("""(() => {
+        const CURRENT = (typeof ORDER_CURRENT !== "undefined")
+            ? ORDER_CURRENT : ORDER_0_3_3;   // the layout THIS build calls current
+        const W = ["a photo of a cat", "sk-or-key", "google/gemini", "{}", "SYS",
+                   1280, 720, 8.0, true, "medium", "auto", 2048];
+        const defaults = {};
+        for (const n of CURRENT) defaults[n] = "DEFAULT_" + n;
+        const plan = migrationPlan(W, CURRENT, defaults);
+        return {
+            apiBase: plan.api_base,
+            localSlug: plan.local_model_slug,
+            direction: plan.direction,
+            width: plan.width,
+            lengthSeconds: plan.length_seconds,
+            provider: plan.prompt_provider,
+            everyCurrentWidgetDecided:
+                CURRENT.every((n) => Object.prototype.hasOwnProperty.call(plan, n)),
+        };
+    })()""")
+    assert out["apiBase"] == "DEFAULT_api_base", "api_base kept length_seconds' value"
+    assert out["localSlug"] == "DEFAULT_local_model_slug", \
+        "local_model_slug kept the use_openrouter boolean"
+    # the repair must not have become a reset-everything
+    assert out["direction"] == "a photo of a cat"
+    assert out["width"] == 1280
+    assert out["lengthSeconds"] == 8.0
+    assert out["provider"] == "openrouter", "the 0.3.1 boolean still becomes a provider"
+    assert out["everyCurrentWidgetDecided"] is True
+
+
+@requires_node
+def test_an_unrecognised_array_leaves_everything_alone():
+    """null means "do not touch", not "reset to defaults". A layout from a future version,
+    or a hand-edited graph, must not have its widgets wiped by a migration that cannot
+    read it."""
+    out = _run_js("""(() => {
+        const CURRENT = (typeof ORDER_CURRENT !== "undefined")
+            ? ORDER_CURRENT : ORDER_0_3_3;   // the layout THIS build calls current
+        const defaults = { direction: "DEF" };
+        return {
+            garbage: migrationPlan(["only", "two"], CURRENT, defaults),
+            notAnArray: migrationPlan(null, CURRENT, defaults),
+        };
+    })()""")
+    assert out["garbage"] is None
+    assert out["notAnArray"] is None
+
+
+@requires_node
+def test_a_current_layout_array_needs_no_resets():
+    """The plan for an array already in the current layout must be exactly the saved
+    values - nothing reset, or saving and reloading would quietly revert a widget."""
+    out = _run_js("""(() => {
+        const CURRENT = (typeof ORDER_CURRENT !== "undefined")
+            ? ORDER_CURRENT : ORDER_0_3_3;   // the layout THIS build calls current
+        const W = CURRENT.map((n, i) => (n === "prompt_provider" ? "openrouter" : i));
+        const defaults = {};
+        for (const n of CURRENT) defaults[n] = "DEFAULT";
+        const plan = migrationPlan(W, CURRENT, defaults);
+        return { anyDefaults: CURRENT.filter((n) => plan[n] === "DEFAULT") };
+    })()""")
+    assert out["anyDefaults"] == []
