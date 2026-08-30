@@ -474,7 +474,7 @@ def thumbnail_png(path: str, max_edge: int = 256, crop=None, at_seconds=None, fl
     """
     import io as _io
 
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     if _guess_kind(path) == "video":
         import av
@@ -494,7 +494,11 @@ def thumbnail_png(path: str, max_edge: int = 256, crop=None, at_seconds=None, fl
                 frame = next(container.decode(stream))
         img = frame.to_image()
     else:
-        img = Image.open(path).convert("RGB")
+        # exif_transpose FIRST, exactly as load_image does. Without it a phone photo's
+        # tile showed the un-rotated sensor frame while the socket emitted the upright
+        # one, so a crop drawn on the tile selected a different region than it displayed -
+        # the very mismatch the order below is written to prevent, one step earlier.
+        img = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
 
     # Same order as every other apply point: orient, then crop. This is the one the user
     # SEES - the tile and the editor's frame both come through here - so a mismatch with
