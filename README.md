@@ -37,11 +37,11 @@ Whichever you pick, you keep the whole reference manager: the uploads, the previ
 
 Start your server, then click **Local LLM** on the node. It looks for an OpenAI-compatible server on the machine ComfyUI is running on, lists what it found and which models each one holds, and picking a model sets `prompt_provider`, `api_base` and `local_model_slug` for you in one click.
 
-Ports it looks at: 1234 (LM Studio), 11434 (Ollama), 8080 (llama.cpp), 8000 (vLLM), 1337 (Jan), 5000 (text-generation-webui). The whole sweep takes about a second. A port answering is not enough on its own, so it only reports a server whose reply actually looks like an OpenAI model list.
+Ports it looks at: 1234 (LM Studio), 11434 (Ollama), 8080 (llama.cpp), 8000 (vLLM), 1337 (Jan), 5000 (text-generation-webui) — **plus whatever is already in `api_base`**, when that address is on this machine. So a server on a port nobody standardised on is one paste and a **Rescan** away, rather than something the button can never see. The whole sweep takes about a second whatever is in the list. A port answering is not enough on its own, so it only reports a server whose reply actually looks like an OpenAI model list.
 
 Nothing found? Start LM Studio's server from its Developer tab, or run `ollama serve`, then hit **Rescan**.
 
-If your server runs somewhere else, or on a port not in that list, fill the three fields yourself:
+An `api_base` pointing off-box is left alone rather than probed, and the modal says so. That is the loopback rule below, not an oversight. Fill the three fields yourself:
 
 ```
 prompt_provider  local
