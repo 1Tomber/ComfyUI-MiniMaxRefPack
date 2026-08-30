@@ -652,6 +652,18 @@ def _build_content(
 BASE64_PLACEHOLDER = "<BASE64_STRING>"
 
 
+def _data_url_parts(url: str, fallback_kind: str) -> tuple[str, str, str]:
+    """(mime, base64 payload, everything before the comma) for a data: URL.
+
+    Shared by the image and video branches so the two cannot describe the same shape of
+    value differently - which is the whole point of a debug render nobody cross-checks.
+    """
+    b64 = url.split(",", 1)[1] if "," in url else ""
+    prefix = url.split(",", 1)[0] if "," in url else url
+    mime = url[5 : url.find(";")] if url.startswith("data:") and ";" in url else fallback_kind
+    return mime, b64, prefix
+
+
 def _part_summary(part: dict) -> tuple[str, str]:
     """(type, one-line description) for the index at the top of the render."""
     kind = part.get("type")
@@ -661,11 +673,15 @@ def _part_summary(part: dict) -> tuple[str, str]:
         if len(head) > 62:
             head = head[:59] + "..."
         return "text", head
-    if kind == "image_url":
-        url = part.get("image_url", {}).get("url", "")
-        b64 = url.split(",", 1)[1] if "," in url else ""
-        mime = url[5 : url.find(";")] if url.startswith("data:") else "image"
-        return "image_url", f"{mime}, ~{_b64_size(b64):,} bytes"
+    if kind in ("image_url", "video_url"):
+        # video_url is what _video_part emits for every video on the OpenRouter path -
+        # the pack's headline feature - and it was falling through to "(unrecognized part
+        # type)". The debug socket's contract is that the reader sees the shape that was
+        # actually sent, so the one part type most worth checking was the one it would not
+        # describe: no mime, no size, no data-URI prefix.
+        url = part.get(kind, {}).get("url", "")
+        mime, b64, _ = _data_url_parts(url, kind.split("_", 1)[0])
+        return kind, f"{mime}, ~{_b64_size(b64):,} bytes"
     if kind == "input_audio":
         ia = part.get("input_audio", {})
         return "input_audio", f"{ia.get('format', '?')}, ~{_b64_size(ia.get('data', '')):,} bytes"
@@ -747,12 +763,10 @@ def render_payload(payload: dict, ep=None) -> str:
             if kind == "text":
                 lines.append(f"[{i}/{len(parts)} · text]")
                 lines.append(part.get("text", ""))
-            elif kind == "image_url":
-                url = part.get("image_url", {}).get("url", "")
-                b64 = url.split(",", 1)[1] if "," in url else ""
-                prefix = url.split(",", 1)[0] if "," in url else url
-                mime = url[5 : url.find(";")] if url.startswith("data:") else "image"
-                lines.append(f"[{i}/{len(parts)} · image_url · {mime} · ~{_b64_size(b64):,} bytes]")
+            elif kind in ("image_url", "video_url"):
+                url = part.get(kind, {}).get("url", "")
+                mime, b64, prefix = _data_url_parts(url, kind.split("_", 1)[0])
+                lines.append(f"[{i}/{len(parts)} · {kind} · {mime} · ~{_b64_size(b64):,} bytes]")
                 lines.append(f"    {prefix},{BASE64_PLACEHOLDER}")
             elif kind == "input_audio":
                 ia = part.get("input_audio", {})
