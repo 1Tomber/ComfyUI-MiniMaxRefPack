@@ -248,3 +248,45 @@ def test_subjects_survive_the_references_json_round_trip():
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout.strip())
     assert [r.get("subjects") for r in out] == [[1, 2], [3], [1]]
+
+# ---- adding a reference is not always an append, as far as the tags go --------------
+
+
+@requires_node
+def test_uploading_a_video_renumbers_standalone_audio():
+    """The case that looks like a pure append and is not. A video's soundtrack claims its
+    <Audio N> BEFORE all standalone audio, so adding one clip shifts every standalone
+    <Audio> up by one - and a prompt that said "<Audio 1>" about the user's music silently
+    starts meaning the new video's soundtrack."""
+    before = _refs(audios=["music.wav"])
+    after = _refs(videos=[("v.mp4", True)], audios=["music.wav"])
+    assert _remap(before, after) == {"<Audio 1>": "<Audio 2>"}
+    assert _retag("the track in <Audio 1> sets the pace", before, after) == \
+        "the track in <Audio 2> sets the pace"
+
+
+@requires_node
+def test_uploading_a_muted_video_leaves_the_audio_numbering_alone():
+    before = _refs(audios=["music.wav"])
+    after = _refs(videos=[("v.mp4", False)], audios=["music.wav"])
+    assert _remap(before, after) == {}
+
+
+@requires_node
+def test_uploading_an_image_really_is_a_plain_append():
+    """Images append at the end of their own kind and touch nothing, so the retag pass
+    must be a no-op rather than a rewrite that happens to come out the same."""
+    before = _refs(images=["a.png"], audios=["m.wav"])
+    after = _refs(images=["a.png", "b.png"], audios=["m.wav"])
+    assert _remap(before, after) == {}
+
+
+@requires_node
+def test_a_probe_finding_a_silent_clip_renumbers_the_audio_after_it():
+    """syncProbes clears use_soundtrack when a clip turns out to have no audio track. That
+    releases its <Audio N>, so everything after it moves down - and this fires on loading a
+    workflow whose file was swapped for a silent one, exactly when a prompt is already
+    written against the old numbering."""
+    before = _refs(videos=[("v.mp4", True)], audios=["m.wav"])
+    after = _refs(videos=[("v.mp4", False)], audios=["m.wav"])
+    assert _remap(before, after) == {"<Audio 2>": "<Audio 1>"}

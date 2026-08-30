@@ -1105,10 +1105,17 @@ function syncProbes(node) {
             if (hasAudio === false) {
                 const cur = node._mmrpRefs.videos.find((v) => v.file === file);
                 if (cur && cur.use_soundtrack) {
-                    const next = cloneRefs(node._mmrpRefs);
-                    next.videos.find((v) => v.file === file).use_soundtrack = false;
-                    applyRefs(node, next);
-                    return; // applyRefs already repaints
+                    // Clearing the flag releases that video's <Audio N>, renumbering every
+                    // audio tag after it - so this goes through the retag pass like the
+                    // manual toggle does. It fires when a saved workflow's clip has been
+                    // replaced with a silent one, which is precisely when the user has a
+                    // prompt already written against the old numbering.
+                    withRetag(node, () => {
+                        const next = cloneRefs(node._mmrpRefs);
+                        next.videos.find((v) => v.file === file).use_soundtrack = false;
+                        return next;
+                    });
+                    return; // withRetag -> applyRefs already repaints
                 }
             }
             scheduleDraw(node);
@@ -2397,7 +2404,12 @@ async function addFiles(node, kind, files) {
         }
     }
     mlog("upload_done", { kind, files: take.length, ms: performance.now() - uploadStarted });
-    applyRefs(node, refs);
+    // Adding a reference is NOT always an append as far as the tags are concerned. A
+    // video's soundtrack claims its <Audio N> before all standalone audio, so uploading
+    // one clip shifts every standalone <Audio> up by one - and a prompt that said
+    // "<Audio 1>" about the user's music now means the new video's soundtrack. Images
+    // and standalone audio really do just append, and the retag pass is a no-op for them.
+    withRetag(node, () => refs);
 }
 
 function removeRef(node, kind, index) {
