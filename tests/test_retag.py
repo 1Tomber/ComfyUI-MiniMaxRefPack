@@ -171,3 +171,53 @@ def test_the_js_tag_rule_still_agrees_with_refs_py():
     assert [t["tag"] for t in js["audios"]] == [t.tag for t in py if t.kind == "audio"]
     assert js["videos"][0]["audioTag"] == "<Audio 1>"
     assert js["audios"][0]["tag"] == "<Audio 2>"
+
+
+# ---- moving a reference within its section -----------------------------------------
+#
+# `to` is an INSERTION point in the ORIGINAL array, which is the natural thing for a drop
+# target to be ("put it in this gap") and the source of the one off-by-one that matters:
+# once the dragged item is lifted out, every index past it shifts down by one.
+
+
+@pytest.mark.parametrize("frm,to,expected", [
+    (0, 2, ["b", "a", "c"]),      # forward: lands in the gap that was between b and c
+    (0, 3, ["b", "c", "a"]),      # to the very end
+    (2, 0, ["c", "a", "b"]),      # backward: indices before it do not shift
+    (1, 0, ["b", "a", "c"]),
+    (0, 0, ["a", "b", "c"]),      # onto its own left edge - a no-op
+    (0, 1, ["a", "b", "c"]),      # onto its own right edge - also a no-op
+    (2, 2, ["a", "b", "c"]),
+])
+@requires_node
+def test_move_ref_treats_to_as_an_insertion_point(frm, to, expected):
+    assert _run(f'moveRef(["a", "b", "c"], {frm}, {to})') == expected
+
+
+@requires_node
+def test_move_ref_does_not_mutate_the_array_it_was_given():
+    """applyRefs swaps the whole state object, and a mutation here would edit the state
+    the caller is still comparing against."""
+    out = _run('(() => { const a = ["a", "b", "c"]; moveRef(a, 0, 3); return a; })()')
+    assert out == ["a", "b", "c"]
+
+
+@pytest.mark.parametrize("frm,to", [(-1, 0), (5, 0), (0, 99)])
+@requires_node
+def test_move_ref_clamps_rather_than_throwing(frm, to):
+    """A drop can be computed from stale hit regions if a repaint lands mid-gesture, so
+    an out-of-range index has to be survivable rather than fatal."""
+    out = _run(f'moveRef(["a", "b", "c"], {frm}, {to})')
+    assert sorted(out) == ["a", "b", "c"]
+
+
+@requires_node
+def test_moving_an_image_renumbers_the_tags_and_rewrites_the_prompt():
+    """The whole point of pairing the move with the retag pass: <Picture 3> has to follow
+    the image it was written about."""
+    before = _refs(images=["a.png", "b.png", "c.png"])
+    after = {"images": _run('moveRef(%s, 2, 0)' % json.dumps(before["images"])),
+             "videos": [], "audios": []}
+    assert [r["file"] for r in after["images"]] == ["c.png", "a.png", "b.png"]
+    assert _retag("<Picture 3> wears the jacket", before, after) == \
+        "<Picture 1> wears the jacket"
