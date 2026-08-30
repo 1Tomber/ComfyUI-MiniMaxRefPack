@@ -323,6 +323,29 @@ function domWidgetMargin(node) {
 // Both are derived from the frontend's own formula rather than hardcoded, so a frontend
 // that changes `margin` stays correct: each is the size the BLOCK must end up, with the
 // margin the frontend is about to subtract added back on.
+// litegraph re-derives computedHeight from the widget's own computeSize() and adds a
+// row pad, CLOBBERING anything assigned to it. Measured on frontend 1.51.9: computeSize
+// returned 710, computedHeight came back 714, and the element was sized 714 - 2*10 = 694
+// - so writing computedHeight directly looked like it worked and did nothing, and the
+// block stayed 16px short of what its flex column needs.
+//
+// So the height is routed through computeSize instead, pre-compensated for both the pad
+// and the margin. The pad is MEASURED rather than hardcoded to 4: it is litegraph's
+// number, not ours, and the first call's default corrects itself on the next one.
+function domWidgetHeightPad(node) {
+    const w = node._mmrpDomWidget;
+    if (!w || typeof w.computedHeight !== "number" || typeof w._mmrpReported !== "number") {
+        return 4;
+    }
+    const pad = w.computedHeight - w._mmrpReported;
+    return pad >= 0 && pad < 40 ? pad : 4;
+}
+
+// What computeSize must report for the ELEMENT to end up `wanted` tall.
+function reportedHeightFor(node, wanted) {
+    return wanted + domWidgetMargin(node) * 2 - domWidgetHeightPad(node);
+}
+
 function syncDomWidgetSize(node) {
     const w = node._mmrpDomWidget;
     if (!w) return;
@@ -341,6 +364,8 @@ function syncDomWidgetSize(node) {
     try {
         w.width = CONTENT.width - CONTENT.pad * 2 + margin * 2;
     } catch (e) { /* frontend owns it */ }
+    // Still written, because a frontend that does NOT recompute it will use this value
+    // directly. Where litegraph does recompute it, computeSize below is what lands.
     try { w.computedHeight = CONTENT.height + margin * 2; } catch (e) { /* ditto */ }
 }
 
@@ -2847,7 +2872,13 @@ app.registerExtension({
             // assumes (uploadsH/promptH/gap), the canvas height is CANVAS_ROWS.height.
             // Read by litegraph for the node's layout — NOT by the frontend for the
             // block's size, which comes from width/computedHeight. See syncDomWidgetSize.
-            domWidget.computeSize = () => [CONTENT.width - CONTENT.pad * 2, CONTENT.height];
+            // The height litegraph turns into computedHeight, and thence into the
+            // element's height - pre-compensated so the element lands on CONTENT.height.
+            domWidget.computeSize = () => {
+                const reported = reportedHeightFor(node, CONTENT.height);
+                domWidget._mmrpReported = reported;
+                return [CONTENT.width - CONTENT.pad * 2, reported];
+            };
             syncDomWidgetSize(node);
             liveNodes.add(node);
 
