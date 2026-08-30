@@ -11,16 +11,29 @@
  * The ⚙ opens a modal for the `system_prompt` widget — never drawn on the node body,
  * only editable behind that modal (see openSystemPromptModal).
  *
- * FIXED SIZE, per spec: "I would like this node to have a fixed size that cannot be
- * moved" / "I don't want the canvas to change at all — always the same row. It just
- * adds or removes content." So: node.resizable = false, and onResize / setSize /
- * computeSize all clamp to fixedSize() regardless of input — a restored workflow, a
- * paste, or a frontend quirk cannot put the node at another size. The three rows are
- * always drawn at full tile height whether they hold 0 or 9 items; only their
- * CONTENTS change. Every piece of machinery that existed to cope with a changing
- * size (content measurement, resize-driven relayout, width floors, the
- * restored-size protection) is deleted — the geometry below is arithmetic over
- * constants, not measurement.
+ * RESIZABLE, WITH DERIVED HEIGHT. This node was fixed at 1340xN, per spec: "I would
+ * like this node to have a fixed size that cannot be moved". That pin is gone, because
+ * it was unshippable: 1340 CSS px is wider than plenty of ComfyUI viewports (measured
+ * 1036 on the machine this was rewritten for), so the node could not be seen whole at
+ * 1:1 zoom no matter what the user did. Tiles WRAP now.
+ *
+ * Three sizes, and only two of them are the user's:
+ *   width   — dragged, floored by minNodeWidth() at whatever the BUTTON ROW needs
+ *             (measured, because it depends on the font and on which buttons are shown)
+ *   media   — derived from the reference counts and the width; adding a reference that
+ *             starts a new line makes the NODE taller, it never steals from the prompt
+ *   prompt  — dragged, stored per node in the references_json envelope so it survives a
+ *             reload without costing a widget slot
+ *
+ * A height drag is therefore read as "make the prompt this much taller"
+ * (absorbHeightIntoPrompt), because everything else in the block has the height it
+ * needs rather than the height someone picked.
+ *
+ * WHAT SURVIVED THE REWRITE, and matters more than the pin did: there is still NO
+ * SCROLLING. Nothing is clipped, nothing hides behind a scrollbar, the section just gets
+ * taller. So draw() is still one pass with no scroll offset threaded through hit-testing,
+ * no clip region to keep in step with the shared <video> overlay, and paint still never
+ * calls setSize — relayout() does that, from the places that change the content.
  *
  * RENDERING: the reference rows are a single <canvas>, not per-cell DOM — the LTX
  * Director hybrid (ltx_director.js draws its timeline onto one canvas at :2703 but
@@ -249,56 +262,136 @@ const CL = {
     addBtn: 44,
     addGap: 24,
 };
-CL.stripH = CL.stripPad * 2 + CL.tile;
+// ---------------------------------------------------------------------------
+// Layout. THIS USED TO BE FIXED and is not any more.
+//
+// The node was pinned at 1340×N because the longest row is nine image tiles and that
+// width guaranteed they always fit, which is what let the whole file skip scroll
+// machinery. The pin turned out to be unshippable: 1340 CSS px is wider than plenty of
+// ComfyUI viewports (measured 1036 on the machine this was rewritten for), so the node
+// could not be seen whole at 1:1 zoom no matter what the user did.
+//
+// So tiles WRAP instead. What is preserved is the property that actually mattered — no
+// scrolling, ever. Nothing is clipped and nothing hides behind a scrollbar; the section
+// simply gets taller, and so does the node. That keeps draw() a single pass with no
+// scroll offset to thread through hit-testing and no clip region to keep in step with
+// the shared <video> overlay.
+//
+// The three sizes that follow are the whole model:
+//   width   — the user's, dragged, floored so the uploads row and one tile still fit
+//   media   — derived from the reference counts and the width, never dragged
+//   prompt  — the user's, stored per node; adding media does NOT steal from it
+// ---------------------------------------------------------------------------
 
-// The rows never move: every section is always drawn at full tile height, 0 items or
-// 9. Static layout, computed once — this is the whole point of the fixed-size node.
-const CANVAS_ROWS = (() => {
+// How many tiles fit on one line, given the drawable width inside the slab.
+//
+// The add square is reserved for unconditionally, not just when a row is full. That is
+// what makes `linesFor` below correct without a special case: any line holding a full
+// `perRow` tiles is guaranteed to have room for the square after it, so the square never
+// forces an extra line of its own and never lands off the edge at cap.
+// >>> MMRP-LAYOUT
+function tilesPerRow(viewW) {
+    const room = viewW - CL.addGap - CL.addBtn + CL.gap;
+    return Math.max(1, Math.floor(room / (CL.tile + CL.gap)));
+}
+
+function linesFor(count, perRow) {
+    return Math.max(1, Math.ceil(count / perRow));  // 1 even when empty: the add square
+}
+
+// Where every section starts, how tall each is, and how tall the slab ends up. Computed
+// per paint from the live counts — the thing the old CANVAS_ROWS constant could not do.
+function computeCanvasRows(refs, viewW) {
+    const perRow = tilesPerRow(viewW);
     const rows = [];
     let y = CL.padTop;
     for (const kind of KINDS) {
-        rows.push({ kind, y, stripY: y + CL.headerH + CL.headGap });
-        y += CL.headerH + CL.headGap + CL.stripH + CL.rowGap;
+        const lines = linesFor(refs[`${kind}s`].length, perRow);
+        const stripH = CL.stripPad * 2 + lines * CL.tile + (lines - 1) * CL.gap;
+        rows.push({ kind, y, stripY: y + CL.headerH + CL.headGap, perRow, lines, stripH });
+        y += CL.headerH + CL.headGap + stripH + CL.rowGap;
     }
     // The trailing rowGap doubles as the slab's bottom padding.
-    return { rows, height: y };
-})();
+    return { rows, perRow, height: y };
+}
+// <<< MMRP-LAYOUT
 
-// Fixed block geometry. The DOM heights (uploadsH, promptH, gap) are pinned in
-// refpack.css to the same values — the two must agree, there is no measurement.
-// THE WIDTH PRESERVES THE NO-SCROLL INVARIANT: the longest row is 9 image tiles
-// (9×131 + 8×6 = 1227px) plus the 24px add-gap and the 44px add square, which is
-// drawn dimmed even at cap = 1295px of row viewport; +2×10 slab padding = 1315
-// canvas; +2×10 block inset = 1335 node — fixed at 1340 for slack. That invariant
-// is why no scroll machinery exists; change tile/gap/x0/pad/addBtn/addGap only
-// together with this width.
 const CONTENT = {
-    width: 1340,
-    pad: 10, // side inset of the DOM block within the node
-    uploadsH: 30, // .mmrp-uploads fixed height
-    promptH: 110, // .mmrp-direction fixed height — clearly smaller than a canvas row
+    uploadsH: 30, // .mmrp-uploads fixed height, pinned in refpack.css
     gap: 8, // .mmrp-block flex gap
+    promptH: 110, // starting height of .mmrp-direction, before the user drags it
+    minPromptH: 44, // about two lines — below this the box stops being writable
+    // Floor for the drawable slab width: one tile plus the add square. Narrower than
+    // this and a section cannot show a single reference alongside its own add button.
+    minRowW: CL.tile + CL.addGap + CL.addBtn,
+    // Fallback until the uploads row has been laid out and can be measured. Roughly what
+    // its six buttons occupy; only ever used for the beat before the first measurement.
+    fallbackUploadsW: 620,
 };
-CONTENT.height =
-    CONTENT.uploadsH + CONTENT.gap + CANVAS_ROWS.height + CONTENT.gap + CONTENT.promptH;
 
-// The ONE node size. Height floors against the 19 output sockets; widgetY is where
-// litegraph placed the DOM block below the native widgets (fallback for the beat
-// before the first layout assigns last_y).
-function fixedSize(node) {
+// The narrowest this node may be dragged.
+//
+// The binding constraint is the BUTTON ROW, not the tiles: three upload buttons, two
+// config buttons, Local LLM and the gear come to far more than one tile plus an add
+// square. It is measured rather than hardcoded because its width depends on the font the
+// user's ComfyUI is running and on which buttons are currently shown (Local LLM hides
+// off `local`), and a hardcoded guess would either clip the row or refuse widths that
+// were fine. scrollWidth is the row's natural width because it is `flex-wrap: nowrap`.
+function minNodeWidth(node) {
+    const row = node._mmrpBody && node._mmrpBody.uploadRow;
+    const uploads = (row && row.scrollWidth) || CONTENT.fallbackUploadsW;
+    const slab = Math.max(uploads, CONTENT.minRowW + CL.x0 * 2);
+    return Math.ceil(slab + domWidgetMargin(node) * 2);
+}
+
+// The prompt box's height, which is the user's and is remembered. Adding a reference
+// grows the NODE and leaves this untouched — a flex remainder would have shrunk the text
+// box every time a tile wrapped onto a new line, which is the opposite of wanted.
+function promptHeightOf(node) {
+    const stored = node && node._mmrpPromptH;
+    return Math.max(CONTENT.minPromptH, Number.isFinite(stored) ? stored : CONTENT.promptH);
+}
+
+// Drawable width inside the black slab, for the node's current width.
+function slabViewW(node) {
+    const width = Math.max((node.size && node.size[0]) || 0, minNodeWidth(node));
+    return width - domWidgetMargin(node) * 2 - CL.x0 * 2;
+}
+
+// The layout this node paints at right now. Cached on the node so draw(), hit-testing
+// and the size math all read one answer rather than three that can disagree.
+function layoutOf(node) {
+    const rows = computeCanvasRows(node._mmrpRefs || { images: [], videos: [], audios: [] },
+                                   slabViewW(node));
+    node._mmrpLayout = rows;
+    return rows;
+}
+
+function contentHeight(node) {
+    return CONTENT.uploadsH + CONTENT.gap + layoutOf(node).height
+        + CONTENT.gap + promptHeightOf(node);
+}
+
+// The node's size for its current content. Width is the user's, floored; height is
+// derived and is never the user's directly — dragging the bottom edge is interpreted as
+// resizing the PROMPT (see installSizeGuards), which then lands back here.
+function nodeSize(node) {
     const widgetY = (node._mmrpDomWidget && node._mmrpDomWidget.last_y) || 80;
     const outputsMin = ((node.outputs && node.outputs.length) || 1) * 20 + 40;
-    // The DOM widget occupies computedHeight, which is CONTENT.height PLUS its margin on
-    // both edges (that is the frontend's own formula - see syncDomWidgetSize). Budgeting
-    // only CONTENT.pad here left the block's bottom margin eating the node's bottom
-    // inset, so .mmrp-direction sat flush against the node frame.
+    // Height is the content's; the node must also budget the DOM widget's own margin,
+    // which the frontend subtracts on both edges (its formula - see syncDomWidgetSize).
+    // Budgeting less than that lets the block's bottom margin eat the node's inset and
+    // leaves .mmrp-direction flush against the node frame.
     const margin = domWidgetMargin(node);
-    return [CONTENT.width, Math.max(widgetY + CONTENT.height + margin * 2, outputsMin)];
+    const width = Math.max((node.size && node.size[0]) || 0, minNodeWidth(node));
+    return [width, Math.max(widgetY + contentHeight(node) + margin * 2, outputsMin)];
 }
 
 // The frontend's per-widget margin, which it subtracts from both axes when it sizes the
-// element. Read from the widget rather than assumed, and defaulted to the 10 it has been
-// on every frontend measured.
+// element. Under a resizable node this margin IS the block's inset within the node -
+// there is no second padding on top of it - so it appears in every size calculation.
+// Read off the widget rather than assumed, defaulting to the 10 it has been on every
+// frontend measured.
 function domWidgetMargin(node) {
     const m = node._mmrpDomWidget && node._mmrpDomWidget.margin;
     return typeof m === "number" ? m : 10;
@@ -355,18 +448,15 @@ function syncDomWidgetSize(node) {
     // threw a TypeError that aborted loading ANY workflow containing this node. Measured
     // `width` as a plain property on 1.51.9, but a frontend is free to make it an
     // accessor tomorrow, and a mis-sized node beats an unloadable one.
-    // The BLOCK should end up CONTENT.width - 2*CONTENT.pad wide, which is what
-    // refpack.css is written for and what the no-scroll invariant needs (1295px of row
-    // viewport for nine image tiles plus the add square). The frontend subtracts its own
-    // margin, so add it back rather than passing the node width and hoping margin is 10 -
-    // at margin 12 that would leave the block 1316 and clip the ninth tile, silently,
-    // because there is deliberately no scroll machinery to reveal it.
-    try {
-        w.width = CONTENT.width - CONTENT.pad * 2 + margin * 2;
-    } catch (e) { /* frontend owns it */ }
-    // Still written, because a frontend that does NOT recompute it will use this value
-    // directly. Where litegraph does recompute it, computeSize below is what lands.
-    try { w.computedHeight = CONTENT.height + margin * 2; } catch (e) { /* ditto */ }
+    // Both writes name the size the BLOCK must end up, with the margin the frontend is
+    // about to subtract added back on. Width tracks the node, because the node is the
+    // user's to drag now; height is whatever the content came to.
+    //
+    // computedHeight is written for a frontend that uses it directly. Where litegraph
+    // recomputes it from computeSize (1.51.9 does), the pre-compensated value that
+    // computeSize reports is what actually lands - see reportedHeightFor.
+    try { w.width = nodeSize(node)[0]; } catch (e) { /* frontend owns it */ }
+    try { w.computedHeight = contentHeight(node) + margin * 2; } catch (e) { /* ditto */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -1185,10 +1275,26 @@ function draw(node) {
     const canvas = body.canvas;
     const ctx = body.ctx;
     const cssW = canvas.clientWidth;
-    const cssH = canvas.clientHeight;
     // Not attached / zero-sized yet (V3 mounts the DOM widget asynchronously) —
     // the ResizeObserver fires once real dimensions arrive and repaints then.
-    if (!cssW || !cssH) return;
+    if (!cssW) return;
+
+    // The slab's height follows its content, and its content depends on how many tiles
+    // fit ACROSS — so the layout is derived from the width, and the height applied from
+    // the layout. Assigning the style only when it actually differs is what stops the
+    // ResizeObserver turning this into a repaint loop: one extra frame on the paint where
+    // a section gains or loses a line, then stable.
+    //
+    // Note this does NOT call setSize. draw() has never been allowed to, because paint
+    // recursing into layout is how the old resize-driven relayout bugs happened; the node
+    // is resized by relayout() from the places that change the content instead.
+    const layout = computeCanvasRows(node._mmrpRefs, cssW - CL.x0 * 2);
+    node._mmrpLayout = layout;
+    const wantH = `${layout.height}px`;
+    if (canvas.style.height !== wantH) canvas.style.height = wantH;
+
+    const cssH = canvas.clientHeight;
+    if (!cssH) return;
 
     // HiDPI: back the canvas at devicePixelRatio and scale the context so all
     // layout math (and hit regions) stay in CSS px while text/thumbs stay sharp.
@@ -1217,12 +1323,21 @@ function draw(node) {
     node._mmrpHit = { regions };
     const playing = node._mmrpPlaying;
 
-    for (const row of CANVAS_ROWS.rows) {
+    // `layout` was computed above, from the width, before the canvas height was applied.
+    // Everything below still paints in one pass with no scroll offset, because the slab
+    // grows to fit rather than clipping.
+    for (const row of layout.rows) {
         const kind = row.kind;
         const arr = refs[`${kind}s`];
         const taggedArr = tagged[`${kind}s`];
         const atCap = arr.length >= CAPS[kind];
+        const perRow = row.perRow;
         const tileY = row.stripY + CL.stripPad;
+        // Top-left of tile i, wrapping every perRow. The single source of tile geometry
+        // in the file — hit regions below are all derived from these two, so a tile and
+        // its own delete chip cannot end up on different lines.
+        const tileXOf = (i) => CL.x0 + (i % perRow) * (CL.tile + CL.gap);
+        const tileYOf = (i) => tileY + Math.floor(i / perRow) * (CL.tile + CL.gap);
 
         // Divider at the midpoint of the inter-section gap — per spec: a viewer
         // should never be unsure which section a tile belongs to.
@@ -1244,7 +1359,8 @@ function draw(node) {
         ctx.fillText(`${SECTION_LABEL[kind]} (${arr.length}/${CAPS[kind]})`, CL.x0, row.y + 12);
 
         arr.forEach((ref, i) => {
-            const tx = CL.x0 + i * (CL.tile + CL.gap);
+            const tx = tileXOf(i);
+            const ty = tileYOf(i);
             const t = taggedArr[i];
             // "vid_audio <Audio 1>" not bare "<Audio 1>": the tag is what MiniMax binds
             // and has to stay visible, but unlabelled it reads as a standalone audio ref.
@@ -1279,11 +1395,11 @@ function draw(node) {
                     playing && playing.kind === kind && playing.file === ref.file ? "pause" : "play";
             }
 
-            drawTile(ctx, kind, ref, lines, tx, tileY, selected, soundState, badgeH, playState);
+            drawTile(ctx, kind, ref, lines, tx, ty, selected, soundState, badgeH, playState);
 
             // Hit regions, most specific last — hitTest scans in reverse so the
             // play/delete/soundtrack/edit affordances win over the tile containing them.
-            regions.push({ type: "tile", kind, index: i, file: ref.file, x: tx, y: tileY, w: CL.tile, h: CL.tile });
+            regions.push({ type: "tile", kind, index: i, file: ref.file, x: tx, y: ty, w: CL.tile, h: CL.tile });
             if (!ref.missing) {
                 regions.push({
                     type: "edit",
@@ -1291,7 +1407,7 @@ function draw(node) {
                     index: i,
                     file: ref.file,
                     x: tx + 3,
-                    y: tileY + 3,
+                    y: ty + 3,
                     w: CL.del,
                     h: CL.del,
                 });
@@ -1303,7 +1419,7 @@ function draw(node) {
                     index: i,
                     file: ref.file,
                     x: tx + 3,
-                    y: tileY + CL.tile - badgeH - CL.sound - 3,
+                    y: ty + CL.tile - badgeH - CL.sound - 3,
                     w: CL.sound,
                     h: CL.sound,
                 });
@@ -1314,12 +1430,12 @@ function draw(node) {
                 index: i,
                 file: ref.file,
                 x: tx + CL.tile - CL.del - 3,
-                y: tileY + 3,
+                y: ty + 3,
                 w: CL.del,
                 h: CL.del,
             });
             if (playState) {
-                const cy = kind === "audio" ? tileY + 80 : tileY + 58;
+                const cy = kind === "audio" ? ty + 80 : ty + 58;
                 regions.push({
                     type: "play",
                     kind,
@@ -1330,7 +1446,7 @@ function draw(node) {
                     w: CL.playR * 2,
                     h: CL.playR * 2,
                     tileX: tx,
-                    tileY,
+                    tileY: ty,
                 });
             }
         });
@@ -1340,10 +1456,17 @@ function draw(node) {
         // separating gap) otherwise. It never centres itself, so it never jumps;
         // it only ever moves rightwards as tiles are added. Vertically centred
         // on the strip. Drawn dimmed at cap, and only clickable below cap.
-        const ax = arr.length
-            ? CL.x0 + arr.length * CL.tile + (arr.length - 1) * CL.gap + CL.addGap
+        // Still "always where the next tile would go", which now means the end of the
+        // LAST LINE rather than the end of the only one. tilesPerRow reserved room for
+        // this square in a full line, so it can never be pushed off the right edge.
+        const onLastLine = arr.length === 0
+            ? 0
+            : (arr.length % perRow === 0 ? perRow : arr.length % perRow);
+        const ax = onLastLine
+            ? CL.x0 + onLastLine * (CL.tile + CL.gap) - CL.gap + CL.addGap
             : CL.x0;
-        const ay = tileY + Math.round((CL.tile - CL.addBtn) / 2);
+        const ay = tileY + Math.max(0, row.lines - 1) * (CL.tile + CL.gap)
+            + Math.round((CL.tile - CL.addBtn) / 2);
         drawAddSquare(ctx, ax, ay, atCap);
         if (!atCap) {
             regions.push({ type: "add", kind, x: ax, y: ay, w: CL.addBtn, h: CL.addBtn });
@@ -1497,12 +1620,18 @@ function widgetByName(node, name) {
 //
 // A reference set we cannot read is recoverable — the user re-adds the files. A workflow
 // that will not open is not. So: parse defensively, fall back to empty, warn once.
-function parseRefsValue(widget) {
+function parseRefsValue(widget, node) {
     if (!widget) return emptyRefs();
     const raw = widget.value;
     if (typeof raw !== "string" || !raw.trim()) return emptyRefs();
     try {
         const parsed = JSON.parse(raw);
+        // The envelope carries the prompt box's height alongside the references. It rides
+        // HERE rather than in a widget of its own because widgets_values is positional -
+        // appending one would be another slot to migrate forever, for a UI preference.
+        // Python reads this field's `references` key and never writes the widget back, so
+        // an extra key survives every round trip untouched.
+        if (parsed && Number.isFinite(parsed.prompt_h)) node._mmrpPromptH = parsed.prompt_h;
         return fromReferencesList((parsed && parsed.references) || []);
     } catch (e) {
         console.warn(
@@ -1525,7 +1654,36 @@ function syncReferencesWidget(node) {
         const src = flat[i];
         return src && src.missing ? { ...r, missing: true } : r;
     });
-    w.value = JSON.stringify({ references: list });
+    const envelope = { references: list };
+    // Only written once the user has actually dragged it, so a workflow that never
+    // touched the prompt box stays byte-identical to what earlier builds wrote.
+    if (Number.isFinite(node._mmrpPromptH)) envelope.prompt_h = node._mmrpPromptH;
+    w.value = JSON.stringify(envelope);
+}
+
+// The prompt box is the one element whose height is a preference rather than a
+// consequence, so it is the one element with an inline height.
+function syncPromptHeight(node) {
+    const el = node._mmrpBody && node._mmrpBody.directionInput;
+    if (el) el.style.height = `${promptHeightOf(node)}px`;
+}
+
+// Writing references_json on every frame of a drag would spam the undo stack, so the
+// height is persisted once the drag settles.
+function schedulePersistPromptH(node) {
+    clearTimeout(node._mmrpPromptHTimer);
+    node._mmrpPromptHTimer = setTimeout(() => syncReferencesWidget(node), 250);
+}
+
+// Re-derive the node's size after something changed the CONTENT rather than the window.
+// Kept out of draw() on purpose: paint recursing into layout is the bug class the
+// fixed-size rewrite was built to kill, and it stays dead.
+function relayout(node) {
+    try {
+        if (node.setSize) node.setSize(nodeSize(node));
+    } catch (e) { /* pre-mount, before last_y exists */ }
+    scheduleDraw(node);
+    app.graph?.setDirtyCanvas(true, true);
 }
 
 function applyRefs(node, refs) {
@@ -1533,6 +1691,9 @@ function applyRefs(node, refs) {
     node._mmrpRefs = refs;
     syncReferencesWidget(node);
     renderNodeBody(node);
+    // A reference that starts or ends a line changes the slab's height, and the node has
+    // to follow it. This is the "adding media is a height change" half of the layout.
+    relayout(node);
 }
 
 async function addFiles(node, kind, files) {
@@ -1666,10 +1827,14 @@ function buildCustomBlock(node) {
     uploadRow.appendChild(gearBtn);
 
     container.appendChild(uploadRow);
+    // uploadRow goes onto _mmrpBody below: minNodeWidth() measures its natural width,
+    // and that is what sets the floor the node may be dragged to.
 
     const canvas = document.createElement("canvas");
     canvas.className = "mmrp-canvas";
-    canvas.style.height = `${CANVAS_ROWS.height}px`; // fixed, set once
+    // Height is applied per paint from the computed layout (see draw). Seeded here
+    // only so the element has a box before the first paint measures it.
+    canvas.style.height = `${computeCanvasRows(emptyRefs(), 600).height}px`;
     canvas.addEventListener("mousedown", (e) => onCanvasMouseDown(node, e));
     canvas.addEventListener("dblclick", (e) => onCanvasDblClick(node, e));
     // Keep litegraph's node context menu off the tiles (matches the reference's
@@ -1718,6 +1883,7 @@ function buildCustomBlock(node) {
 
     node._mmrpBody = {
         root: container,
+        uploadRow,
         uploadButtons,
         fileInputs,
         canvas,
@@ -2439,7 +2605,7 @@ function setWidgetVisible(w, visible) {
         w.hidden = !visible;
         if (!w.options) w.options = {};
         w.options.hidden = !visible;
-        // [0,0] removes the row from litegraph's layout, which is what lets fixedSize()
+        // [0,0] removes the row from litegraph's layout, which is what lets nodeSize()
         // shrink the node by exactly the hidden rows on the next pass.
         w.computeSize = visible ? undefined : () => [0, 0];
         // Load-bearing, and its absence was a real bug (2026-08-17): zero height keeps a
@@ -2484,7 +2650,7 @@ function syncLocalBtn(node) {
     if (node.setSize) {
         setTimeout(() => {
             try {
-                node.setSize(fixedSize(node));
+                node.setSize(nodeSize(node));
                 app.graph?.setDirtyCanvas(true, true);
             } catch (_) {}
         }, 0);
@@ -2787,8 +2953,27 @@ function installSelectionHandlers(node) {
 // the old "never stomp a restored size" rule: there is no user-chosen size.
 // ---------------------------------------------------------------------------
 
+// A height the user asked for, turned into a prompt-box height and remembered.
+//
+// The node's height is derived from its content, so there is nothing to store it in
+// directly — but the drag has to mean SOMETHING or the handle would fight the user. It
+// means "make the prompt this much taller", which is the only part of the block whose
+// height is a preference rather than a consequence. Everything above the prompt keeps
+// the height it needs, so dragging shorter stops when the prompt hits its floor.
+function absorbHeightIntoPrompt(node, requestedH) {
+    const widgetY = (node._mmrpDomWidget && node._mmrpDomWidget.last_y) || 80;
+    const fixed = CONTENT.uploadsH + CONTENT.gap + layoutOf(node).height + CONTENT.gap;
+    const wanted = requestedH - widgetY - domWidgetMargin(node) * 2 - fixed;
+    if (!Number.isFinite(wanted)) return;
+    node._mmrpPromptH = Math.max(CONTENT.minPromptH, Math.round(wanted));
+    syncPromptHeight(node);
+    schedulePersistPromptH(node);
+}
+
 function installSizeGuards(node) {
-    node.resizable = false;
+    // Resizable now, where it used to be pinned. Width is genuinely the user's; height
+    // is still derived, and a height drag is re-read as a prompt resize just above.
+    node.resizable = true;
 
     // The block's own size rides along with all three: the node size and the DOM widget
     // size are one decision, and letting them drift is what produced a 254px slab in a
@@ -2796,7 +2981,11 @@ function installSizeGuards(node) {
     // from computeSize — the hottest of the three — costs two property writes.
     const origOnResize = node.onResize;
     node.onResize = function (size) {
-        const f = fixedSize(this);
+        // The ONE place a user-chosen size is read rather than overwritten. Take the
+        // height as a request for the prompt box first, then re-derive: whatever the
+        // prompt could not absorb (because the media needs it) is simply not granted.
+        absorbHeightIntoPrompt(this, size[1]);
+        const f = nodeSize(this);
         size[0] = f[0];
         size[1] = f[1];
         syncDomWidgetSize(this);
@@ -2806,17 +2995,25 @@ function installSizeGuards(node) {
     const origComputeSize = node.computeSize;
     node.computeSize = function () {
         // origComputeSize still runs for its side effects on some frontends, but its
-        // answer is discarded — the size is a constant.
+        // answer is discarded — ours is derived from the content.
         if (origComputeSize) origComputeSize.apply(this, arguments);
-        const f = fixedSize(this);
-        this.min_size = [f[0], f[1]];
+        const f = nodeSize(this);
+        // min_size is what stops litegraph dragging below the floor. The width floor is
+        // real (the button row); the height floor is the content, so the two together
+        // mean "you may make it wider, and taller, and nothing else".
+        this.min_size = [minNodeWidth(this), f[1]];
         syncDomWidgetSize(this);
         return [f[0], f[1]];
     };
 
     const origSetSize = node.setSize;
     node.setSize = function (size) {
-        const f = fixedSize(this);
+        // Width is honoured (floored); height is re-derived. setSize is what a restored
+        // workflow comes through, so this is where a saved width survives a reload.
+        if (Array.isArray(size) && Number.isFinite(size[0])) {
+            this.size[0] = Math.max(size[0], minNodeWidth(this));
+        }
+        const f = nodeSize(this);
         size[0] = f[0];
         size[1] = f[1];
         if (origSetSize) origSetSize.call(this, size);
@@ -2842,7 +3039,7 @@ app.registerExtension({
             const node = this;
 
             const refsWidget = widgetByName(node, "references_json");
-            node._mmrpRefs = parseRefsValue(refsWidget);
+            node._mmrpRefs = parseRefsValue(refsWidget, node);
             const ivRefs = hideWidget(refsWidget);
 
             const directionWidget = widgetByName(node, "direction");
@@ -2869,15 +3066,17 @@ app.registerExtension({
             });
             node._mmrpDomWidget = domWidget;
             // Constant, by construction: the CSS pins the DOM heights this arithmetic
-            // assumes (uploadsH/promptH/gap), the canvas height is CANVAS_ROWS.height.
+            // assumes (uploadsH/gap), the canvas height comes from the live layout.
             // Read by litegraph for the node's layout — NOT by the frontend for the
             // block's size, which comes from width/computedHeight. See syncDomWidgetSize.
-            // The height litegraph turns into computedHeight, and thence into the
-            // element's height - pre-compensated so the element lands on CONTENT.height.
+            // The size litegraph turns into computedHeight and thence into the
+            // element's height, pre-compensated for its pad and the frontend's margin so
+            // the element lands on exactly contentHeight.
             domWidget.computeSize = () => {
-                const reported = reportedHeightFor(node, CONTENT.height);
+                const margin = domWidgetMargin(node);
+                const reported = reportedHeightFor(node, contentHeight(node));
                 domWidget._mmrpReported = reported;
-                return [CONTENT.width - CONTENT.pad * 2, reported];
+                return [nodeSize(node)[0] - margin * 2, reported];
             };
             syncDomWidgetSize(node);
             liveNodes.add(node);
@@ -2889,6 +3088,7 @@ app.registerExtension({
                 if (directionWidget.callback) directionWidget.callback(directionWidget.value);
             });
 
+            syncPromptHeight(node);
             installSizeGuards(node);
             installSelectionHandlers(node);
             watchProviderWidget(node);
@@ -2925,13 +3125,16 @@ app.registerExtension({
                 syncLocalBtn(this);
                 const rw = widgetByName(this, "references_json");
                 stopPreview(this);
-                this._mmrpRefs = parseRefsValue(rw);
+                this._mmrpRefs = parseRefsValue(rw, this);
                 const dw = widgetByName(this, "direction");
                 if (this._mmrpBody) this._mmrpBody.directionInput.value = dw ? dw.value || "" : "";
                 this._mmrpSelected = null;
+                // parseRefsValue may have restored a stored prompt height off the
+                // envelope; the box has to be told before the size is re-derived.
+                syncPromptHeight(this);
                 // configure() writes the serialized size straight onto node.size,
                 // bypassing our setSize wrapper — re-assert the fixed size.
-                this.setSize(fixedSize(this));
+                this.setSize(nodeSize(this));
                 renderNodeBody(this);
                 return out;
             };
@@ -2939,7 +3142,7 @@ app.registerExtension({
             // last_y isn't assigned until litegraph's first layout pass — re-assert
             // the fixed size once it exists so the height lands on the real widget top.
             setTimeout(() => {
-                node.setSize(fixedSize(node));
+                node.setSize(nodeSize(node));
                 app.graph?.setDirtyCanvas(true, true);
                 scheduleDraw(node);
             }, 50);

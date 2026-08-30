@@ -189,7 +189,8 @@
    The black background is what announces "this is the reference area" against the
    grey node; the 1px edge and everything inside are drawn on the canvas itself
    (a CSS border would offset hit-test coordinates from the drawn content box).
-   Height is set inline once from CANVAS_ROWS.height — fixed, like everything else.
+   Height is set inline on every paint from the computed layout: the slab grows a line
+   when a section wraps, and shrinks again when it does not. Never scrolls.
    display:block kills the inline-baseline gap under the canvas (same fix as the
    reference's .pr-canvas). */
 
@@ -226,6 +227,10 @@
 
 .mmrp-direction {
     width: 100%;
+    /* Height is set inline from the stored prompt height (promptHeightOf). It is the one
+       element in the block whose size is a PREFERENCE rather than a consequence, so it is
+       the one with an inline height; this is the floor if that has not been applied yet. */
+    min-height: 44px;
     height: 110px;
     box-sizing: border-box;
     background: #1e1e1e;
@@ -235,7 +240,11 @@
     padding: 8px 10px;
     font-size: 13px;
     line-height: 1.45;
-    resize: none; /* the node is fixed-size; the box is too */
+    /* No handle of its own, deliberately, even though the node resizes now. Two drag
+       handles for one height would fight: the node's edge already resizes this box (see
+       absorbHeightIntoPrompt), and a CSS handle would set a height the next relayout
+       overwrote. One control, one owner. */
+    resize: none;
     outline: none;
     font-family: inherit;
     transition: border-color 0.2s ease;
