@@ -203,3 +203,15 @@ def test_a_click_on_the_tile_outside_every_cell_still_reaches_the_tile():
     tile, cells = _tile_and_cells()
     regions = [tile] + cells
     assert _resolve(regions, 4, 4)["type"] == "tile"
+
+
+@requires_node
+def test_toggling_twice_returns_to_where_it_started():
+    """What makes the double-click revert exact. The first click of a double-click opens
+    the picker and the second toggles a cell; the dblclick handler toggles that same cell
+    back before inserting the tag, so the gesture leaves subjects untouched. That is only
+    true because toggling is its own inverse."""
+    for start in (None, [1], [1, 2], [3, 5, 9]):
+        once = _run(f"toggleSubject({json.dumps(start)}, 2)")
+        twice = _run(f"toggleSubject({json.dumps(once)}, 2)")
+        assert twice == sorted(start or []), f"{start} -> {once} -> {twice}"
