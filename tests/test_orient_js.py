@@ -138,3 +138,43 @@ def test_snapping_can_be_turned_off_for_a_deliberate_near_quarter_angle():
 def test_snapping_normalises_into_one_turn():
     assert _run("snapAngle(-270)") == pytest.approx(90)
     assert _run("snapAngle(450)") == pytest.approx(90)
+
+# ---- the mirror buttons speak SCREEN, the model stores SOURCE ------------------------
+
+
+@requires_node
+@pytest.mark.parametrize("rotate,axis,expected", [
+    (0, "h", "h"), (0, "v", "v"),
+    (90, "h", "v"), (90, "v", "h"),
+    (180, "h", "h"), (180, "v", "v"),
+    (270, "h", "v"), (270, "v", "h"),
+    (360, "h", "h"),
+    (-90, "h", "v"),
+    (89.4, "h", "v"),      # snapped to the nearest quarter turn
+    (46, "h", "v"),        # 46 rounds to 90
+    (44, "h", "h"),        # 44 rounds to 0
+])
+def test_the_clicked_axis_is_translated_into_the_source_frame(rotate, axis, expected):
+    """The pipeline is exif -> flip -> rotate -> crop, so flip lives in the SOURCE frame
+    while the button and the crop rect live in the DISPLAYED one. They agree only at 0 and
+    180; at 90 and 270 they are transposed."""
+    assert _run(f'sourceFlipAxis("{axis}", {rotate})') == expected
+
+
+@requires_node
+def test_mirroring_twice_is_a_no_op_at_every_quarter_turn():
+    """Whatever the mapping, clicking the same button twice must land back where it
+    started - otherwise a double-click leaves an orientation the user cannot undo by
+    repeating the gesture."""
+    out = _run("""(() => {
+        const results = {};
+        for (const rotate of [0, 90, 180, 270]) {
+            for (const axis of ["h", "v"]) {
+                const src = sourceFlipAxis(axis, rotate);
+                results[`${rotate}${axis}`] =
+                    toggleFlipAxis(toggleFlipAxis(null, src), src);
+            }
+        }
+        return results;
+    })()""")
+    assert all(v is None for v in out.values()), out
