@@ -72,6 +72,44 @@ async def probe_route(request: web.Request) -> web.Response:
     return web.json_response(info)
 
 
+def _same_server(a: str, b: str) -> bool:
+    """Do these two URLs name the same endpoint, spelled the same way?
+
+    PRESENTATION ONLY, and deliberately timid. It exists so that a typed api_base which
+    is character-for-character one of the candidates is not listed twice, once as
+    "custom" and once under its own name. It is NOT a security check and must never be
+    used as one: what may be probed is decided by endpoint.is_loopback, on the literal
+    string, because normalising a host is where SSRF filters go wrong.
+
+    It does NOT fold localhost, ::1 and 127.0.0.1 together, though an earlier version
+    did. They are distinct bind addresses: a server can listen on 127.0.0.1 and not on
+    ::1. Folding them meant that typing `http://[::1]:1234/v1` DROPPED the 127.0.0.1
+    candidate from the sweep, and then the IPv6 probe found nothing - so a running LM
+    Studio vanished from the list entirely. Listing one server twice is a blemish;
+    hiding a running one is the bug this button exists to prevent.
+
+    What is folded is textual only: the case of the host (DNS is case-insensitive, so it
+    is genuinely the same target) and a trailing slash.
+    """
+    from urllib.parse import urlparse
+
+    def key(url: str) -> tuple:
+        text = (url or "").strip().rstrip("/")
+        try:
+            p = urlparse(text)
+            # .port parses lazily and raises on a malformed authority - `p.port` on
+            # "http://127.0.0.1:1234\\v1" throws ValueError, which reached aiohttp as an
+            # uncaught 500 and a traceback in the console. It has to be INSIDE the guard;
+            # having it outside is what made a stray backslash - routine on Windows - kill
+            # the whole sweep. Falling back to the raw text just means "not equal to
+            # anything but itself", which is the safe answer for a URL we cannot parse.
+            return (p.scheme, (p.hostname or "").lower(), p.port, p.path)
+        except ValueError:
+            return (text,)
+
+    return key(a) == key(b)
+
+
 def _parse_crop_param(raw: str | None) -> list[float] | None:
     """`crop=x,y,w,h` comma-separated fractions -> validated list; None when absent.
     Raises ValueError on junk - the route turns that into a 400, never a traceback."""
@@ -163,11 +201,18 @@ async def detect_route(request):
                           "remote URL into api_base by hand instead"},
                 status=400,
             )
-        models = prompt._models_at(base)
-        if models is None:
-            return web.json_response({"servers": []})
-        return web.json_response({"servers": [{"label": "custom", "base": base,
-                                               "models": models}]})
+        # The typed base goes in FRONT of the usual ports and the whole thing is swept in
+        # one pass, rather than probing the typed one and returning only that.
+        #
+        # Merged because the button answers "what can I talk to", and having typed one URL
+        # does not mean the sweep has nothing to add - a second server on a known port is
+        # exactly the case where seeing both matters. Swept in ONE pass because
+        # detect_local_servers probes concurrently: a separate probe first would cost a
+        # second serial timeout, turning the advertised ~1s scan into ~10s whenever the
+        # typed address has nothing listening on it.
+        typed = [("custom", base)]
+        rest = [c for c in endpoint.LOCAL_CANDIDATES if not _same_server(c[1], base)]
+        return web.json_response({"servers": prompt.detect_local_servers(typed + rest)})
 
     return web.json_response({"servers": prompt.detect_local_servers()})
 
