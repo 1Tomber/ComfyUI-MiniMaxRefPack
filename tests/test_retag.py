@@ -409,3 +409,73 @@ def test_a_drop_on_a_tiles_left_half_inserts_before_it(i, expected):
 @requires_node
 def test_a_drop_on_a_tiles_right_half_inserts_after_it(i, expected):
     assert _drop_at(5, 3, x=10 + i * 137 + 110, y=8 + 65) == expected
+
+# ---- two references to one file ------------------------------------------------------
+
+
+@requires_node
+def test_duplicate_files_do_not_collapse_onto_one_tag():
+    """The same file can legitimately appear twice - addFiles does no de-duplication, and
+    an upload with an existing name overwrites on the server and returns that name - and
+    the two are NOT interchangeable, because they can carry different crops, rotations or
+    subjects.
+
+    Pairing on the first entry with a matching name collapsed them: deleting b from
+    [a, b, a] mapped <Picture 3> to <Picture 1> instead of <Picture 2>, pointing the prompt
+    at the wrong one and leaving the survivor with no tag referring to it.
+    """
+    out = _run("""(() => {
+        const A = { file: "a.png" }, B = { file: "b.png" };
+        const before = assignTags({ images: [A, B, A], videos: [], audios: [] });
+        const after = assignTags({ images: [A, A], videos: [], audios: [] });
+        return tagRemap(before, after);
+    })()""")
+    assert out == {"<Picture 3>": "<Picture 2>"}, (
+        "the second copy of a.png moved from slot 3 to slot 2; slot 1 did not move"
+    )
+
+
+@requires_node
+def test_a_reorder_of_identical_files_is_a_permutation_not_a_collapse():
+    """Three copies of one file, reordered. Whatever the pairing decides, no two source
+    tags may land on the same destination - that is what loses a reference from the text.
+    """
+    out = _run("""(() => {
+        const A = { file: "same.png" };
+        const before = assignTags({ images: [A, A, A], videos: [], audios: [] });
+        const after = assignTags({ images: [A, A], videos: [], audios: [] });
+        const map = tagRemap(before, after);
+        const targets = Object.values(map);
+        return { map, distinct: new Set(targets).size === targets.length };
+    })()""")
+    assert out["distinct"], f"two tags collapsed onto one destination: {out['map']}"
+
+
+@requires_node
+def test_duplicate_videos_renumber_their_own_audio_tags():
+    """The soundtrack tag renumbers independently of <Video N>, and it was looked up
+    through the same first-match pairing."""
+    out = _run("""(() => {
+        const V = { file: "clip.mp4", use_soundtrack: true };
+        const W = { file: "other.mp4", use_soundtrack: true };
+        const before = assignTags({ images: [], videos: [V, W, V], audios: [] });
+        const after = assignTags({ images: [], videos: [V, V], audios: [] });
+        const map = tagRemap(before, after);
+        const audioTargets = Object.entries(map)
+            .filter(([k]) => k.startsWith("<Audio"))
+            .map(([, v]) => v);
+        return { map, audioDistinct: new Set(audioTargets).size === audioTargets.length };
+    })()""")
+    assert out["audioDistinct"], f"two <Audio N> collapsed: {out['map']}"
+
+
+@requires_node
+def test_distinct_files_are_unaffected():
+    """The fix must not disturb the ordinary case, which is every case without duplicates."""
+    out = _run("""(() => {
+        const A = { file: "a.png" }, B = { file: "b.png" }, C = { file: "c.png" };
+        const before = assignTags({ images: [A, B, C], videos: [], audios: [] });
+        const after = assignTags({ images: [B, C], videos: [], audios: [] });
+        return tagRemap(before, after);
+    })()""")
+    assert out == {"<Picture 2>": "<Picture 1>", "<Picture 3>": "<Picture 2>"}
