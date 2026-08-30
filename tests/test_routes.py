@@ -173,6 +173,14 @@ def test_thumb_400_on_a_bad_time(input_dir, bad):
 
 TRAVERSAL_ATTEMPTS = ["../../etc/passwd", "/etc/passwd", "..%2f..%2fetc", "subdir/../../x"]
 
+# These routes answer 404 for a refusal AND for a file that simply is not there, so a bare
+# "assert 404" against a path that does not exist proves nothing: it passes just as
+# happily with _safe_join deleted. Measured - with the ".." rule commented out, all eight
+# parametrised cases below still went green.
+#
+# So every case that is meant to demonstrate a REFUSAL is aimed at a target that really
+# exists. Then 404 has only one possible meaning.
+
 
 @pytest.mark.parametrize("bad", TRAVERSAL_ATTEMPTS)
 def test_probe_refuses_traversal(input_dir, bad):
@@ -182,6 +190,87 @@ def test_probe_refuses_traversal(input_dir, bad):
 @pytest.mark.parametrize("bad", TRAVERSAL_ATTEMPTS)
 def test_thumb_refuses_traversal(input_dir, bad):
     assert run(routes.thumb_route(FakeRequest(query={"file": bad}))).status == 404
+
+
+@pytest.mark.parametrize("route", ["probe_route", "thumb_route"])
+def test_a_file_that_really_exists_outside_the_input_dir_is_still_refused(input_dir, route):
+    """The discriminating case: the target is readable, so 404 cannot mean "not found".
+
+    Without _safe_join this returns the file's contents - which is the whole point of the
+    guard, and what the parametrised table above never established.
+    """
+    outside = os.path.join(os.path.dirname(os.path.abspath(input_dir)), "mmrp_outside.txt")
+    with open(outside, "wb") as fh:
+        fh.write(b"secret")
+    try:
+        assert os.path.isfile(outside), "the test's own premise: the target exists"
+        resp = run(getattr(routes, route)(FakeRequest(query={"file": "../mmrp_outside.txt"})))
+        assert resp.status == 404
+    finally:
+        os.remove(outside)
+
+
+@pytest.mark.parametrize("route", ["probe_route", "thumb_route"])
+def test_an_encoded_payload_is_refused_even_though_it_names_a_real_file(input_dir, route):
+    """Isolates the ".." SUBSTRING rule, which the containment check cannot cover.
+
+    "..%2f..%2fetc" contains no real separator, so it resolves harmlessly INSIDE the input
+    directory and commonpath is perfectly happy with it. The substring rule is the only
+    thing refusing it - it is there because the string is a traversal payload the moment
+    anything upstream decodes it. Pointing this at a file that exists is the only way to
+    tell the two layers apart.
+    """
+    payload = "..%2f..%2fetc"
+    real = os.path.join(input_dir, payload)
+    with open(real, "wb") as fh:
+        fh.write(b"secret")
+    assert os.path.isfile(real), "the test's own premise: the payload names a real file"
+    resp = run(getattr(routes, route)(FakeRequest(query={"file": payload})))
+    assert resp.status == 404
+
+
+def test_the_prefix_rules_are_what_actually_refuse_a_traversal(input_dir):
+    """States plainly which layer does the work, because one of them cannot be tested.
+
+    _safe_join has two containment layers: the prefix rules ("..", a leading separator,
+    isabs) and then commonpath. Disabling commonpath breaks NOTHING, and that is not an
+    oversight in the tests - given the prefix rules, no input can reach it in a state
+    where it would return a mismatch, because escaping without ".." requires a name that
+    is absolute, and absolute names never get that far.
+
+    Its one live contribution is RAISING, for the drive-relative case above, and that is
+    tested. It is otherwise defence in depth mirroring the stock upload route
+    (CU/server.py:412-415), which is a good reason to keep it and a bad reason to pretend
+    it is covered.
+
+    This test pins the reasoning: if someone relaxes a prefix rule, an entry here stops
+    being refused by it, and the message says commonpath has become load-bearing and now
+    needs a case of its own.
+    """
+    escaping = ["../../etc/passwd", "/etc/passwd", "..%2f..%2fetc", "subdir/../../x"]
+    for name in escaping:
+        caught_by_prefix = (
+            ".." in name or name.startswith("/") or name.startswith(chr(92))
+            or os.path.isabs(name)
+        )
+        assert caught_by_prefix, (
+            f"{name!r} is no longer refused by the prefix rules, so commonpath is now the "
+            "only thing stopping it - give it a test of its own rather than relying on a "
+            "layer nothing else exercises"
+        )
+        assert routes._safe_join(input_dir, name) is None
+
+
+@pytest.mark.parametrize("bad", ["D:foo.txt", "Z:x/y.png", "d:already/there.png"])
+@pytest.mark.parametrize("route", ["probe_route", "thumb_route"])
+def test_a_drive_relative_name_is_refused_rather_than_crashing(input_dir, route, bad):
+    """A drive-relative path is NOT absolute - os.path.isabs("D:foo") is False - so it
+    slipped past the first guard and reached commonpath, which raises ValueError when the
+    paths are on different drives. Uncaught, that was an HTTP 500 and a console traceback
+    from an unauthenticated request. Windows-shaped, but the route is reachable anywhere.
+    """
+    resp = run(getattr(routes, route)(FakeRequest(query={"file": bad})))
+    assert resp.status == 404
 
 
 def test_a_plain_valid_name_is_accepted_by_every_route(input_dir):

@@ -49,7 +49,19 @@ def _safe_join(base_dir: str, name: str) -> str | None:
     base_dir = os.path.abspath(base_dir)
     target = os.path.abspath(os.path.join(base_dir, name))
     # CU/server.py:412-415 - the same containment check the stock upload route uses.
-    if os.path.commonpath((base_dir, target)) != base_dir:
+    try:
+        if os.path.commonpath((base_dir, target)) != base_dir:
+            return None
+    except ValueError:
+        # commonpath raises when the paths cannot be compared at all - on Windows, when
+        # they are on different drives. "D:foo.txt" reaches here rather than being caught
+        # above, because a DRIVE-RELATIVE path is not absolute: os.path.isabs("D:foo") is
+        # False, while abspath resolves it against that drive's own working directory and
+        # lands outside base_dir entirely.
+        #
+        # Uncaught, this was an HTTP 500 and a traceback in the ComfyUI console from an
+        # unauthenticated request. Not comparable means not contained, so it is refused
+        # like any other escape.
         return None
     return target
 
