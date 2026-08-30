@@ -262,7 +262,10 @@ def test_a_server_on_127_0_0_1_survives_a_typed_ipv6_base(monkeypatch):
 
 
 @pytest.mark.parametrize("base", [
-    "http://127.0.0.1:1234\v1",   # backslash instead of slash - routine on Windows
+    "http://127.0.0.1:1234\\v1",  # a REAL backslash - routine on Windows.
+                                     # Written "\v1" here for four releases, which is
+                                     # a VERTICAL TAB, so the case in the comment
+                                     # was never actually exercised.
     "http://127.0.0.1:99999/v1",     # port out of range
     "http://localhost:abc/v1",       # port not a number
     "http://127.0.0.1:-1/v1",
@@ -276,6 +279,7 @@ def test_a_loopback_base_with_an_unparseable_port_does_not_500(monkeypatch, base
     monkeypatch.setattr(prompt, "_models_at", lambda *a, **k: None)
     resp = run(routes.detect_route(FakeRequest(base=base)))
     assert resp.status == 200
+
 
 
 def test_a_non_loopback_base_is_still_refused_even_though_the_sweep_now_merges(monkeypatch):
