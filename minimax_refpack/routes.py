@@ -72,6 +72,32 @@ async def probe_route(request: web.Request) -> web.Response:
     return web.json_response(info)
 
 
+def _same_server(a: str, b: str) -> bool:
+    """Do these two URLs name the same local server, however they were spelled?
+
+    PRESENTATION ONLY. This exists so that typing `http://localhost:1234/v1` into
+    api_base does not list LM Studio twice, once as "custom" and once under its own
+    name. It is NOT a security check and must never be used as one: the decision about
+    what may be probed stays with endpoint.is_loopback, on the literal string the user
+    sent, precisely because normalising a host is where SSRF filters go wrong.
+    """
+    from urllib.parse import urlparse
+
+    def key(url: str) -> tuple:
+        try:
+            p = urlparse((url or "").strip().rstrip("/"))
+        except ValueError:
+            return (url,)
+        host = (p.hostname or "").lower()
+        # Only the loopback spellings are folded together. Two different hosts that
+        # happen to share a port are different servers and stay that way.
+        if host in ("localhost", "::1"):
+            host = "127.0.0.1"
+        return (p.scheme, host, p.port, p.path)
+
+    return key(a) == key(b)
+
+
 def _parse_crop_param(raw: str | None) -> list[float] | None:
     """`crop=x,y,w,h` comma-separated fractions -> validated list; None when absent.
     Raises ValueError on junk - the route turns that into a 400, never a traceback."""
@@ -163,11 +189,18 @@ async def detect_route(request):
                           "remote URL into api_base by hand instead"},
                 status=400,
             )
-        models = prompt._models_at(base)
-        if models is None:
-            return web.json_response({"servers": []})
-        return web.json_response({"servers": [{"label": "custom", "base": base,
-                                               "models": models}]})
+        # The typed base goes in FRONT of the usual ports and the whole thing is swept in
+        # one pass, rather than probing the typed one and returning only that.
+        #
+        # Merged because the button answers "what can I talk to", and having typed one URL
+        # does not mean the sweep has nothing to add - a second server on a known port is
+        # exactly the case where seeing both matters. Swept in ONE pass because
+        # detect_local_servers probes concurrently: a separate probe first would cost a
+        # second serial timeout, turning the advertised ~1s scan into ~10s whenever the
+        # typed address has nothing listening on it.
+        typed = [("custom", base)]
+        rest = [c for c in endpoint.LOCAL_CANDIDATES if not _same_server(c[1], base)]
+        return web.json_response({"servers": prompt.detect_local_servers(typed + rest)})
 
     return web.json_response({"servers": prompt.detect_local_servers()})
 

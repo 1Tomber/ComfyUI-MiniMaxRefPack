@@ -545,6 +545,33 @@ async function apiSystemPromptDefault() {
     return data.default || "";
 }
 
+// >>> MMRP-LOOPBACK
+// Mirrors endpoint.is_loopback in Python, and like migrateProviderValue vs
+// normalize_provider both halves exist ON PURPOSE. This one decides only what the browser
+// bothers to ASK for; the Python one decides what the process will actually connect to.
+// The server stays the sole enforcement point — a browser is not a place to enforce
+// anything — so this copy being wrong costs a confusing message, never a probe that
+// should not have happened.
+//
+// It exists so a LAN address typed into api_base gets an explanation on the modal instead
+// of a 400 the user never sees.
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
+function isLoopbackUrl(url) {
+    let parsed;
+    try {
+        parsed = new URL(String(url ?? "").trim());
+    } catch (e) {
+        return false;   // "" and junk both land here, matching urlparse's refusal
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    // URL keeps an IPv6 host bracketed; Python's urlparse .hostname strips the brackets,
+    // and endpoint.py's set carries both spellings. Strip so the two agree on `[::1]`.
+    const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    return LOOPBACK_HOSTS.has(host);
+}
+// <<< MMRP-LOOPBACK
+
 // Deliberately asks the SERVER to probe rather than probing from here. Two reasons, and
 // the first is the one that matters: `localhost` has to mean whatever the ComfyUI process
 // can reach, so a Dockerised or remote ComfyUI gets told the truth about its own network
@@ -2485,18 +2512,27 @@ function openLocalServerModal(node, anchorBtn) {
         app.graph?.setDirtyCanvas(true, true);
     };
 
-    const render = (servers) => {
+    // `unprobed` is a non-loopback api_base: the reason the user's own URL is missing
+    // from this list has to be stated, or the modal looks like it simply failed to find
+    // a server the user knows is running.
+    const render = (servers, unprobed) => {
         list.replaceChildren();
+        const remoteNote = unprobed
+            ? ` Your api_base (${unprobed}) is not on this machine, so it was not probed — ` +
+              "this button only ever looks at localhost, so that a ComfyUI anyone can reach " +
+              "cannot be turned into a port scanner. Type the model id into local_model_slug " +
+              "by hand and it will work fine."
+            : "";
         if (!servers.length) {
             hint.textContent =
                 "No OpenAI-compatible server answered on this machine. Start LM Studio " +
                 "(Developer tab), or `ollama serve`, then Rescan. If your server runs " +
-                "somewhere else, type its URL into api_base by hand.";
+                "somewhere else, type its URL into api_base by hand." + remoteNote;
             return;
         }
         hint.textContent =
             "Pick the model that should write your prompts. Videos will be sent as " +
-            "still frames and audio will not be sent at all.";
+            "still frames and audio will not be sent at all." + remoteNote;
         for (const s of servers) {
             const group = document.createElement("div");
             group.className = "mmrp-server-group";
@@ -2523,11 +2559,21 @@ function openLocalServerModal(node, anchorBtn) {
         }
     };
 
+    // Sweeps WITH whatever is already in api_base, which is the whole point of #3: a
+    // server on a port that isn't one of the six known ones was previously invisible to
+    // this button even when its URL was sitting in the widget the button writes to.
+    //
+    // A non-loopback api_base is deliberately not sent. The route would refuse it with a
+    // 400 and the modal would show "Could not scan", which reads as a broken button
+    // rather than a policy; asking only for what can be answered lets render() explain
+    // instead. The refusal itself still lives on the server — see MMRP-LOOPBACK.
     const sweep = () => {
+        const typed = String(widgetByName(node, "api_base")?.value || "").trim();
+        const probeable = typed !== "" && isLoopbackUrl(typed);
         hint.textContent = "Looking for a server on this machine...";
         list.replaceChildren();
-        apiDetectServers()
-            .then(render)
+        apiDetectServers(probeable ? typed : "")
+            .then((servers) => render(servers, probeable ? "" : typed))
             .catch((e) => { hint.textContent = `Could not scan: ${e.message}`; });
     };
 

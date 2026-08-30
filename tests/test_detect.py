@@ -7,6 +7,9 @@ loopback-only, and never resolved.
 """
 
 import asyncio
+import pathlib
+import shutil
+import subprocess
 import json
 
 import pytest
@@ -184,3 +187,127 @@ def test_the_candidate_list_is_loopback_only():
     """A candidate pointing off-box would make the no-argument sweep a scanner."""
     for _label, base in endpoint.LOCAL_CANDIDATES:
         assert endpoint.is_loopback(base), base
+
+
+# ---- the typed api_base joins the sweep (issue #3) -------------------------------
+
+
+def test_a_typed_base_is_swept_alongside_the_known_ports(monkeypatch):
+    """#3: a server on a port outside LOCAL_CANDIDATES was invisible to the button even
+    with its URL already sitting in api_base."""
+    monkeypatch.setattr(prompt, "_models_at", lambda base, *a, **k:
+                        ["mine"] if ":9999" in base else ["stock"])
+    resp = run(routes.detect_route(FakeRequest(base="http://127.0.0.1:9999/v1")))
+    servers = _json(resp)["servers"]
+    bases = [s["base"] for s in servers]
+    assert bases[0] == "http://127.0.0.1:9999/v1", "the typed base leads"
+    assert "http://127.0.0.1:1234/v1" in bases, "the known ports are still swept"
+
+
+def test_the_typed_base_is_probed_in_the_same_pass_not_a_second_one(monkeypatch):
+    """One concurrent sweep, not a serial probe then a sweep. A serial version costs a
+    second full timeout whenever the typed address has nothing listening, which turns the
+    advertised ~1s scan into ~10s."""
+    calls = []
+    monkeypatch.setattr(prompt, "detect_local_servers",
+                        lambda candidates=None, *a, **k: calls.append(candidates) or [])
+    run(routes.detect_route(FakeRequest(base="http://127.0.0.1:9999/v1")))
+    assert len(calls) == 1, "detect_local_servers must be called exactly once"
+    assert calls[0][0] == ("custom", "http://127.0.0.1:9999/v1")
+
+
+@pytest.mark.parametrize("typed", [
+    "http://localhost:1234/v1",     # same server, spelled by name
+    "http://127.0.0.1:1234/v1",     # same server, spelled by address
+    "http://127.0.0.1:1234/v1/",    # same server, trailing slash
+])
+def test_a_typed_base_that_is_already_a_candidate_is_listed_once(monkeypatch, typed):
+    """Otherwise LM Studio appears twice: once as "custom", once under its own name."""
+    monkeypatch.setattr(prompt, "_models_at", lambda *a, **k: ["m"])
+    resp = run(routes.detect_route(FakeRequest(base=typed)))
+    keyed = [routes._same_server(s["base"], typed) for s in _json(resp)["servers"]]
+    assert keyed.count(True) == 1, _json(resp)["servers"]
+
+
+def test_same_server_folds_only_the_loopback_spellings():
+    assert routes._same_server("http://localhost:1234/v1", "http://127.0.0.1:1234/v1")
+    assert routes._same_server("http://[::1]:1234/v1", "http://127.0.0.1:1234/v1")
+    # ...and nothing else. Two hosts sharing a port are two servers.
+    assert not routes._same_server("http://127.0.0.1:1234/v1", "http://127.0.0.1:8080/v1")
+    assert not routes._same_server("http://192.168.1.5:1234/v1", "http://10.0.0.5:1234/v1")
+    assert not routes._same_server("http://127.0.0.1:1234/v1", "https://127.0.0.1:1234/v1")
+
+
+def test_a_non_loopback_base_is_still_refused_even_though_the_sweep_now_merges(monkeypatch):
+    """The merge must not have become a way in. Same refusal, no connection attempted."""
+    monkeypatch.setattr(prompt, "detect_local_servers",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not sweep")))
+    monkeypatch.setattr(prompt, "_models_at",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not probe")))
+    resp = run(routes.detect_route(FakeRequest(base="http://169.254.169.254/v1")))
+    assert resp.status == 400
+
+
+# ---- the browser's copy of the predicate ----------------------------------------
+#
+# web/refpack.js carries its own isLoopbackUrl so a LAN api_base gets an explanation on
+# the modal instead of a 400 the user never sees. It is not an enforcement point -- the
+# route above is -- but a copy that DISAGREES with the original is its own bug: it would
+# either withhold a probe the server would have allowed, or promise one it will refuse.
+# So the two are tested against each other on the same inputs, not separately.
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+REFPACK_JS = REPO_ROOT / "web" / "refpack.js"
+NODE = shutil.which("node")
+requires_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
+
+
+def _extract_loopback_js() -> str:
+    text = REFPACK_JS.read_text(encoding="utf-8")
+    start = text.find("// >>> MMRP-LOOPBACK")
+    end = text.find("// <<< MMRP-LOOPBACK")
+    assert start != -1 and end != -1, (
+        "the MMRP-LOOPBACK markers are gone from web/refpack.js - this test extracts the "
+        "real shipped code through them, so removing them silently stops the browser's "
+        "half of the loopback rule from being covered at all"
+    )
+    return text[start:end]
+
+
+AGREEMENT_CASES = [
+    "http://127.0.0.1:1234/v1",
+    "http://localhost:1234/v1",
+    "http://LOCALHOST:1234/v1",
+    "https://127.0.0.1:8443/v1",
+    "http://[::1]:1234/v1",
+    "http://192.168.1.50:1234/v1",
+    "http://10.0.0.5:1234/v1",
+    "http://169.254.169.254/v1",
+    "http://evil.example/v1",
+    "http://127.0.0.1.evil.example/v1",
+    "http://localhost.evil.example/v1",
+    "file:///etc/passwd",
+    "ftp://127.0.0.1/v1",
+    "",
+    "not a url",
+    "  http://127.0.0.1:1234/v1  ",
+]
+
+
+@requires_node
+def test_the_browser_copy_agrees_with_endpoint_is_loopback():
+    script = _extract_loopback_js() + (
+        f"\nconsole.log(JSON.stringify({json.dumps(AGREEMENT_CASES)}"
+        ".map((u) => isLoopbackUrl(u))));\n"
+    )
+    proc = subprocess.run(
+        [NODE, "--input-type=module", "-e", script],
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, f"node failed: {proc.stderr}"
+    from_js = json.loads(proc.stdout.strip())
+    from_py = [endpoint.is_loopback(u) for u in AGREEMENT_CASES]
+    disagree = [
+        (u, p, j) for u, p, j in zip(AGREEMENT_CASES, from_py, from_js) if p != j
+    ]
+    assert not disagree, f"JS and Python disagree on: {disagree}"
