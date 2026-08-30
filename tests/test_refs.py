@@ -21,9 +21,11 @@ from minimax_refpack.refs import (
     output_names,
     output_types,
     slot_index,
-    validate_subjects,
+    validate_crop,
     validate_flip,
     validate_rotate,
+    validate_subjects,
+    validate_trim,
 )
 
 
@@ -483,3 +485,45 @@ def test_oriented_reports_whether_anything_will_move():
     # A full turn normalises to 0, so it is genuinely not oriented.
     assert not Reference(kind="image", file="a.png",
                          rotate=validate_rotate(360)).oriented
+
+# ---- non-finite numbers --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("crop", [
+    [float("nan"), 0.0, 0.5, 0.5],
+    [0.0, float("nan"), 0.5, 0.5],
+    [0.0, 0.0, float("nan"), 0.5],
+    [0.0, 0.0, 0.5, float("nan")],
+    [float("inf"), 0.0, 0.5, 0.5],
+    [0.0, 0.0, float("inf"), 0.5],
+    [float("-inf"), 0.0, 0.5, 0.5],
+])
+def test_a_non_finite_crop_is_refused(crop):
+    """NaN fails EVERY comparison, so a range check written as `x < 0 or x + w > 1` waves
+    it straight through - and the value then reaches the pixel pipeline, where
+    int(nan * width) raises from somewhere with no useful context. A validator's whole job
+    is to turn that into one clear sentence at the boundary."""
+    with pytest.raises(ReferenceError):
+        validate_crop(crop)
+
+
+@pytest.mark.parametrize("trim", [
+    [float("nan"), 1.0],
+    [0.0, float("nan")],
+    [0.0, float("inf")],
+    [float("inf"), float("inf")],
+])
+def test_a_non_finite_trim_is_refused(trim):
+    """An infinite end asks for a window that never closes; NaN passes `end <= start`
+    because that comparison is False for NaN too."""
+    with pytest.raises(ReferenceError):
+        validate_trim(trim)
+
+
+def test_ordinary_values_still_pass():
+    """The guard must not have become a blanket refusal of anything unusual."""
+    assert validate_crop([0.0, 0.0, 1.0, 1.0]) == [0.0, 0.0, 1.0, 1.0]
+    assert validate_crop([0, 0, 1, 1]) == [0.0, 0.0, 1.0, 1.0]
+    assert validate_crop([0.25, 0.125, 0.5, 0.75]) == [0.25, 0.125, 0.5, 0.75]
+    assert validate_trim([0.0, 0.001]) == [0.0, 0.001]
+    assert validate_trim([12, 3600]) == [12.0, 3600.0]
