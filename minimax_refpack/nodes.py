@@ -444,7 +444,6 @@ class MiniMaxH3ReferencePack:
             # of inapplicable settings is how a debug output stops being read.
             *([] if provider != "local" else _local_debug_lines(
                 local_ttl, local_server, local_extra_body, api_base)),
-            f"system_prompt: {'workflow override' if (system_prompt or '').strip() else 'packaged default'}",
             f"references: {len(reference_set.references)} "
             f"({', '.join(f'{t.tag} {t.file}' for t in reference_set.assign_tags()) or 'none'})",
         ]

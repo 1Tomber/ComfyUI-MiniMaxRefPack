@@ -139,3 +139,51 @@ def test_the_package_compiles_on_the_oldest_python_it_claims_to_support():
         f"does not compile on Python {major}.{minor}, which pyproject.toml claims to "
         f"support:\n{proc.stdout}"
     )
+
+
+# ---- the stylesheet is not silently truncated ------------------------------------
+#
+# Nothing in this suite parsed refpack.css, and a merge resolution swallowed two closing
+# braces. Under CSS nesting - which every Chromium ComfyUI has - the rules that followed
+# did not error: they parsed as rules NESTED inside `.mmrp-tab.mmrp-active` and inside
+# `.mmrp-modal-check input`, selectors they can never match. Seven rules went inert
+# without a single warning anywhere: the settings-modal checkbox row, the orientation
+# buttons' width floor, the rotation transition, the free-angle slider's sizing and its
+# jitter-free readout, and the fit-inside toggle including its dimmed state.
+#
+# A brace-depth walk is enough to catch that and needs no CSS parser.
+
+CSS = REPO_ROOT / "web" / "refpack.css"
+
+
+def _css_without_comments(text: str) -> str:
+    """Braces inside /* ... */ are prose, not structure."""
+    out = []
+    i = 0
+    while i < len(text):
+        start = text.find("/*", i)
+        if start == -1:
+            out.append(text[i:])
+            break
+        out.append(text[i:start])
+        end = text.find("*/", start + 2)
+        if end == -1:
+            break
+        i = end + 2
+    return "".join(out)
+
+
+def test_every_css_rule_is_closed():
+    text = _css_without_comments(CSS.read_text(encoding="utf-8"))
+    depth = 0
+    for number, line in enumerate(text.splitlines(), 1):
+        depth += line.count("{") - line.count("}")
+        assert depth >= 0, f"refpack.css:{number} closes a rule that was never opened"
+        # One level is a plain rule; a media query would legitimately reach two, and there
+        # are none in this file. Deeper than that means a `}` went missing above.
+        assert depth <= 1, (
+            f"refpack.css:{number} is nested {depth} deep - a closing brace is missing "
+            f"above it, and every rule from here on is scoped to a selector that cannot "
+            f"match"
+        )
+    assert depth == 0, f"refpack.css ends inside {depth} unclosed rule(s)"
