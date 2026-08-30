@@ -85,3 +85,55 @@ def test_what_the_browser_writes_is_what_refs_py_reads():
                         "rotate": 270, "flip": "hv", "rotate_expand": False}])
     ref = ReferenceSet.from_obj(out).references[0]
     assert (ref.rotate, ref.flip, ref.rotate_expand) == (270.0, "hv", False)
+
+
+# ---- the two halves must agree about which way a mirror goes -------------------------
+
+
+def _screen_cells(im):
+    w, h = im.size
+    return [[im.getpixel((x, y))[0] for x in range(w)] for y in range(h)]
+
+
+@requires_node
+@pytest.mark.parametrize("rotate", [0, 90, 180, 270])
+@pytest.mark.parametrize("screen_axis", ["h", "v"])
+def test_the_browsers_mirror_axis_matches_what_the_pipeline_does(rotate, screen_axis):
+    """The bug this exists for: the editor decided a mirror in the DISPLAYED frame and
+    stored it in the SOURCE frame without translating, so at 90 and 270 the picture
+    mirrored the wrong way AND the crop rect was reflected on the wrong axis - leaving the
+    emitted crop over different pixels than the ones the user boxed.
+
+    A test of either half alone would have passed. This one runs the browser's mapping
+    under node and then checks the answer against the real media._orient_pil.
+    """
+    from PIL import Image
+
+    from minimax_refpack import media
+
+    source = Image.new("RGB", (3, 2))
+    source.putdata([(10 * (y * 3 + x + 1), 0, 0) for y in range(2) for x in range(3)])
+
+    text = REFPACK_JS.read_text(encoding="utf-8")
+    start, end = text.find("// >>> MMRP-ORIENT"), text.find("// <<< MMRP-ORIENT")
+    assert start != -1 and end != -1, "the MMRP-ORIENT markers are gone"
+    script = (text[start:end]
+              + f'\nconsole.log(JSON.stringify(sourceFlipAxis("{screen_axis}", {rotate})));\n')
+    proc = subprocess.run([NODE, "--input-type=module", "-e", script],
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, f"node failed: {proc.stderr}"
+    source_axis = json.loads(proc.stdout.strip())
+
+    shown = _screen_cells(media._orient_pil(source, rotate=rotate, flip=None, expand=True))
+    if screen_axis == "h":
+        wanted = [list(reversed(row)) for row in shown]     # mirror left-right on screen
+    else:
+        wanted = list(reversed(shown))                      # mirror top-bottom on screen
+
+    got = _screen_cells(
+        media._orient_pil(source, rotate=rotate, flip=source_axis, expand=True)
+    )
+    assert got == wanted, (
+        f"clicking the {screen_axis!r} mirror at {rotate} deg stored flip={source_axis!r}, "
+        f"which does not produce the mirror the user asked for"
+    )
