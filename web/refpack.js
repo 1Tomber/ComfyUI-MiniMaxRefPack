@@ -579,6 +579,20 @@ export function tagRemap(before, after) {
     return map;
 }
 
+// Move one reference within its own array. Pure, so tests/test_retag.py covers it.
+export function moveRef(list, from, to) {
+    if (!Array.isArray(list)) return list;
+    if (from < 0 || from >= list.length) return list.slice();
+    const out = list.slice();
+    const [moved] = out.splice(from, 1);
+    // `to` is an INSERTION point in the original array, so once the item is lifted out,
+    // any index past it shifts down by one. Getting this wrong is the classic off-by-one
+    // that makes "drop just after myself" move the item a slot too far.
+    const at = Math.max(0, Math.min(out.length, to > from ? to - 1 : to));
+    out.splice(at, 0, moved);
+    return out;
+}
+
 // Apply that map to the direction text in ONE pass.
 //
 // One pass is the whole point, not an optimisation. Rewriting tag by tag chains: with
@@ -1492,6 +1506,7 @@ function draw(node) {
     const regions = [];
     node._mmrpHit = { regions };
     const playing = node._mmrpPlaying;
+    const drag = node._mmrpDrag;
 
     // `layout` was computed above, from the width, before the canvas height was applied.
     // Everything below still paints in one pass with no scroll offset, because the slab
@@ -1565,7 +1580,10 @@ function draw(node) {
                     playing && playing.kind === kind && playing.file === ref.file ? "pause" : "play";
             }
 
+            const dragging = drag && drag.active && drag.kind === kind && drag.index === i;
+            if (dragging) ctx.globalAlpha = 0.35;
             drawTile(ctx, kind, ref, lines, tx, ty, selected, soundState, badgeH, playState);
+            ctx.globalAlpha = 1;
 
             // Hit regions, most specific last — hitTest scans in reverse so the
             // play/delete/soundtrack/edit affordances win over the tile containing them.
@@ -1626,6 +1644,29 @@ function draw(node) {
         // separating gap) otherwise. It never centres itself, so it never jumps;
         // it only ever moves rightwards as tiles are added. Vertically centred
         // on the strip. Drawn dimmed at cap, and only clickable below cap.
+        // The insertion caret: a bright bar in the gap the tile would land in. Placed from
+        // the same wrapping arithmetic the tiles are, so on a section that spans several
+        // lines it lands on the right one rather than always on the first.
+        if (drag && drag.active && drag.kind === kind && typeof drag.insertAt === "number") {
+            const at = Math.min(drag.insertAt, arr.length);
+            // For a drop at the very end, anchor to the RIGHT edge of the last tile;
+            // otherwise to the gap before the tile currently at that index.
+            const slot = at >= arr.length && arr.length ? arr.length - 1 : at;
+            const col = slot % perRow;
+            const line = Math.floor(slot / perRow);
+            const atEnd = at >= arr.length && arr.length > 0;
+            const cx = Math.round(
+                CL.x0 + col * (CL.tile + CL.gap) + (atEnd ? CL.tile + CL.gap / 2 : -CL.gap / 2)
+            ) + 0.5;
+            const cy = tileY + line * (CL.tile + CL.gap);
+            ctx.strokeStyle = C.danger;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy - 2);
+            ctx.lineTo(cx, cy + CL.tile + 2);
+            ctx.stroke();
+        }
+
         // Still "always where the next tile would go", which now means the end of the
         // LAST LINE rather than the end of the only one. tilesPerRow reserved room for
         // this square in a full line, so it can never be pushed off the right edge.
@@ -1641,6 +1682,28 @@ function draw(node) {
         if (!atCap) {
             regions.push({ type: "add", kind, x: ax, y: ay, w: CL.addBtn, h: CL.addBtn });
         }
+    }
+
+    // The tile under the cursor, drawn last so it rides above every section. Half size,
+    // because a full-size ghost hides the caret telling you where it will land.
+    if (drag && drag.active) {
+        const ref = node._mmrpRefs[`${drag.kind}s`][drag.index];
+        const entry = ref && ref.file ? getThumb(ref.file, ref) : null;
+        const g = Math.round(CL.tile / 2);
+        const gx = drag.x - g / 2;
+        const gy = drag.y - g / 2;
+        ctx.save();
+        ctx.globalAlpha = 0.85;
+        pathRoundRect(ctx, gx, gy, g, g, 4);
+        ctx.clip();
+        ctx.fillStyle = C.well;
+        ctx.fillRect(gx, gy, g, g);
+        if (entry && entry.state === "ok") drawCover(ctx, entry.img, gx, gy, g, g);
+        ctx.restore();
+        ctx.strokeStyle = C.danger;
+        ctx.lineWidth = 2;
+        pathRoundRect(ctx, gx + 0.5, gy + 0.5, g - 1, g - 1, 4);
+        ctx.stroke();
     }
 }
 
@@ -1670,6 +1733,96 @@ export function hitTest(node, x, y) {
     return null;
 }
 
+// A drag has to travel before it counts as one. Below this the gesture is still a click,
+// which is what keeps "select a tile" working now that dragging one means something.
+const DRAG_THRESHOLD = 4;
+
+// Where a drop at (x, y) would insert, as an index into that kind's array.
+//
+// Derived from the TILE HIT REGIONS rather than from x arithmetic, deliberately. The
+// regions are whatever draw() actually painted, so this reads correctly whether a section
+// is one row or several - there is no second copy of the layout maths to drift out of
+// step with the first, and nothing here to revisit if the tiles start wrapping.
+function dropIndexAt(node, kind, x, y) {
+    const regions = (node._mmrpHit && node._mmrpHit.regions) || [];
+    const tiles = regions.filter((r) => r.type === "tile" && r.kind === kind);
+    if (!tiles.length) return 0;
+    for (const r of tiles) {
+        if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+            // Past the midpoint means "after this one".
+            return x < r.x + r.w / 2 ? r.index : r.index + 1;
+        }
+    }
+    // Outside every tile: fall back to the nearest, so a drop in the empty space at the
+    // end of a strip lands at the end rather than nowhere. Rows dominate the distance, so
+    // a drop below a short row does not snap up to a tile on the row above it.
+    let best = null;
+    for (const r of tiles) {
+        const dy = Math.abs(y - (r.y + r.h / 2));
+        const dx = Math.abs(x - (r.x + r.w / 2));
+        const d = dy * 4 + dx;
+        if (!best || d < best.d) best = { d, index: r.index, after: x > r.x + r.w / 2 };
+    }
+    return best ? best.index + (best.after ? 1 : 0) : 0;
+}
+
+function endDragListeners(node) {
+    window.removeEventListener("mousemove", node._mmrpDragMove, true);
+    window.removeEventListener("mouseup", node._mmrpDragUp, true);
+    window.removeEventListener("keydown", node._mmrpDragKey, true);
+}
+
+function finishDrag(node, e) {
+    const drag = node._mmrpDrag;
+    node._mmrpDrag = null;
+    endDragListeners(node);
+    if (!drag) return;
+    if (!drag.active) {
+        // Never crossed the threshold, so it was a click and the old meaning stands.
+        node._mmrpSelected = { kind: drag.kind, index: drag.index };
+        scheduleDraw(node);
+        return;
+    }
+    if (!e || drag.cancelled) {
+        scheduleDraw(node);
+        return;
+    }
+    const pos = getMousePos(node._mmrpBody.canvas, e);
+    const to = dropIndexAt(node, drag.kind, pos.x, pos.y);
+    if (to === drag.index || to === drag.index + 1) {
+        scheduleDraw(node);   // dropped back on itself
+        return;
+    }
+    // Reordering renumbers the tags, which is exactly what the retag pass is for.
+    withRetag(node, () => {
+        const refs = cloneRefs(node._mmrpRefs);
+        refs[`${drag.kind}s`] = moveRef(refs[`${drag.kind}s`], drag.index, to);
+        mlog("reference_moved", { kind: drag.kind, from: drag.index, to });
+        return refs;
+    });
+    node._mmrpSelected = null;
+}
+
+function onDragMove(node, e) {
+    const drag = node._mmrpDrag;
+    if (!drag) return;
+    const pos = getMousePos(node._mmrpBody.canvas, e);
+    drag.x = pos.x;
+    drag.y = pos.y;
+    if (!drag.active) {
+        const far = Math.abs(pos.x - drag.startX) > DRAG_THRESHOLD
+            || Math.abs(pos.y - drag.startY) > DRAG_THRESHOLD;
+        if (!far) return;
+        drag.active = true;
+        // The shared preview overlay is positioned off tile rects that are about to move
+        // underneath it.
+        stopPreview(node);
+        node._mmrpSelected = null;
+    }
+    drag.insertAt = dropIndexAt(node, drag.kind, pos.x, pos.y);
+    scheduleDraw(node);
+}
+
 function onCanvasMouseDown(node, e) {
     if (e.button !== 0) return;
     const pos = getMousePos(node._mmrpBody.canvas, e);
@@ -1692,8 +1845,32 @@ function onCanvasMouseDown(node, e) {
     } else if (hit.type === "add") {
         node._mmrpBody.fileInputs[hit.kind].click();
     } else {
-        node._mmrpSelected = { kind: hit.kind, index: hit.index };
-        scheduleDraw(node);
+        const ref = node._mmrpRefs[`${hit.kind}s`][hit.index];
+        // A missing file has no thumbnail to drag and nothing worth reordering.
+        if (!ref || ref.missing) {
+            node._mmrpSelected = { kind: hit.kind, index: hit.index };
+            scheduleDraw(node);
+            return;
+        }
+        // Pending, not active: still a click until it moves. The listeners go on the
+        // WINDOW so a drag that leaves the canvas still ends - releasing outside and
+        // finding the tile stuck to the cursor is the worst version of this.
+        node._mmrpDrag = { kind: hit.kind, index: hit.index, startX: pos.x, startY: pos.y,
+                           x: pos.x, y: pos.y, active: false, cancelled: false };
+        node._mmrpDragMove = (ev) => onDragMove(node, ev);
+        node._mmrpDragUp = (ev) => finishDrag(node, ev);
+        node._mmrpDragKey = (ev) => {
+            if (ev.key !== "Escape" || !node._mmrpDrag) return;
+            node._mmrpDrag.cancelled = true;
+            finishDrag(node, null);
+            ev.stopPropagation();
+        };
+        window.addEventListener("mousemove", node._mmrpDragMove, true);
+        window.addEventListener("mouseup", node._mmrpDragUp, true);
+        window.addEventListener("keydown", node._mmrpDragKey, true);
+        // Otherwise litegraph starts dragging the NODE under the cursor.
+        e.stopPropagation();
+        e.preventDefault();
     }
 }
 
