@@ -1133,3 +1133,25 @@ def test_the_logged_payload_size_counts_the_video():
     ]
 
     assert prompt._payload_bytes(parts) == 10 + len("data:video/mp4;base64,") + 1000
+
+
+def test_the_model_is_not_listed_twice_in_the_debug_header():
+    """The header carries `model` explicitly so it comes first rather than alphabetically
+    among the rest. Enumerating the payload - which is what stopped this render drifting
+    from the wire - then listed it a second time, and the header is exactly what people
+    paste into issue reports, where a doubled line reads as a payload that carried it
+    twice."""
+    out = prompt.render_payload({"model": "m", "ttl": 1, "messages": []})
+    assert out.count("model: m") == 1
+    assert out.splitlines()[1] == "model: m", "and it is still the first field shown"
+
+
+def test_every_other_top_level_field_is_still_enumerated():
+    """The exclusion is for `model` alone. The whole point of enumerating rather than
+    allow-listing is that a field the endpoint learns to send tomorrow shows up without
+    anyone remembering to add it here."""
+    out = prompt.render_payload(
+        {"model": "m", "ttl": 1, "reasoning_effort": "none", "seed": 7, "messages": []}
+    )
+    for expected in ("ttl: 1", "reasoning_effort: none", "seed: 7"):
+        assert expected in out
