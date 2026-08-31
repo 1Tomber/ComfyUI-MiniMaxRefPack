@@ -33,7 +33,7 @@ requires_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
 # because a test that derived them would pass whatever the file said, including wrong.
 CL = {
     "x0": 10, "padTop": 8, "headerH": 15, "headGap": 12, "tile": 131, "gap": 6,
-    "stripPad": 3, "rowGap": 18, "addBtn": 44, "addGap": 24,
+    "stripPad": 3, "rowGap": 18, "addBtn": 44, "addGap": 24, "emptyRowH": 30,
 }
 KINDS = ["image", "video", "audio"]
 
@@ -145,10 +145,29 @@ def test_lines_for_counts_tiles_not_the_add_square(count, per_row, expected):
 
 
 @requires_node
-def test_an_empty_set_is_the_same_height_it_always_was():
-    """Three sections at one line each. This is the height the fixed build always drew,
-    so an empty node must not have changed size in the rewrite."""
-    assert _run("computeCanvasRows(%s, 1300).height" % json.dumps(_refs())) == 554
+def test_only_the_empty_sections_collapse():
+    """A section with references keeps its full tile strip; only the empty ones shrink. So
+    uploading one image expands that section and leaves video and audio compact."""
+    rows = _run("computeCanvasRows(%s, 1300).rows"
+                % json.dumps(_refs(images=1)))
+    by_kind = {r["kind"]: r for r in rows}
+    assert by_kind["image"].get("empty") is not True, "the image section has a reference"
+    assert by_kind["video"].get("empty") is True
+    assert by_kind["audio"].get("empty") is True
+    # the image section is a full strip; the empty ones are the short row
+    assert by_kind["video"]["stripH"] == 0
+    assert by_kind["image"]["stripH"] > CL["tile"] - 1
+
+
+def test_an_empty_section_collapses_to_a_short_row():
+    """An empty section is one short labelled row (emptyRowH) plus the inter-section gap,
+    not a reserved full-height tile strip. A fresh node with three empty sections is three
+    of those, so it opens compact instead of showing three empty wells."""
+    per_section = CL["emptyRowH"] + CL["rowGap"]
+    expected = CL["padTop"] + 3 * per_section
+    assert _run("computeCanvasRows(%s, 1300).height" % json.dumps(_refs())) == expected
+    # concretely, far shorter than the three full wells it used to draw
+    assert expected < 554
 
 
 @requires_node

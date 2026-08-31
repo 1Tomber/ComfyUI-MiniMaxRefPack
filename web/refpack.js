@@ -389,6 +389,10 @@ const CL = {
     // The persistent badge, bottom-right above the tag strip - the mirror of the music
     // toggle's corner, and the only one still free.
     subPill: 18,
+    // An EMPTY section collapses to one short row - the label and a small add button,
+    // no reserved tile strip - at the same height as the upload button row above. A
+    // fresh node is three of these instead of three full-height wells.
+    emptyRowH: 30,
 };
 // ---------------------------------------------------------------------------
 // Layout. THIS USED TO BE FIXED and is not any more.
@@ -434,7 +438,15 @@ function computeCanvasRows(refs, viewW) {
     const rows = [];
     let y = CL.padTop;
     for (const kind of KINDS) {
-        const lines = linesFor(refs[`${kind}s`].length, perRow);
+        const count = refs[`${kind}s`].length;
+        // Nothing in this section yet: one short row, the label plus a small add
+        // button, no tile strip reserved. Adding the first reference expands it.
+        if (count === 0) {
+            rows.push({ kind, y, stripY: y, perRow, lines: 0, stripH: 0, empty: true });
+            y += CL.emptyRowH + CL.rowGap;
+            continue;
+        }
+        const lines = linesFor(count, perRow);
         const stripH = CL.stripPad * 2 + lines * CL.tile + (lines - 1) * CL.gap;
         rows.push({ kind, y, stripY: y + CL.headerH + CL.headGap, perRow, lines, stripH });
         y += CL.headerH + CL.headGap + stripH + CL.rowGap;
@@ -1863,8 +1875,8 @@ function drawUploadGlyph(ctx, cx, cy, s, color) {
 // clone sitting on the media surface read wrong; this is a quiet well with an
 // upload glyph. Drawn dimmed (not removed) at cap: a control that vanishes
 // teaches nothing, a dimmed one shows the row is full (UI review #4).
-function drawAddSquare(ctx, x, y, dimmed) {
-    const S = CL.addBtn;
+function drawAddSquare(ctx, x, y, dimmed, size) {
+    const S = size || CL.addBtn;
     ctx.save();
     if (dimmed) ctx.globalAlpha = 0.4;
     ctx.fillStyle = C.wellDeep;
@@ -1874,7 +1886,7 @@ function drawAddSquare(ctx, x, y, dimmed) {
     ctx.lineWidth = 1;
     pathRoundRect(ctx, x + 0.5, y + 0.5, S - 1, S - 1, 6);
     ctx.stroke();
-    drawUploadGlyph(ctx, x + S / 2, y + S / 2, 18, C.textFaint);
+    drawUploadGlyph(ctx, x + S / 2, y + S / 2, Math.round(18 * S / CL.addBtn), C.textFaint);
     ctx.restore();
 }
 
@@ -2003,6 +2015,25 @@ function draw(node) {
             ctx.moveTo(CL.x0, dy);
             ctx.lineTo(CL.x0 + viewW, dy);
             ctx.stroke();
+        }
+
+        // An empty section is one short labelled row with a small add button; the
+        // tile strip, its geometry and the full-size add square below are all skipped.
+        if (row.empty) {
+            ctx.font = "12px sans-serif";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "middle";
+            ctx.fillStyle = C.textMuted;
+            const label = `${SECTION_LABEL[kind]} (0/${CAPS[kind]})`;
+            ctx.fillText(label, CL.x0, row.y + CL.emptyRowH / 2);
+            const labelW = ctx.measureText(label).width;
+            ctx.textBaseline = "alphabetic";
+            const S = CL.emptyRowH - 6;
+            const ax = Math.round(CL.x0 + labelW + 12);
+            const ay = row.y + (CL.emptyRowH - S) / 2;
+            drawAddSquare(ctx, ax, ay, false, S);
+            regions.push({ type: "add", kind, x: ax, y: ay, w: S, h: S });
+            continue;
         }
 
         // The labels are the only wayfinding on the slab — #aaa/12px, not the
