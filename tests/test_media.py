@@ -80,18 +80,46 @@ class _ListFrames:
         return [self._items[i] for i in idx]
 
 
-def _fake_video_from_file(images_n, frame_rate, audio=None):
-    class FakeComponents:
-        images = _ListFrames(images_n)
+def _fake_video_from_file(images_n, frame_rate, audio=None, record=None):
+    """Stands in for comfy VideoFromFile, INCLUDING its start_time/duration windowing.
 
-    FakeComponents.frame_rate = frame_rate
-    FakeComponents.audio = audio
+    The real class seeks to the in-point and stops at the out-point, so get_components
+    returns only the window's frames and a soundtrack already sliced to it. The fake does
+    the same, clamped to the clip's own length - which is what lets a trim past the end
+    come back with too few frames rather than a full decode.
+    """
+    import math as _math
+
+    def _window(start, dur):
+        if not dur:
+            return images_n, 0
+        lo = max(0, _math.ceil(start * frame_rate))
+        hi = min(images_n, _math.ceil((start + dur) * frame_rate))
+        return max(0, hi - lo), lo
 
     class FakeVideoFromFile:
-        def __init__(self, path):
+        def __init__(self, path, *, start_time=0, duration=0):
             self.path = path
+            self.start_time = start_time
+            self.duration = duration
+            if record is not None:
+                record["start_time"] = start_time
+                record["duration"] = duration
 
         def get_components(self):
+            n, _first = _window(self.start_time, self.duration)
+            aud = audio
+            if self.duration and audio is not None:
+                sr = audio["sample_rate"]
+                lo = int(self.start_time * sr)
+                hi = int((self.start_time + self.duration) * sr)
+                aud = {"waveform": audio["waveform"][..., lo:hi], "sample_rate": sr}
+
+            class FakeComponents:
+                images = _ListFrames(n)
+
+            FakeComponents.frame_rate = frame_rate
+            FakeComponents.audio = aud
             return FakeComponents()
 
     return FakeVideoFromFile
@@ -195,24 +223,70 @@ def test_crop_box_never_collapses_to_zero_area():
 # ---- load_video trim ----------------------------------------------------------
 
 
-def test_load_video_trim_selects_the_source_window(monkeypatch):
-    # 10s @ 24fps, trimmed to [2.0, 6.5): source frames 48..155 (start-inclusive,
-    # end-exclusive), resampled 24->24 so all 108 survive, in order.
-    monkeypatch.setattr(media, "_video_from_file_cls", lambda: _fake_video_from_file(240, 24))
+def test_load_video_trim_asks_the_decoder_for_only_the_window(monkeypatch):
+    # The whole point: a trim is a seek+duration handed to VideoFromFile, so a 4.5s window
+    # out of a 10s clip decodes ~108 frames, not 240. Decoding the whole file first was an
+    # 80-second stall and, on a bigger clip, an OOM that killed ComfyUI.
+    rec = {}
+    monkeypatch.setattr(media, "_video_from_file_cls",
+                        lambda: _fake_video_from_file(240, 24, record=rec))
     frames, _ = media.load_video("clip.mp4", trim=[2.0, 6.5])
+    assert rec["start_time"] == pytest.approx(2.0)
+    assert rec["duration"] == pytest.approx(4.5)
+    # 108 window frames at 24fps, resampled 24->24, all of them
     assert len(frames) == 108
-    assert frames[0] == 48
-    assert frames[-1] == 155
+
+
+def _fake_video_old_signature(images_n, frame_rate, audio=None):
+    """An OLDER VideoFromFile: no start_time/duration, so the windowed call TypeErrors."""
+    class FakeVideoFromFile:
+        def __init__(self, path):
+            self.path = path
+
+        def get_components(self):
+            class C:
+                images = _ListFrames(images_n)
+
+            C.frame_rate = frame_rate
+            C.audio = audio
+            return C()
+
+    return FakeVideoFromFile
+
+
+def test_load_video_falls_back_to_a_whole_file_decode_on_an_old_decoder(monkeypatch):
+    # No start_time/duration on the old class -> the windowed call raises TypeError and we
+    # decode the whole clip, then pick the window by frame index and slice the soundtrack
+    # ourselves - exactly the pre-fix behaviour, so an old ComfyUI is no worse off.
+    import numpy as np
+
+    sr = 1000
+    audio = {"waveform": np.arange(10 * sr, dtype=np.float32).reshape(1, 1, -1),
+             "sample_rate": sr}
+    monkeypatch.setattr(media, "_video_from_file_cls",
+                        lambda: _fake_video_old_signature(240, 24, audio))
+    frames, out = media.load_video("clip.mp4", trim=[2.0, 6.5])
+    assert len(frames) == 108
+    assert frames[0] == 48, "the fallback selects by SOURCE index, not window-local"
+    assert out["waveform"].shape[-1] == int(6.5 * sr) - int(2.0 * sr), (
+        "the fallback slices the soundtrack itself, since the old decoder did not window it"
+    )
+
+
+def test_load_video_without_a_trim_decodes_the_whole_clip(monkeypatch):
+    rec = {}
+    monkeypatch.setattr(media, "_video_from_file_cls",
+                        lambda: _fake_video_from_file(240, 24, record=rec))
+    frames, _ = media.load_video("clip.mp4")
+    assert rec["duration"] == 0, "no trim means no window - the decoder gets the whole file"
+    assert len(frames) == 240
 
 
 def test_load_video_trim_then_resamples_the_span(monkeypatch):
-    # 60fps source, [1.0, 3.0) -> 120 source frames -> 48 output frames at 24fps,
-    # all drawn from inside the window.
+    # 60fps window of 2.0s -> 120 window frames -> 48 output frames at 24fps.
     monkeypatch.setattr(media, "_video_from_file_cls", lambda: _fake_video_from_file(600, 60))
     frames, _ = media.load_video("clip.mp4", trim=[1.0, 3.0])
     assert len(frames) == 48
-    assert min(frames) >= 60
-    assert max(frames) <= 179
 
 
 def test_load_video_too_short_trim_raises_naming_file_and_window(monkeypatch):
@@ -225,12 +299,17 @@ def test_load_video_too_short_trim_raises_naming_file_and_window(monkeypatch):
 
 
 def test_load_video_trim_entirely_outside_the_clip_raises(monkeypatch):
+    # A 1s clip windowed to [5.0, 9.0) seeks past the end, so the decoder returns nothing
+    # and load_video refuses it rather than shipping an empty clip.
     monkeypatch.setattr(media, "_video_from_file_cls", lambda: _fake_video_from_file(24, 24))
     with pytest.raises(ValueError):
         media.load_video("clip.mp4", trim=[5.0, 9.0])
 
 
-def test_load_video_trim_slices_the_soundtrack_to_the_same_window(monkeypatch):
+def test_load_video_trusts_the_decoders_windowed_soundtrack(monkeypatch):
+    # VideoFromFile windows the audio to the trim itself, so _decode_video must NOT slice
+    # it a second time - the fake windows it here, standing in for the real decoder, and
+    # the result must come through untouched (not double-sliced to a quarter of the span).
     import numpy as np
 
     sr = 1000
@@ -260,11 +339,29 @@ def _fake_video_numpy(n, frame_rate, h, w, audio=None):
     FakeComponents.audio = audio
 
     class FakeVideoFromFile:
-        def __init__(self, path):
+        def __init__(self, path, *, start_time=0, duration=0):
             self.path = path
+            self.start_time = start_time
+            self.duration = duration
 
         def get_components(self):
-            return FakeComponents()
+            import math as _math
+
+            if self.duration:
+                lo = max(0, _math.ceil(self.start_time * frame_rate))
+                hi = min(n, _math.ceil((self.start_time + self.duration) * frame_rate))
+                win = max(0, hi - lo)
+            else:
+                win = n
+
+            import numpy as _np
+
+            class C:
+                images = _np.zeros((win, h, w, 3), dtype=_np.float32)
+
+            C.frame_rate = frame_rate
+            C.audio = audio
+            return C()
 
     return FakeVideoFromFile
 

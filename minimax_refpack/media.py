@@ -350,30 +350,60 @@ def _decode_video(path, target_fps, crop, trim, fields, flip=None, rotate=None,
                   rotate_expand=True):
     """The body of load_video. Split out only so the timing/logging wrapper above stays
     a plain `with` block instead of wrapping 30 lines."""
-    components = _video_from_file_cls()(path).get_components()
+    # Decode ONLY the trim window, not the whole file.
+    #
+    # VideoFromFile(start_time, duration) seeks to the in-point and stops at the out-point
+    # - both video AND audio (it skips audio before start_time and truncates at the end;
+    # see CU/comfy_api/latest/_input_impl/video_types.py get_components_internal). So a 5s
+    # trim out of a 3-minute clip decodes ~120 frames, not ~4000.
+    #
+    # Decoding the whole file first and then slicing by frame index was an 80-second stall
+    # on a long clip and, worse, a memory spike big enough to get ComfyUI OOM-killed
+    # mid-build - the process just vanished and restarted with no traceback. Reported live
+    # on a 181s reference trimmed to 5s. The audio is windowed here too, so there is no
+    # separate _slice_audio pass any more - that pass existed to compensate for this having
+    # decoded the whole soundtrack.
+    # Try the windowed decode; fall back to a whole-file decode on an older VideoFromFile
+    # that has no start_time/duration. On the fallback the behaviour is exactly what it
+    # was before, so an old ComfyUI is no worse off, while a current one stops OOM-ing.
+    windowed = False
+    components = None
+    if trim is not None:
+        start, end = trim
+        try:
+            components = _video_from_file_cls()(
+                path, start_time=float(start), duration=max(0.0, float(end) - float(start))
+            ).get_components()
+            windowed = True
+        except TypeError:
+            components = None
+    if components is None:
+        components = _video_from_file_cls()(path).get_components()
+
     frames = components.images
     n_src = frames.shape[0]
     src_fps = float(components.frame_rate)
     audio = components.audio
-    fields["src_frames"] = n_src
     fields["fps"] = src_fps
 
-    first = 0
-    n_sel = n_src
-    if trim is not None:
+    # A windowed decode already handed back just the trim's frames (and its soundtrack).
+    # The whole-file fallback still has to pick the window out by frame index.
+    first, n_sel = 0, n_src
+    if trim is not None and not windowed:
         start, end = trim
-        # The 1e-9 keeps a frame that lands exactly on a boundary from flipping sides
-        # over float noise (e.g. end=2.0 at 24fps must exclude frame 48, include 47).
+        # The 1e-9 keeps a frame that lands exactly on a boundary from flipping sides over
+        # float noise (e.g. end=2.0 at 24fps must exclude frame 48, include 47).
         first = max(0, math.ceil(start * src_fps - 1e-9))
         n_sel = max(0, min(n_src, math.ceil(end * src_fps - 1e-9)) - first)
+    fields["src_frames"] = n_sel
 
     indices = resample_indices(n_sel, src_fps, target_fps)
     if len(indices) < 5:
-        duration = (n_src / src_fps) if src_fps else 0.0
+        secs = (n_sel / src_fps) if src_fps else 0.0
         window = f" trimmed to {trim[0]:.2f}-{trim[1]:.2f}s" if trim is not None else ""
         raise ValueError(
             f"reference video {path!r}{window} has only {len(indices)} frame(s) at {target_fps}fps "
-            f"(source: {n_src} frames, {duration:.2f}s) - MiniMax H3 needs at least 5"
+            f"({n_sel} frame(s) decoded, {secs:.2f}s) - MiniMax H3 needs at least 5"
         )
     out = frames[[first + i for i in indices]]
     # Orient before cropping, for the reason in _orient_pil: the rect was drawn on the
@@ -382,7 +412,8 @@ def _decode_video(path, target_fps, crop, trim, fields, flip=None, rotate=None,
     if crop is not None:
         left, top, right, bottom = _crop_box(crop, out.shape[2], out.shape[1])
         out = out[:, top:bottom, left:right, :]
-    if trim is not None and audio is not None:
+    # Only the fallback needs to slice the soundtrack; the windowed decode already did.
+    if trim is not None and not windowed and audio is not None:
         audio = _slice_audio(audio, trim, path)
     fields["frames"] = len(indices)
     fields["audio"] = audio is not None
