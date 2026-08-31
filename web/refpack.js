@@ -124,6 +124,37 @@ const NODE_NAME = "MiniMaxH3ReferencePack";
 // >>> MMRP-MIGRATE
 const PROVIDER_VALUES = ["openrouter", "local", "none"];
 
+// >>> MMRP-MODAL
+// Dismiss on a backdrop click - but only when the PRESS started on the backdrop too.
+//
+// A `click` fires on the nearest common ancestor of its mousedown and mouseup targets, so
+// the modal is safe from the click that opened it: that press was on the canvas. It is not
+// safe from the SECOND press of a double-click. The editor opens on mousedown and appends
+// this overlay synchronously, so the second press and release both land on the backdrop,
+// and the modal a double-click just opened closes again on its own.
+//
+// The same rule fixes a second annoyance nobody had filed: selecting text in the prompt
+// box and releasing the button outside the panel counted as a backdrop click and threw the
+// edit away.
+//
+// Written as a decision function so it can be tested without a DOM.
+function shouldDismissOnBackdrop(targetIsBackdrop, pressStartedOnBackdrop) {
+    return targetIsBackdrop === true && pressStartedOnBackdrop === true;
+}
+
+function dismissOnBackdrop(overlay) {
+    let pressStartedOnBackdrop = false;
+    overlay.onmousedown = (e) => {
+        pressStartedOnBackdrop = e.target === overlay;
+    };
+    overlay.onclick = (e) => {
+        const dismiss = shouldDismissOnBackdrop(e.target === overlay, pressStartedOnBackdrop);
+        pressStartedOnBackdrop = false;
+        if (dismiss) overlay.remove();
+    };
+}
+// <<< MMRP-MODAL
+
 function migrateProviderValue(raw) {
     // Mirrors endpoint.normalize_provider in Python. Both exist on purpose: this one
     // fixes the graph the user is looking at, the Python one catches an API client
@@ -3151,9 +3182,7 @@ function openEditModal(node, kind, index) {
 
     const overlay = document.createElement("div");
     overlay.className = "mmrp-overlay";
-    overlay.onclick = (e) => {
-        if (e.target === overlay) overlay.remove();
-    };
+    dismissOnBackdrop(overlay);
 
     const modal = document.createElement("div");
     modal.className = "mmrp-modal mmrp-edit-modal";
@@ -3868,9 +3897,7 @@ function setWidget(node, name, value) {
 function openLocalServerModal(node, anchorBtn) {
     const overlay = document.createElement("div");
     overlay.className = "mmrp-overlay";
-    overlay.onclick = (e) => {
-        if (e.target === overlay) overlay.remove();
-    };
+    dismissOnBackdrop(overlay);
 
     const modal = document.createElement("div");
     modal.className = "mmrp-modal";
@@ -4026,9 +4053,7 @@ function openSystemPromptModal(node) {
 
     const overlay = document.createElement("div");
     overlay.className = "mmrp-overlay";
-    overlay.onclick = (e) => {
-        if (e.target === overlay) overlay.remove();
-    };
+    dismissOnBackdrop(overlay);
 
     const modal = document.createElement("div");
     modal.className = "mmrp-modal";
