@@ -92,3 +92,24 @@ def test_the_caret_lands_after_what_was_inserted():
     """So the user can keep typing. If it landed before, they would type INTO the tag."""
     out = _splice("wears a coat", 0, 0)
     assert out["value"][:out["caret"]] == "<Picture 1> "
+
+
+@requires_node
+def test_the_insert_goes_through_the_undo_preserving_writer():
+    """spliceTag decides WHAT the text becomes; the writer decides whether the browser's
+    undo can still see it. Assigning .value resets the undo stack, so typing a sentence,
+    inserting a tag and pressing Ctrl+Z did nothing at all.
+
+    Read from the source rather than executed, because the alternative is a full DOM: what
+    matters here is that the insert path calls the writer at all, and tests/test_undo.py
+    covers what the writer then does.
+    """
+    src = REFPACK_JS.read_text(encoding="utf-8")
+    start = src.index("function insertIntoDirection(")
+    body = src[start:src.index(chr(10) + "}" + chr(10), start)]
+    assert "writeTextPreservingUndo(" in body, (
+        "the insert writes .value directly again, which discards the undo history"
+    )
+    assert body.index("writeTextPreservingUndo(") < body.index("el.value = value"), (
+        "the direct assignment must be the FALLBACK, not the first choice"
+    )
