@@ -51,6 +51,24 @@ def _run(expression: str):
     return json.loads(proc.stdout.strip())
 
 
+def _round_trip(list_in):
+    """The shipped fromReferencesList -> toReferencesList pair, run under node."""
+    text = REFPACK_JS.read_text(encoding="utf-8")
+    start = text.find("export function fromReferencesList")
+    end = text.find("export function editSummary")
+    assert start != -1 and end != -1, "the converters moved"
+    helper = text.find("function takeEdit")
+    block = text[helper:text.find(chr(10) + "}" + chr(10), helper) + 3] + text[start:end]
+    js = f"toReferencesList(fromReferencesList({json.dumps(list_in)}))"
+    proc = subprocess.run(
+        [NODE, "--input-type=module", "-e",
+         block + f"{chr(10)}console.log(JSON.stringify({js}));{chr(10)}"],
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout.strip())
+
+
 def _refs(images=(), videos=(), audios=()):
     return {
         "images": [{"file": f} for f in images],
@@ -486,3 +504,25 @@ def test_distinct_files_are_unaffected():
         return tagRemap(before, after);
     })()""")
     assert out == {"<Picture 2>": "<Picture 1>", "<Picture 3>": "<Picture 2>"}
+
+
+@requires_node
+def test_a_subject_number_python_would_reject_is_dropped_not_kept():
+    """refs.validate_subjects RAISES for anything outside 1..9, so a references_json
+    written by hand with subjects: [1, 10] renders as perfectly fine in the browser and
+    then fails the whole node when queued. Dropping is right - keeping it would mean the
+    browser accepting what the server refuses - and the round trip must show that."""
+    out = _round_trip([{"kind": "image", "file": "a.png", "subjects": [1, 10, 0, -3, 2.5]}])
+    assert out[0].get("subjects") == [1], out
+
+
+@requires_node
+def test_valid_subjects_are_still_sorted_and_deduplicated():
+    out = _round_trip([{"kind": "image", "file": "a.png", "subjects": [3, 1, 3, 2]}])
+    assert out[0]["subjects"] == [1, 2, 3]
+
+
+@requires_node
+def test_a_reference_whose_subjects_are_all_invalid_carries_none():
+    out = _round_trip([{"kind": "image", "file": "a.png", "subjects": [0, 99]}])
+    assert "subjects" not in out[0], out

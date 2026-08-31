@@ -826,8 +826,7 @@ export function fromReferencesList(list) {
             if (visual) out.rotate_expand = false;
             else discard(r.file, "rotate_expand", r.rotate_expand);
         }
-        return out;
-    };
+        return out;    };
     for (const r of list || []) {
         if (!r || typeof r.file !== "string") continue;
         if (r.kind === "image")
