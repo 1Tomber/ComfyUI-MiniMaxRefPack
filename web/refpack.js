@@ -1011,6 +1011,23 @@ function hasEdit(ref) {
                       || ref.rotate || ref.flip));
 }
 
+// >>> MMRP-TRIMSTEP
+// Slide the whole trim window by `delta` seconds without changing its LENGTH, clamped so
+// neither edge leaves the clip. Shifting by one frame is delta = ±1/fps; the window keeps
+// its duration and stops dead at 0 and at the clip end. Pure, so tests/test_trimstep.py
+// runs it under node.
+export function shiftTrim(trim, delta, duration) {
+    if (!Array.isArray(trim) || trim.length < 2) return trim;
+    const [start, end] = trim;
+    if (!Number.isFinite(delta) || !Number.isFinite(duration)) return [start, end];
+    // How far it can actually move: not below 0 at the in-point, not past the clip at the
+    // out-point. min() of the two room amounts keeps the length fixed at either wall.
+    const room = delta >= 0 ? Math.min(delta, Math.max(0, duration - end))
+                            : Math.max(delta, -start);
+    return [start + room, end + room];
+}
+// <<< MMRP-TRIMSTEP
+
 // >>> MMRP-ORIENT
 // Turning the CROP RECT with the frame.
 //
@@ -3340,6 +3357,22 @@ function openEditModal(node, kind, index) {
     let syncAngleRef = () => {};
     let trim = Array.isArray(ref.trim) ? ref.trim.slice() : null; // null until duration known
     let duration = null;
+    // Source fps, for the frame-step controls. The <video> element does not expose it, so
+    // it comes from the same probe route the soundtrack toggle uses; until it answers the
+    // per-frame buttons stay disabled. updateFrameButtons is reassigned once the row exists.
+    let srcFps = 0;
+    let updateFrameButtons = () => {};
+    if (kind === "video") {
+        fetch(`/minimax_refpack/probe?file=${encodeURIComponent(ref.file)}`)
+            .then((res) => (res.ok ? res.json() : null))
+            .then((d) => {
+                if (d && Number.isFinite(d.fps) && d.fps > 0) {
+                    srcFps = d.fps;
+                    updateFrameButtons();
+                }
+            })
+            .catch(() => {});
+    }
     let ratio = null; // aspect lock; null = free
     let mediaW = 0;
     let mediaH = 0;
@@ -3761,6 +3794,70 @@ function openEditModal(node, kind, index) {
             stopPlayback();
             setTrim(0, duration || 0);
         };
+
+        // ---- frame navigation + the 15s guide (video only) ----
+        // "Frame" here means SOURCE frame, at the clip's own fps - what the preview shows,
+        // not the resampled 24fps the socket emits.
+        let minusFrameBtn = null;
+        let plusFrameBtn = null;
+        if (kind === "video") {
+            const stepRow = document.createElement("div");
+            stepRow.className = "mmrp-trim-row";
+            const stepLabel = document.createElement("span");
+            stepLabel.className = "mmrp-edit-label";
+            stepLabel.textContent = "Frame";
+            stepRow.appendChild(stepLabel);
+
+            const frameDur = () => (srcFps ? 1 / srcFps : 0.04); // ~25fps guess until probed
+
+            const mkStep = (text, title, fn) => {
+                const b = document.createElement("button");
+                b.className = "mmrp-btn mmrp-trim-step";
+                b.textContent = text;
+                b.title = title;
+                b.onclick = () => { stopPlayback(); fn(); };
+                stepRow.appendChild(b);
+                return b;
+            };
+
+            // Jump the preview to the in-point and to the last INCLUDED frame (out-point is
+            // exclusive, so the last frame sits one frame before it).
+            mkStep("⏮ In", "Jump the preview to the first frame of the trim", () => {
+                if (trim) media.currentTime = trim[0];
+            });
+            minusFrameBtn = mkStep("◀ −1", "Slide the whole window back one frame", () => {
+                if (!srcFps || !trim) return;
+                const [s, e] = shiftTrim(trim, -1 / srcFps, duration);
+                setTrim(s, e, s);
+            });
+            plusFrameBtn = mkStep("+1 ▶", "Slide the whole window forward one frame", () => {
+                if (!srcFps || !trim) return;
+                const [s, e] = shiftTrim(trim, 1 / srcFps, duration);
+                setTrim(s, e, s);
+            });
+            mkStep("Out ⏭", "Jump the preview to the last frame of the trim", () => {
+                if (trim) media.currentTime = Math.max(trim[0], trim[1] - frameDur());
+            });
+
+            // A quick way to set a 15s window from the in-point - a GUIDE, not a cap. The
+            // user can still drag or type any length; this just saves the fiddling.
+            const spacer = document.createElement("span");
+            spacer.className = "mmrp-trim-spacer";
+            stepRow.appendChild(spacer);
+            mkStep("15s", "Set the window to 15s from the in-point (a guide, not a limit)", () => {
+                if (!trim || !duration) return;
+                setTrim(trim[0], Math.min(trim[0] + 15, duration), trim[0]);
+            });
+
+            modal.appendChild(stepRow);
+
+            updateFrameButtons = () => {
+                // Only the per-frame nudges need the fps; In/Out/15s work without it.
+                if (minusFrameBtn) minusFrameBtn.disabled = !srcFps;
+                if (plusFrameBtn) plusFrameBtn.disabled = !srcFps;
+            };
+            updateFrameButtons();
+        }
 
         media.addEventListener("loadedmetadata", () => {
             duration = media.duration;

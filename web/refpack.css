@@ -628,3 +628,23 @@
     border-color: #4ea1ff;
     color: #cfe6ff;
 }
+
+/* Frame-navigation row in the edit modal: In / -1 / +1 / Out and the 15s guide. Compact
+   buttons; the spacer pushes 15s to the right so it reads as a separate quick-set. */
+.mmrp-trim-step {
+    flex: 0 0 auto;
+    padding: 0 8px;
+    height: 24px;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.mmrp-trim-step:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.mmrp-trim-spacer {
+    flex: 1 1 auto;
+    min-width: 8px;
+}
