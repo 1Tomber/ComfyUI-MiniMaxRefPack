@@ -330,11 +330,13 @@ class MiniMaxH3ReferencePack:
                                "token budget before answering.",
                 }),
                 "local_extra_body": ("STRING", {
-                    "multiline": True, "dynamicPrompts": False, "default": "",
-                    "tooltip": "Only on 'local'. A JSON object merged into the request as "
-                               "top-level fields, e.g. {\"ttl\": 1}. Applied LAST, so it "
-                               "overrides everything above it. The escape hatch for a "
-                               "server this node has not been taught about.",
+                    "dynamicPrompts": False, "default": "",
+                    "tooltip": "Only on 'local'. One line of JSON, a flat object merged "
+                               "into the request as top-level fields, e.g. {\"ttl\": 1}. "
+                               "Applied LAST, so it overrides everything above it. The "
+                               "escape hatch for a server this node has not been taught "
+                               "about. Single-line like api_base: a growable box fought "
+                               "the node's own resizing.",
                 }),
             },
         }
