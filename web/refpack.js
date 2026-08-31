@@ -110,6 +110,41 @@ const NODE_NAME = "MiniMaxH3ReferencePack";
 // >>> MMRP-MIGRATE
 const PROVIDER_VALUES = ["openrouter", "local", "none"];
 
+// >>> MMRP-UNDO
+// Write into the prompt textarea without throwing its undo history away.
+//
+// Assigning `.value` resets the undo stack in Chromium and Firefox. So typing a sentence,
+// inserting a tag and pressing Ctrl+Z did nothing at all - not "undid the insert", nothing
+// - and every retag pass (reorder, delete, soundtrack toggle) did the same thing to
+// whatever the user had been writing.
+//
+// execCommand("insertText") is deprecated and remains the only way to make a programmatic
+// edit the browser's own undo can see. It needs focus and a selection, so both are set
+// here; `restoreFocus` puts the caret back where it was, because a retag runs while the
+// user is on the CANVAS and stealing focus would be a worse bug than the one being fixed.
+//
+// Returns whether it worked. It fires `input` on success, so a caller that falls back to
+// assignment has to mirror the value itself.
+function writeTextPreservingUndo(el, start, end, text, restoreFocus) {
+    if (!el || typeof document === "undefined" || typeof document.execCommand !== "function") {
+        return false;
+    }
+    const previous = document.activeElement;
+    let ok = false;
+    try {
+        el.focus();
+        el.setSelectionRange(start, end);
+        ok = document.execCommand("insertText", false, text) !== false;
+    } catch (e) {
+        ok = false;   // a frontend that has removed it, or a detached element
+    }
+    if (ok && restoreFocus && previous && previous !== el && typeof previous.focus === "function") {
+        try { previous.focus(); } catch (e) { /* the old element left the DOM */ }
+    }
+    return ok;
+}
+// <<< MMRP-UNDO
+
 function migrateProviderValue(raw) {
     // Mirrors endpoint.normalize_provider in Python. Both exist on purpose: this one
     // fixes the graph the user is looking at, the Python one catches an API client
@@ -415,7 +450,10 @@ function withRetag(node, mutate) {
                 w.value = updated;
                 if (w.callback) w.callback(updated);
             }
-            if (node._mmrpBody) node._mmrpBody.directionInput.value = updated;
+            const el = node._mmrpBody && node._mmrpBody.directionInput;
+            if (el && !writeTextPreservingUndo(el, 0, el.value.length, updated, true)) {
+                el.value = updated;   // no undo to preserve here, but the text is right
+            }
             mlog("retagged", { changes: Object.keys(map).length });
         }
     }
