@@ -154,7 +154,6 @@ function dismissOnBackdrop(overlay) {
     };
 }
 // <<< MMRP-MODAL
-
 // >>> MMRP-UNDO
 // Write into the prompt textarea without throwing its undo history away.
 //
@@ -2442,7 +2441,13 @@ function insertIntoDirection(node, text) {
     const start = el.selectionStart ?? el.value.length;
     const end = el.selectionEnd ?? start;
     const { value, caret } = spliceTag(el.value, start, end, text);
-    el.value = value;
+    // The undo-preserving path first: assigning .value resets the textarea's undo stack,
+    // so typing a sentence, inserting a tag and pressing Ctrl+Z used to do nothing at all.
+    // Focus stays on the textarea here - unlike a retag, an insert IS the user typing into
+    // the prompt, so the caret belongs there afterwards.
+    if (!writeTextPreservingUndo(el, start, end, text, false)) {
+        el.value = value;
+    }
     el.setSelectionRange(caret, caret);
     el.focus();
     // Mirror into the hidden widget exactly the way the textarea's own input listener
