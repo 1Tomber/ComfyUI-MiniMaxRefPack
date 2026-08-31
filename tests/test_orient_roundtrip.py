@@ -144,3 +144,38 @@ def test_the_browsers_mirror_axis_matches_what_the_pipeline_does(rotate, screen_
         f"clicking the {screen_axis!r} mirror at {rotate} deg stored flip={source_axis!r}, "
         f"which does not produce the mirror the user asked for"
     )
+
+
+# ---- orientation belongs to the visual kinds only ------------------------------------
+
+
+@requires_node
+def test_an_audio_reference_does_not_keep_orientation():
+    """refs.Reference.from_dict gates orientation on `kind in ("image", "video")`, but the
+    browser spread it into every kind - so an audio reference in a hand-written
+    references_json kept rotate/flip through the round trip and re-serialised them, and
+    its tile badge summarised an orientation the server had already dropped. crop and trim
+    were gated per kind here all along; orientation was not."""
+    out = _round_trip([
+        {"kind": "audio", "file": "vo.wav", "rotate": 90, "flip": "h", "rotate_expand": False},
+    ])
+    assert out == [{"kind": "audio", "file": "vo.wav"}], out
+
+
+@requires_node
+@pytest.mark.parametrize("kind", ["image", "video"])
+def test_a_visual_reference_still_keeps_orientation(kind):
+    out = _round_trip([{"kind": kind, "file": f"a.{kind}", "rotate": 90, "flip": "h"}])
+    assert out[0]["rotate"] == 90
+    assert out[0]["flip"] == "h"
+
+
+@requires_node
+def test_a_rotate_value_python_would_reject_is_dropped():
+    """Python RAISES for these, so a references_json written by hand renders as perfectly
+    fine in the browser and then fails the whole node when queued. Dropping is the right
+    outcome - coercing would make the browser accept what the server refuses - but the
+    round trip must not carry it."""
+    for bad in ["90", True, [90], {"deg": 90}, float("nan")]:
+        out = _round_trip([{"kind": "image", "file": "a.png", "rotate": bad}])
+        assert "rotate" not in out[0], f"rotate={bad!r} survived the round trip"

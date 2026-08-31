@@ -775,26 +775,64 @@ export function fromReferencesList(list) {
     // directions whitelist, so a field missing from here is dropped between the widget and
     // the working state - which presents as "the edit did not save" rather than as an
     // error, and is worth naming in one place for that reason.
-    const extras = (r) => ({
-            // Sorted and de-duplicated on the way IN, mirroring refs.validate_subjects.
-            // Without it a hand-edited or older value renders as "2 1" on the pill while
-            // the server uses [1, 2] - the UI and the payload disagreeing about the same
-            // reference, which is the exact failure the tag rule's JS mirror exists to
-            // avoid elsewhere.
-            ...(Array.isArray(r.subjects) && r.subjects.length
-                ? { subjects: [...new Set(r.subjects.filter((n) => Number.isInteger(n)
-                                                            && n >= 1 && n <= 9))]
-                        .sort((a, b) => a - b) }
-                : {}),
-            ...(Number.isFinite(r.rotate) && r.rotate ? { rotate: r.rotate } : {}),
-            ...(r.flip ? { flip: r.flip } : {}),
-            ...(r.rotate_expand === false ? { rotate_expand: false } : {}),
-    });
+    // What survives the round trip, and what is announced when it does not.
+    //
+    // GATED ON THE KIND for orientation, matching refs.Reference.from_dict's
+    // `visual = kind in ("image", "video")`. Spread into every kind, an AUDIO reference in
+    // a hand-written references_json kept rotate/flip through the round trip and
+    // re-serialised them - the tile badge summarising an orientation the server had
+    // already dropped. crop and trim were gated per kind here all along; orientation was
+    // the one that was not.
+    //
+    // NOT gated for subjects: refs.py allows those on all three kinds deliberately, since
+    // a voice belongs to a subject as much as a face does.
+    //
+    // AND IT SAYS WHEN IT DISCARDS SOMETHING. Python RAISES for values this quietly
+    // ignored - rotate: "90", subjects: [1, 10] - so a hand-written references_json
+    // renders as perfectly fine here and then fails the whole node the moment it is
+    // queued. Worse, the first edit rewrites the widget without the discarded value, so
+    // the evidence goes with it. Dropping is still right, because keeping it would mean
+    // the browser accepting what the server refuses; doing it in silence is not.
+    const discard = (file, field, value) => {
+        console.warn(
+            `[MiniMaxRefPack] ignoring ${field}=${JSON.stringify(value)} on ${file}: ` +
+            "refs.py does not accept that value, so it was dropped rather than sent"
+        );
+    };
+    const extras = (r, kind) => {
+        const visual = kind === "image" || kind === "video";
+        const out = {};
+
+        // Sorted and de-duplicated on the way IN, mirroring refs.validate_subjects.
+        // Without it a hand-edited or older value renders as "2 1" on the pill while the
+        // server uses [1, 2] - the UI and the payload disagreeing about one reference.
+        if (Array.isArray(r.subjects) && r.subjects.length) {
+            const kept = r.subjects.filter((n) => Number.isInteger(n) && n >= 1 && n <= 9);
+            const dropped = r.subjects.filter((n) => !kept.includes(n));
+            if (dropped.length) discard(r.file, "subjects", dropped);
+            if (kept.length) out.subjects = [...new Set(kept)].sort((a, b) => a - b);
+        }
+
+        if (r.rotate !== undefined && r.rotate !== null && r.rotate !== 0) {
+            if (!visual) discard(r.file, "rotate", r.rotate);
+            else if (Number.isFinite(r.rotate)) out.rotate = r.rotate;
+            else discard(r.file, "rotate", r.rotate);
+        }
+        if (r.flip) {
+            if (visual) out.flip = r.flip;
+            else discard(r.file, "flip", r.flip);
+        }
+        if (r.rotate_expand === false) {
+            if (visual) out.rotate_expand = false;
+            else discard(r.file, "rotate_expand", r.rotate_expand);
+        }
+        return out;
+    };
     for (const r of list || []) {
         if (!r || typeof r.file !== "string") continue;
         if (r.kind === "image")
             refs.images.push({ file: r.file, missing: !!r.missing, crop: takeEdit(r.crop),
-                               ...extras(r) });
+                               ...extras(r, "image") });
         else if (r.kind === "video")
             refs.videos.push({
                 file: r.file,
@@ -819,11 +857,11 @@ export function fromReferencesList(list) {
                 missing: !!r.missing,
                 crop: takeEdit(r.crop),
                 trim: takeEdit(r.trim),
-                ...extras(r),
+                ...extras(r, "video"),
             });
         else if (r.kind === "audio")
             refs.audios.push({ file: r.file, missing: !!r.missing, trim: takeEdit(r.trim),
-                               ...extras(r) });
+                               ...extras(r, "audio") });
     }
     return refs;
 }
