@@ -349,6 +349,7 @@ const C = {
     textFaint: "#888",
     textDim: "#666",
     danger: "#ff4444",
+    highlight: "#4ea1ff",   // subject-bar highlight; deliberately not the red selection
 };
 
 // Canvas row geometry, all in CSS px (draw() scales the backing store by
@@ -522,6 +523,7 @@ function layoutOf(node) {
 
 function contentHeight(node) {
     return CONTENT.uploadsH + CONTENT.gap + layoutOf(node).height
+        + subjectBarExtra(node)
         + CONTENT.gap + promptHeightOf(node);
 }
 
@@ -811,6 +813,23 @@ export function subjectPillText(subjects, max = 3) {
     return `${list.slice(0, max).join(" ")}+${list.length - max}`;
 }
 // <<< MMRP-SUBJECT
+
+// >>> MMRP-SUBJBAR
+// The subject numbers actually in use, sorted and unique, across every reference. The
+// bar shows one chip per number and is hidden when the list is empty. Kept pure and
+// marker-delimited so tests/test_subject_bar.py can run it under node.
+export function assignedSubjectNumbers(refs) {
+    const seen = new Set();
+    for (const kind of ["images", "videos", "audios"]) {
+        for (const r of (refs && refs[kind]) || []) {
+            for (const n of (r && r.subjects) || []) {
+                if (Number.isInteger(n) && n >= 1 && n <= 9) seen.add(n);
+            }
+        }
+    }
+    return [...seen].sort((a, b) => a - b);
+}
+// <<< MMRP-SUBJBAR
 
 // ---- references_json <-> working-state conversion --------------------
 // refs.py's Reference shape:
@@ -1662,7 +1681,8 @@ function drawEditChip(ctx, x, y, edited) {
 // play glyph, missing treatment, selection stroke. `lines` is the pre-computed badge
 // text (up to three: tag, a video's <Audio N>, the crop/trim summary); `playState` is
 // null | "play" | "pause" (null = no preview affordance: images, missing refs).
-function drawTile(ctx, kind, ref, lines, x, y, selected, soundState, badgeH, playState) {
+function drawTile(ctx, kind, ref, lines, x, y, selected, soundState, badgeH, playState,
+                  highlighted) {
     const T = CL.tile;
 
     ctx.save();
@@ -1798,6 +1818,15 @@ function drawTile(ctx, kind, ref, lines, x, y, selected, soundState, badgeH, pla
     pathRoundRect(ctx, x + 0.5, y + 0.5, T - 1, T - 1, 4);
     ctx.stroke();
 
+    if (highlighted) {
+        // A subject chip is active and this tile carries that subject. Drawn INSIDE
+        // the tile in blue so it reads together with the red selection ring rather
+        // than fighting it - a tile can be both selected and highlighted at once.
+        ctx.strokeStyle = C.highlight;
+        ctx.lineWidth = 3;
+        pathRoundRect(ctx, x + 2, y + 2, T - 4, T - 4, 3);
+        ctx.stroke();
+    }
     if (selected) {
         // The one accent in the whole node: LTX-red rectangle around the tile.
         ctx.strokeStyle = C.danger;
@@ -1946,6 +1975,7 @@ function draw(node) {
     const playing = node._mmrpPlaying;
     const drag = node._mmrpDrag;
     const picker = node._mmrpPicker;
+    const highlightSubject = node._mmrpHighlightSubject;
 
     // `layout` was computed above, from the width, before the canvas height was applied.
     // Everything below still paints in one pass with no scroll offset, because the slab
@@ -2022,8 +2052,10 @@ function draw(node) {
             const dragging = drag && drag.active && drag.kind === kind && drag.index === i;
             if (dragging) ctx.globalAlpha = 0.35;
             const picking = picker && picker.kind === kind && picker.index === i;
+            const highlighted = highlightSubject != null
+                && (ref.subjects || []).includes(highlightSubject);
             drawTile(ctx, kind, ref, lines, tx, ty, selected, soundState, badgeH,
-                     picking ? null : playState);
+                     picking ? null : playState, highlighted);
             ctx.globalAlpha = 1;
             const pickerCells = picking
                 ? drawSubjectPicker(ctx, ref, tx, ty, kind, i)
@@ -2190,6 +2222,16 @@ export function hitTest(node, x, y) {
 // A drag has to travel before it counts as one. Below this the gesture is still a click,
 // which is what keeps "select a tile" working now that dragging one means something.
 const DRAG_THRESHOLD = 4;
+// How long a single click on a tile waits before opening the subject picker, so a
+// double-click (which inserts the tile's tag) can cancel it first and never flash the
+// picker open. A touch above a comfortable double-click; the picker is a deliberate action
+// so the small delay is unnoticed, and the alternative — the picker popping on every
+// double-click — is what this is here to stop.
+const DBLCLICK_MS = 260;
+// Height of the <Subject N> chip row above the prompt. Present only when at least one
+// subject is assigned; it grows the node like a wrapped media row does, never steals
+// from the prompt box.
+const SUBJECT_BAR_H = 24;
 
 // >>> MMRP-DROP
 // Where a drop at (x, y) would insert, as an index into that kind's array.
@@ -2275,16 +2317,25 @@ function finishDrag(node, e) {
         return;
     }
     if (!drag.active) {
-        // Never crossed the threshold, so it was a click. Selecting still happens; the
-        // click additionally toggles this tile's subject picker, which is the gesture
-        // that makes grouping quick. Clicking a DIFFERENT tile moves the picker there
-        // rather than closing it, so working along a row is one click per tile.
+        // Never crossed the threshold, so it was a click. Selecting happens now; the
+        // PICKER is deferred by one double-click interval so a double-click (which inserts
+        // the tile's tag) does not flash the picker open on its first click. onCanvasDblClick
+        // and the detail>=2 path in onCanvasMouseDown both cancel this pending open.
+        //
+        // Clicking a DIFFERENT tile still moves the picker there rather than closing it,
+        // so working along a row is one click per tile.
         node._mmrpSelected = { kind: drag.kind, index: drag.index };
-        const open = node._mmrpPicker;
-        node._mmrpPicker = (open && open.kind === drag.kind && open.index === drag.index)
-            ? null
-            : { kind: drag.kind, index: drag.index };
-        if (node._mmrpPicker) stopPreview(node);   // the picker covers the play glyph
+        const target = { kind: drag.kind, index: drag.index };
+        clearTimeout(node._mmrpPickerTimer);
+        node._mmrpPickerTimer = setTimeout(() => {
+            node._mmrpPickerTimer = null;
+            const open = node._mmrpPicker;
+            node._mmrpPicker = (open && open.kind === target.kind && open.index === target.index)
+                ? null
+                : target;
+            if (node._mmrpPicker) stopPreview(node);   // the picker covers the play glyph
+            scheduleDraw(node);
+        }, DBLCLICK_MS);
         scheduleDraw(node);
         return;
     }
@@ -2346,6 +2397,13 @@ function onDragMove(node, e) {
 
 function onCanvasMouseDown(node, e) {
     if (e.button !== 0) return;
+    // The second press of a double-click. Cancel the picker the first click deferred, so a
+    // double-click never opens it. Uses the browser's own double-click timing (which is
+    // what sets detail>=2), which is more reliable than racing our DBLCLICK_MS timer.
+    if (e.detail >= 2) {
+        clearTimeout(node._mmrpPickerTimer);
+        node._mmrpPickerTimer = null;
+    }
     const pos = getMousePos(node._mmrpBody.canvas, e);
     const hit = hitTest(node, pos.x, pos.y);
     if (!hit) {
@@ -2468,6 +2526,10 @@ function insertIntoDirection(node, text) {
 // lose its way in — and the tag is the thing you reach for far more often, because it is
 // what every sentence in the prompt has to name.
 function onCanvasDblClick(node, e) {
+    // This is the second click of the pair, so cancel the picker the first click deferred:
+    // a double-click inserts the tag and must not leave the picker open behind it.
+    clearTimeout(node._mmrpPickerTimer);
+    node._mmrpPickerTimer = null;
     const pos = getMousePos(node._mmrpBody.canvas, e);
     const hit = hitTest(node, pos.x, pos.y);
     // The picker and the tag insert overlap on the same pixels: the first click of a
@@ -2666,6 +2728,56 @@ function retagEnabled(node) {
 
 // The prompt box is the one element whose height is a preference rather than a
 // consequence, so it is the one element with an inline height.
+// The chip row's contribution to the node height: its own height plus one gap, but
+// only when it is showing. Zero otherwise, so a node with no subjects is exactly as
+// tall as it was before this feature existed.
+function subjectBarExtra(node) {
+    const refs = node && node._mmrpRefs;
+    return assignedSubjectNumbers(refs).length ? SUBJECT_BAR_H + CONTENT.gap : 0;
+}
+
+// Rebuild the chip row from the subjects currently in use. Single click on a chip
+// highlights every reference carrying that subject; double click inserts <Subject N>
+// into the prompt. The single action is DEFERRED by one double-click interval, the
+// same rule the tile picker uses, so a double-click does not toggle the highlight on
+// its way to inserting.
+function syncSubjectBar(node) {
+    const bar = node._mmrpBody && node._mmrpBody.subjectBar;
+    if (!bar) return;
+    const nums = assignedSubjectNumbers(node._mmrpRefs);
+    // A highlight whose subject is no longer assigned has nothing left to point at.
+    if (node._mmrpHighlightSubject != null && !nums.includes(node._mmrpHighlightSubject)) {
+        node._mmrpHighlightSubject = null;
+    }
+    bar.replaceChildren();
+    if (!nums.length) {
+        bar.style.display = "none";
+        return;
+    }
+    bar.style.display = "flex";
+    for (const n of nums) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "mmrp-subject-chip";
+        if (node._mmrpHighlightSubject === n) chip.classList.add("mmrp-subject-chip-on");
+        chip.textContent = `<Subject ${n}>`;
+        chip.title = "Click: highlight its references \u00b7 Double-click: insert into the prompt";
+        chip.onclick = () => {
+            clearTimeout(chip._mmrpTimer);
+            chip._mmrpTimer = setTimeout(() => {
+                node._mmrpHighlightSubject = node._mmrpHighlightSubject === n ? null : n;
+                syncSubjectBar(node);
+                scheduleDraw(node);
+            }, DBLCLICK_MS);
+        };
+        chip.ondblclick = () => {
+            clearTimeout(chip._mmrpTimer);
+            insertIntoDirection(node, `<Subject ${n}>`);
+        };
+        bar.appendChild(chip);
+    }
+}
+
 function syncPromptHeight(node) {
     const el = node._mmrpBody && node._mmrpBody.directionInput;
     if (el) el.style.height = `${promptHeightOf(node)}px`;
@@ -2786,6 +2898,11 @@ function removeRef(node, kind, index) {
 function renderNodeBody(node) {
     const body = node._mmrpBody;
     if (!body) return;
+    // The chip row tracks the current reference set, so it is refreshed here - the one
+    // function every refs change routes through (creation, a config load, an edit). Doing
+    // it only in the callers missed the load path, where onConfigure re-parses the refs
+    // after creation and only renderNodeBody runs again.
+    syncSubjectBar(node);
     const refs = node._mmrpRefs;
     for (const kind of KINDS) {
         body.uploadButtons[kind].disabled = refs[`${kind}s`].length >= CAPS[kind];
@@ -2921,6 +3038,14 @@ function buildCustomBlock(node) {
     // Per spec: "just a large text area" — one plain DOM textarea on the grey
     // node body, no wrapper, no overlay label, no unfocused dimming (the dimming
     // plus a low-contrast border is exactly what once made this box invisible).
+    // The <Subject N> chip row, above the prompt. Empty and hidden until a subject is
+    // assigned; syncSubjectBar fills it. In flow (the previews above are absolutely
+    // positioned overlays), so it sits between the media canvas and the textarea.
+    const subjectBar = document.createElement("div");
+    subjectBar.className = "mmrp-subject-bar";
+    subjectBar.style.display = "none";
+    container.appendChild(subjectBar);
+
     const directionInput = document.createElement("textarea");
     directionInput.className = "mmrp-direction";
     directionInput.placeholder = "Prompt — describe the shot…";
@@ -2934,6 +3059,7 @@ function buildCustomBlock(node) {
         fileInputs,
         canvas,
         ctx: canvas.getContext("2d"),
+        subjectBar,
         directionInput,
         previewVideo,
         previewAudio,
@@ -4329,6 +4455,7 @@ function installSelectionHandlers(node) {
         // a reorder to a node that is no longer in the graph.
         node._mmrpDrag = null;
         endDragListeners(node);
+        clearTimeout(node._mmrpPickerTimer);
         liveNodes.delete(node);
         if (origOnRemoved) origOnRemoved.apply(this, arguments);
     };
@@ -4497,6 +4624,7 @@ function minNodeHeight(node) {
     const widgetY = (node._mmrpDomWidget && node._mmrpDomWidget.last_y) || 80;
     const outputsMin = ((node.outputs && node.outputs.length) || 1) * 20 + 40;
     const content = CONTENT.uploadsH + CONTENT.gap + layoutOf(node).height
+        + subjectBarExtra(node)
         + CONTENT.gap + CONTENT.minPromptH;
     return Math.max(widgetY + content + domWidgetMargin(node) * 2, outputsMin);
 }

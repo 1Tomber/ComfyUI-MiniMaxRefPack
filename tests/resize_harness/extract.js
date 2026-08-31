@@ -69,6 +69,10 @@ const FN_NAMES = [
     "syncPromptHeight", "applyCanvasHeight",
     "isUserResizing", "isSizePair", "absorbPointerIntoPrompt", "minNodeHeight",
     "installSizeGuards", "setSizeInternal",
+    // contentHeight/minNodeHeight now add the subject bar's height; both helpers have to
+    // be in the sandbox or those two throw. With no subjects the extra is 0, so the resize
+    // contract is unchanged - which is exactly what the scenarios re-verify.
+    "subjectBarExtra", "assignedSubjectNumbers",
 ];
 const CONST_NAMES = ["KINDS", "CL", "CONTENT"];
 
