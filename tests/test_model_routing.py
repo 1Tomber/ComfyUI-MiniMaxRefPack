@@ -145,6 +145,19 @@ def test_the_new_name_beats_the_legacy_one_when_both_arrive(env, sent):
 # ---- the widget contract ---------------------------------------------------------
 
 
+def test_the_local_group_text_fields_are_single_line():
+    """local_extra_body used to be a multiline widget, and a growable textarea fights the
+    node's own resizing - reported live on the pod, where it grew and pushed the layout
+    around. It is a one-line JSON field like api_base now, and this pins it there: the
+    fix is one dropped flag that is trivial to re-add without noticing what it breaks."""
+    optional = nodes.MiniMaxH3ReferencePack.INPUT_TYPES()["optional"]
+    for name in ("api_base", "local_model_slug", "local_extra_body"):
+        opts = optional[name][1] if len(optional[name]) > 1 else {}
+        assert not opts.get("multiline"), (
+            f"{name} is multiline again; a growable text box breaks the responsive node"
+        )
+
+
 def test_the_widgets_are_named_and_ordered_as_declared():
     spec = nodes.MiniMaxH3ReferencePack.INPUT_TYPES()
     assert list(spec["required"]) == ["direction"]
