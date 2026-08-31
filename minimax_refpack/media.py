@@ -38,6 +38,35 @@ def resample_indices(n_src: int, src_fps: float, target_fps: int = 24) -> list[i
     return [min(max(round(i * src_fps / target_fps), 0), n_src - 1) for i in range(n_out)]
 
 
+def scaled_size(w: int, h: int, max_edge: int):
+    """New (w, h) with the LONG edge capped at max_edge, aspect kept, never upscaled.
+
+    Returns the size unchanged when max_edge is 0/None or the frame already fits, so a
+    reference smaller than the cap is emitted as-is rather than blown up.
+    """
+    w, h = int(w), int(h)
+    if not max_edge or max(w, h) <= max_edge:
+        return w, h
+    scale = max_edge / max(w, h)
+    return max(1, round(w * scale)), max(1, round(h * scale))
+
+
+def _frame_downscale_fn():
+    """Indirection so tests can confirm the downscale is invoked without torch installed.
+
+    Real path: area resampling on the [N, H, W, 3] tensor, which is the right filter for
+    shrinking (box average, no ringing).
+    """
+    import torch.nn.functional as F
+
+    def resize(frames, new_h, new_w):
+        chw = frames.permute(0, 3, 1, 2)
+        out = F.interpolate(chw, size=(new_h, new_w), mode="area")
+        return out.permute(0, 2, 3, 1).contiguous()
+
+    return resize
+
+
 def _orient_pil(img, flip, rotate, expand: bool = True):
     """Apply flip then rotation to a PIL image. Returns it unchanged when both are unset.
 
@@ -321,7 +350,7 @@ def load_audio(path: str, trim=None) -> dict:
 
 
 def load_video(path: str, target_fps: int = 24, crop=None, trim=None, flip=None,
-               rotate=None, rotate_expand: bool = True):
+               rotate=None, rotate_expand: bool = True, max_edge: int = 0):
     """(frames [N,H,W,3] resampled to target_fps, audio dict or None).
 
     CU/comfy_api/latest/_input_impl/video_types.py:118 VideoFromFile.get_components().
@@ -341,13 +370,14 @@ def load_video(path: str, target_fps: int = 24, crop=None, trim=None, flip=None,
     """
     import os
 
-    with logs.timed("load_video", file=os.path.basename(path), crop=crop, trim=trim) as fields:
+    with logs.timed("load_video", file=os.path.basename(path), crop=crop, trim=trim,
+                    cap=max_edge or None) as fields:
         return _decode_video(path, target_fps, crop, trim, fields, flip, rotate,
-                             rotate_expand)
+                             rotate_expand, max_edge)
 
 
 def _decode_video(path, target_fps, crop, trim, fields, flip=None, rotate=None,
-                  rotate_expand=True):
+                  rotate_expand=True, max_edge=0):
     """The body of load_video. Split out only so the timing/logging wrapper above stays
     a plain `with` block instead of wrapping 30 lines."""
     # Decode ONLY the trim window, not the whole file.
@@ -412,6 +442,17 @@ def _decode_video(path, target_fps, crop, trim, fields, flip=None, rotate=None,
     if crop is not None:
         left, top, right, bottom = _crop_box(crop, out.shape[2], out.shape[1])
         out = out[:, top:bottom, left:right, :]
+    # Downscale AFTER the crop, so the cap measures the region actually kept - the same
+    # order load_image uses. Every reference frame's tokens ride through every H3 sampling
+    # step, so a video's resolution is multiplied by its frame count in VRAM; this is the
+    # knob that keeps a heavy clip from OOM-ing the generation model. Guarded on the frame
+    # tensor having H/W dims so the list-based test fakes (which never set max_edge) skip it.
+    if max_edge and len(getattr(out, "shape", ())) >= 3:
+        cur_w, cur_h = out.shape[2], out.shape[1]
+        new_w, new_h = scaled_size(cur_w, cur_h, max_edge)
+        if (new_w, new_h) != (cur_w, cur_h):
+            out = _frame_downscale_fn()(out, new_h, new_w)
+            fields["scaled"] = f"{cur_w}x{cur_h}->{new_w}x{new_h}"
     # Only the fallback needs to slice the soundtrack; the windowed decode already did.
     if trim is not None and not windowed and audio is not None:
         audio = _slice_audio(audio, trim, path)

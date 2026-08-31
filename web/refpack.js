@@ -925,6 +925,12 @@ export function fromReferencesList(list) {
             if (visual) out.rotate_expand = false;
             else discard(r.file, "rotate_expand", r.rotate_expand);
         }
+        if (r.max_edge !== undefined && r.max_edge !== null) {
+            const n = Math.round(Number(r.max_edge));
+            if (!visual) discard(r.file, "max_edge", r.max_edge);
+            else if (Number.isFinite(n) && n >= 1) out.max_edge = n;
+            else discard(r.file, "max_edge", r.max_edge);
+        }
         return out;    };
     for (const r of list || []) {
         if (!r || typeof r.file !== "string") continue;
@@ -975,6 +981,7 @@ export function toReferencesList(refs) {
         if (Number.isFinite(r.rotate) && r.rotate) d.rotate = r.rotate;
         if (r.flip) d.flip = r.flip;
         if (r.rotate_expand === false) d.rotate_expand = false;
+        if (Number.isFinite(r.max_edge) && r.max_edge >= 1) d.max_edge = Math.round(r.max_edge);
         return d;
     };
     // The whole reference is handed to withEdits now, not a hand-picked subset of it.
@@ -1003,12 +1010,13 @@ export function editSummary(ref) {
     // difference is the whole point. A flip has nothing to state but itself.
     if (ref && ref.rotate) parts.push(`${Math.round(ref.rotate)}°`);
     if (ref && ref.flip) parts.push(ref.flip === "hv" ? "flipped ↔↕" : ref.flip === "h" ? "flipped ↔" : "flipped ↕");
+    if (ref && Number.isFinite(ref.max_edge) && ref.max_edge >= 1) parts.push(`≤${Math.round(ref.max_edge)}px`);
     return parts.length ? parts.join(" · ") : null;
 }
 
 function hasEdit(ref) {
     return !!(ref && (Array.isArray(ref.crop) || Array.isArray(ref.trim)
-                      || ref.rotate || ref.flip));
+                      || ref.rotate || ref.flip || (Number.isFinite(ref.max_edge) && ref.max_edge >= 1)));
 }
 
 // >>> MMRP-TRIMSTEP
@@ -1027,6 +1035,40 @@ export function shiftTrim(trim, delta, duration) {
     return [start + room, end + room];
 }
 // <<< MMRP-TRIMSTEP
+
+// >>> MMRP-OUTSIZE
+// The pixel size a reference actually emits: source -> rotate -> crop -> long-edge cap.
+// Shown live next to the downscale slider so a setting's cost is visible, and the mirror
+// of media.scaled_size on the Python side. Pure, so tests/test_outsize.py runs it.
+export function scaledSizeJs(w, h, maxEdge) {
+    w = Math.max(1, Math.round(w));
+    h = Math.max(1, Math.round(h));
+    if (!maxEdge || Math.max(w, h) <= maxEdge) return [w, h];
+    const s = maxEdge / Math.max(w, h);
+    return [Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s))];
+}
+
+export function outputSize(srcW, srcH, rotate, expand, crop, maxEdge) {
+    let w = Math.max(1, Math.round(srcW || 0));
+    let h = Math.max(1, Math.round(srcH || 0));
+    // Rotation changes the extent the crop fractions are measured against - a quarter turn
+    // swaps the axes; a free angle with expand grows to the rotated bounding box.
+    const deg = ((((rotate || 0) % 360) + 360) % 360);
+    if (deg === 90 || deg === 270) { const s = w; w = h; h = s; }
+    else if (deg !== 0 && deg !== 180 && expand !== false) {
+        const r = (deg * Math.PI) / 180;
+        const bw = Math.abs(w * Math.cos(r)) + Math.abs(h * Math.sin(r));
+        const bh = Math.abs(w * Math.sin(r)) + Math.abs(h * Math.cos(r));
+        w = Math.max(1, Math.round(bw));
+        h = Math.max(1, Math.round(bh));
+    }
+    if (Array.isArray(crop) && crop.length === 4) {
+        w = Math.max(1, Math.round(w * crop[2]));
+        h = Math.max(1, Math.round(h * crop[3]));
+    }
+    return scaledSizeJs(w, h, maxEdge);
+}
+// <<< MMRP-OUTSIZE
 
 // >>> MMRP-ORIENT
 // Turning the CROP RECT with the frame.
@@ -3357,19 +3399,27 @@ function openEditModal(node, kind, index) {
     let syncAngleRef = () => {};
     let trim = Array.isArray(ref.trim) ? ref.trim.slice() : null; // null until duration known
     let duration = null;
-    // Source fps, for the frame-step controls. The <video> element does not expose it, so
-    // it comes from the same probe route the soundtrack toggle uses; until it answers the
-    // per-frame buttons stay disabled. updateFrameButtons is reassigned once the row exists.
+    // The downscale cap (max long edge, px) for this reference; null = source resolution.
+    let maxEdge = Number.isFinite(ref.max_edge) && ref.max_edge >= 1 ? Math.round(ref.max_edge) : null;
+    // Source pixel dimensions and fps, from the probe route (a <video>/<img> element does
+    // not expose fps, and the output-size readout needs the source size). syncScale and
+    // updateFrameButtons are reassigned once their rows exist; the probe calls them so the
+    // controls fill in the moment it answers.
+    let srcW = 0;
+    let srcH = 0;
     let srcFps = 0;
     let updateFrameButtons = () => {};
-    if (kind === "video") {
+    let syncScale = () => {};
+    if (kind !== "audio") {
         fetch(`/minimax_refpack/probe?file=${encodeURIComponent(ref.file)}`)
             .then((res) => (res.ok ? res.json() : null))
             .then((d) => {
-                if (d && Number.isFinite(d.fps) && d.fps > 0) {
-                    srcFps = d.fps;
-                    updateFrameButtons();
-                }
+                if (!d) return;
+                if (Number.isFinite(d.width) && d.width > 0) srcW = d.width;
+                if (Number.isFinite(d.height) && d.height > 0) srcH = d.height;
+                if (Number.isFinite(d.fps) && d.fps > 0) srcFps = d.fps;
+                updateFrameButtons();
+                syncScale();
             })
             .catch(() => {});
     }
@@ -3387,6 +3437,8 @@ function openEditModal(node, kind, index) {
         if (clearCropBtn) clearCropBtn.disabled = normalizeCrop(crop) === null;
         if (clearTrimBtn) clearTrimBtn.disabled = normalizeTrim(trim, duration) === null;
         if (clearRotateBtn) clearRotateBtn.disabled = !rotate && !flip;
+        // Crop and rotate change the emitted size, so the downscale readout follows them.
+        syncScale();
     };
 
     // Show the orientation by transforming the MEDIA inside its wrapper. The crop layer
@@ -3692,6 +3744,87 @@ function openEditModal(node, kind, index) {
         };
         orow.appendChild(clearRotateBtn);
         modal.appendChild(orow);
+    }
+
+    // ---- downscale: slider + max-side-length entry + live output size (image/video) ----
+    // The long edge is capped AFTER the crop, so the readout shows what the socket actually
+    // emits. It matters most for video: every reference frame's tokens ride every H3
+    // sampling step, so an uncapped clip is what OOM's the generation model.
+    if (wantsCrop) {
+        const SCALE_MIN = 64;
+        const SCALE_FALLBACK_MAX = 4096; // until the probe answers with the real dimensions
+        const srcLong = () => (srcW && srcH ? Math.max(srcW, srcH) : SCALE_FALLBACK_MAX);
+
+        const row = document.createElement("div");
+        row.className = "mmrp-trim-row mmrp-scale-row";
+        const label = document.createElement("span");
+        label.className = "mmrp-edit-label";
+        label.textContent = "Scale";
+        row.appendChild(label);
+
+        const slider = document.createElement("input");
+        slider.type = "range";
+        slider.className = "mmrp-scale-slider";
+        slider.min = String(SCALE_MIN);
+        slider.max = String(SCALE_FALLBACK_MAX);
+        slider.step = "16";
+
+        const num = document.createElement("input");
+        num.type = "number";
+        num.className = "mmrp-trim-num";
+        num.min = String(SCALE_MIN);
+        num.step = "1";
+        num.title = "Max side length in pixels. Blank = source resolution.";
+        num.addEventListener("keydown", (e) => e.stopPropagation());
+
+        const px = document.createElement("span");
+        px.className = "mmrp-edit-label";
+        px.textContent = "px";
+
+        const out = document.createElement("span");
+        out.className = "mmrp-edit-label mmrp-scale-out";
+
+        // "Full size": the Clear pair for this row, back to the source resolution.
+        const clearScaleBtn = document.createElement("button");
+        clearScaleBtn.className = "mmrp-btn mmrp-clear-btn";
+        clearScaleBtn.textContent = "Full size";
+
+        row.appendChild(slider);
+        row.appendChild(num);
+        row.appendChild(px);
+        row.appendChild(out);
+        row.appendChild(clearScaleBtn);
+        modal.appendChild(row);
+
+        // A cap at or above the source long edge is no cap at all - store null so an
+        // untouched reference serialises no max_edge and stays byte-identical.
+        const setMaxEdge = (v) => {
+            const long = srcLong();
+            if (!v || v >= long) maxEdge = null;
+            else maxEdge = Math.max(SCALE_MIN, Math.min(long, Math.round(v)));
+            syncScale();
+        };
+
+        slider.addEventListener("input", () => setMaxEdge(parseInt(slider.value, 10)));
+        num.addEventListener("change", () => setMaxEdge(parseInt(num.value, 10) || 0));
+        clearScaleBtn.onclick = () => setMaxEdge(0);
+
+        syncScale = () => {
+            const long = srcLong();
+            slider.max = String(long);
+            slider.disabled = !(srcW && srcH);
+            slider.value = String(Math.max(SCALE_MIN, Math.min(long, maxEdge || long)));
+            num.value = maxEdge ? String(maxEdge) : "";
+            num.placeholder = srcW && srcH ? String(long) : "";
+            clearScaleBtn.disabled = maxEdge === null;
+            if (srcW && srcH) {
+                const [ow, oh] = outputSize(srcW, srcH, rotate, expand, crop, maxEdge);
+                out.textContent = `${srcW}×${srcH} → ${ow}×${oh}`;
+            } else {
+                out.textContent = "…";
+            }
+        };
+        syncScale();
     }
 
     // ---- trim bar + 2dp second fields (video/audio) ----
@@ -4043,6 +4176,11 @@ function openEditModal(node, kind, index) {
         // Only meaningful alongside a rotation, and only when it differs from the default.
         if (nr && !expand) target.rotate_expand = false;
         else delete target.rotate_expand;
+
+        // The downscale cap. null = source resolution -> nothing serialised, so an
+        // untouched reference keeps its byte-identical references_json.
+        if (wantsCrop && Number.isFinite(maxEdge) && maxEdge >= 1) target.max_edge = Math.round(maxEdge);
+        else delete target.max_edge;
 
         mlog("edit_saved", { kind, file: ref.file, crop: nt === null && nc === null ? null : nc,
                              trim: nt, rotate: nr || null, flip: flip || null,

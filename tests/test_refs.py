@@ -22,6 +22,7 @@ from minimax_refpack.refs import (
     output_types,
     slot_index,
     validate_crop,
+    validate_max_edge,
     validate_flip,
     validate_rotate,
     validate_subjects,
@@ -527,3 +528,37 @@ def test_ordinary_values_still_pass():
     assert validate_crop([0.25, 0.125, 0.5, 0.75]) == [0.25, 0.125, 0.5, 0.75]
     assert validate_trim([0.0, 0.001]) == [0.0, 0.001]
     assert validate_trim([12, 3600]) == [12.0, 3600.0]
+
+
+# ---- the per-reference downscale cap -------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [512, 1, 2048, 4096])
+def test_a_positive_whole_max_edge_is_accepted(value):
+    assert validate_max_edge(value) == value
+
+
+@pytest.mark.parametrize("value", [0, -1, -512, 512.5, "512", None, True, float("nan"),
+                                   float("inf")])
+def test_a_bad_max_edge_is_refused(value):
+    with pytest.raises(ReferenceError):
+        validate_max_edge(value)
+
+
+def test_max_edge_round_trips_on_the_visual_kinds():
+    for kind, file in (("image", "a.png"), ("video", "v.mp4")):
+        r = Reference.from_dict({"kind": kind, "file": file, "max_edge": 512})
+        assert r.max_edge == 512
+        assert r.to_dict()["max_edge"] == 512
+
+
+def test_max_edge_is_dropped_on_audio():
+    r = Reference.from_dict({"kind": "audio", "file": "a.wav", "max_edge": 512})
+    assert r.max_edge is None
+    assert "max_edge" not in r.to_dict()
+
+
+def test_an_unset_max_edge_serialises_nothing():
+    r = Reference.from_dict({"kind": "video", "file": "v.mp4"})
+    assert r.max_edge is None
+    assert "max_edge" not in r.to_dict()

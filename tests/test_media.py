@@ -1209,3 +1209,71 @@ def test_the_empty_window_message_mentions_the_likely_cause(monkeypatch):
 
     with pytest.raises(ValueError, match="left over from a longer version"):
         media._transcode_window("clip.mp4", None, [30.0, 31.0])
+
+
+# ---- the downscale cap --------------------------------------------------------------
+
+
+def test_scaled_size_caps_the_long_edge_keeping_aspect():
+    assert media.scaled_size(1920, 1080, 512) == (512, 288)
+    assert media.scaled_size(1080, 1920, 512) == (288, 512)
+
+
+def test_scaled_size_never_upscales_or_fires_when_off():
+    assert media.scaled_size(400, 300, 512) == (400, 300)   # already fits
+    assert media.scaled_size(1920, 1080, 0) == (1920, 1080)  # cap off
+    assert media.scaled_size(1920, 1080, None) == (1920, 1080)
+
+
+def test_load_video_downscales_the_frames_when_a_cap_is_given(monkeypatch):
+    """The knob that keeps a heavy clip from OOM-ing H3: every frame's tokens ride every
+    sampling step, so the long edge is capped AFTER the crop. torch is not importable
+    here, so the actual interpolate is behind _frame_downscale_fn; the test stubs it to
+    prove it is invoked with the right target size."""
+    import numpy as np
+
+    monkeypatch.setattr(media, "_video_from_file_cls",
+                        lambda: _fake_video_numpy(24, 24, 1080, 1920))  # 1920x1080 frames
+    called = {}
+
+    def fake_resize(frames, new_h, new_w):
+        called["size"] = (new_h, new_w)
+        return np.zeros((frames.shape[0], new_h, new_w, 3), dtype=np.float32)
+
+    monkeypatch.setattr(media, "_frame_downscale_fn", lambda: fake_resize)
+
+    frames, _ = media.load_video("clip.mp4", max_edge=512)
+    assert called["size"] == (288, 512), "1920x1080 capped at 512 -> 512x288 (h, w)"
+    assert frames.shape == (24, 288, 512, 3)
+
+
+def test_load_video_scales_after_the_crop(monkeypatch):
+    """The cap measures the CROPPED region, not the source - the same order load_image
+    uses, so the socket and the tile thumbnail agree."""
+    import numpy as np
+
+    monkeypatch.setattr(media, "_video_from_file_cls",
+                        lambda: _fake_video_numpy(24, 24, 1080, 1920))
+    called = {}
+    monkeypatch.setattr(media, "_frame_downscale_fn",
+                        lambda: (lambda frames, new_h, new_w: (
+                            called.__setitem__("size", (new_h, new_w))
+                            or np.zeros((frames.shape[0], new_h, new_w, 3), dtype=np.float32))))
+
+    # crop to the left half: 1920x1080 -> 960x1080, then cap 512 on the long edge (1080)
+    media.load_video("clip.mp4", crop=[0.0, 0.0, 0.5, 1.0], max_edge=512)
+    assert called["size"] == (512, round(960 * 512 / 1080))
+
+
+def test_load_video_without_a_cap_never_touches_the_downscaler(monkeypatch):
+    import numpy as np
+
+    monkeypatch.setattr(media, "_video_from_file_cls",
+                        lambda: _fake_video_numpy(24, 24, 1080, 1920))
+
+    def explode():
+        raise AssertionError("_frame_downscale_fn must not be called without a cap")
+
+    monkeypatch.setattr(media, "_frame_downscale_fn", explode)
+    frames, _ = media.load_video("clip.mp4")   # no max_edge
+    assert frames.shape == (24, 1080, 1920, 3)

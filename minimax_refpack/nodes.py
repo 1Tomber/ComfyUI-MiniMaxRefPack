@@ -459,15 +459,22 @@ class MiniMaxH3ReferencePack:
             # edit - confirmed by test_is_changed_key_moves_when_only_an_edit_changes.
             if tagged.kind == "image":
                 outputs[refs.slot_index(f"image_{tagged.slot}")] = media.load_image(
-                    path, crop=tagged.ref.crop, max_edge=max_reference_edge,
+                    path, crop=tagged.ref.crop,
+                    max_edge=tagged.ref.max_edge or max_reference_edge,
                     flip=tagged.ref.flip, rotate=tagged.ref.rotate,
                     rotate_expand=tagged.ref.rotate_expand,
                 )
             elif tagged.kind == "video":
+                # The GLOBAL cap is images-only by design (core resizes reference videos
+                # itself, so a shared cap would fight it). But a PER-REFERENCE max_edge does
+                # reach the video loader: each frame's tokens ride every H3 sampling step,
+                # so shrinking a heavy clip below core's default is the knob that keeps it
+                # from OOM-ing the generation model. Unset = no cap here, core decides.
                 frames, audio = media.load_video(
                     path, crop=tagged.ref.crop, trim=tagged.ref.trim,
                     flip=tagged.ref.flip, rotate=tagged.ref.rotate,
                     rotate_expand=tagged.ref.rotate_expand,
+                    max_edge=tagged.ref.max_edge or 0,
                 )
                 outputs[refs.slot_index(f"video_{tagged.slot}")] = frames
                 if tagged.ref.use_soundtrack and audio is not None:

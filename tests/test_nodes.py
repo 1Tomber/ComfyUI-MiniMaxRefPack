@@ -41,7 +41,7 @@ def test_slot_placement_for_a_mixed_set(fake_folder_paths, monkeypatch):
     _touch(tmp_path, "i1.jpg", "i2.jpg", "v1.mp4", "a1.wav")
 
     monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True: f"IMG:{path}")
-    monkeypatch.setattr(nodes.media, "load_video", lambda path, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True: (f"VIDEO:{path}", f"AUDIO:{path}"))
+    monkeypatch.setattr(nodes.media, "load_video", lambda path, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True, max_edge=0: (f"VIDEO:{path}", f"AUDIO:{path}"))
     monkeypatch.setattr(nodes.media, "load_audio", lambda path, trim=None: f"AUD:{path}")
     _stub_prompt(monkeypatch)
 
@@ -73,7 +73,7 @@ def test_slot_placement_for_a_mixed_set(fake_folder_paths, monkeypatch):
 def test_video_without_use_soundtrack_leaves_video_audio_slot_empty(fake_folder_paths, monkeypatch):
     tmp_path = fake_folder_paths
     _touch(tmp_path, "v1.mp4")
-    monkeypatch.setattr(nodes.media, "load_video", lambda path, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True: (f"VIDEO:{path}", f"AUDIO:{path}"))
+    monkeypatch.setattr(nodes.media, "load_video", lambda path, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True, max_edge=0: (f"VIDEO:{path}", f"AUDIO:{path}"))
     _stub_prompt(monkeypatch)
 
     # use_soundtrack now defaults to True, so the OFF case has to be explicit
@@ -165,7 +165,7 @@ def test_crop_and_trim_reach_the_loaders(fake_folder_paths, monkeypatch):
         calls["image"] = crop
         return "IMG"
 
-    def lv(path, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True):
+    def lv(path, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True, max_edge=0):
         calls["video"] = (crop, trim)
         return ("V", None)
 
@@ -736,15 +736,16 @@ def test_the_cap_is_declared_last_so_old_workflows_restore_unchanged():
     ]
 
 
-def test_the_cap_never_reaches_the_video_loader(fake_folder_paths, monkeypatch):
-    """Core already caps reference videos near 1MP through adapt_canvas
-    (CU/comfy_extras/nodes_minimax_h3.py:28,57-61,316), so the cap is images only."""
+def test_the_global_cap_never_reaches_the_video_loader(fake_folder_paths, monkeypatch):
+    """The GLOBAL max_reference_edge is images-only: core already resizes reference videos
+    itself (CU/comfy_extras/nodes_minimax_h3.py adapt_canvas), so handing the same cap to
+    the video loader would fight it. A video with no per-reference setting gets no cap."""
     tmp_path = fake_folder_paths
     _touch(tmp_path, "v1.mp4")
     calls = {}
 
-    def lv(path, crop=None, trim=None, **kwargs):
-        calls["kwargs"] = kwargs
+    def lv(path, crop=None, trim=None, max_edge=0, **kwargs):
+        calls["max_edge"] = max_edge
         return ("V", None)
 
     monkeypatch.setattr(nodes.media, "load_video", lv)
@@ -755,13 +756,32 @@ def test_the_cap_never_reaches_the_video_loader(fake_folder_paths, monkeypatch):
         direction="", openrouter_api_key="", model="m",
         references_json=references_json, max_reference_edge=1024,
     )
+    assert calls["max_edge"] == 0, "the global cap must not reach the video loader"
 
-    # Named rather than "no kwargs at all": other legitimate per-reference settings reach
-    # this loader (crop, trim, orientation), so an exact-empty assertion would break every
-    # time one is added while saying nothing about the cap. What must never appear is the
-    # cap, under either of its names.
-    assert "max_edge" not in calls["kwargs"]
-    assert "max_reference_edge" not in calls["kwargs"]
+
+def test_a_per_reference_cap_does_reach_the_video_loader(fake_folder_paths, monkeypatch):
+    """The per-reference downscale is the exception, and the whole point: it lets a heavy
+    clip be shrunk below core's default to fit VRAM, which the global cap deliberately
+    will not do."""
+    tmp_path = fake_folder_paths
+    _touch(tmp_path, "v1.mp4")
+    calls = {}
+
+    def lv(path, crop=None, trim=None, max_edge=0, **kwargs):
+        calls["max_edge"] = max_edge
+        return ("V", None)
+
+    monkeypatch.setattr(nodes.media, "load_video", lv)
+    _stub_prompt(monkeypatch)
+
+    references_json = json.dumps(
+        {"references": [{"kind": "video", "file": "v1.mp4", "max_edge": 512}]}
+    )
+    nodes.MiniMaxH3ReferencePack().build(
+        direction="", openrouter_api_key="", model="m",
+        references_json=references_json, max_reference_edge=1024,
+    )
+    assert calls["max_edge"] == 512, "a per-reference max_edge must reach the video loader"
 
 
 def test_the_cap_moves_the_is_changed_key(fake_folder_paths):
@@ -790,7 +810,7 @@ def test_build_logs_a_summary_and_a_line_per_reference(fake_folder_paths, monkey
     tmp_path = fake_folder_paths
     _touch(tmp_path, "i1.jpg", "v1.mp4", "a1.wav")
     monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0, flip=None, rotate=None, rotate_expand=True: "IMG")
-    monkeypatch.setattr(nodes.media, "load_video", lambda path, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True: ("V", "A"))
+    monkeypatch.setattr(nodes.media, "load_video", lambda path, crop=None, trim=None, flip=None, rotate=None, rotate_expand=True, max_edge=0: ("V", "A"))
     monkeypatch.setattr(nodes.media, "load_audio", lambda path, trim=None: "AUD")
     _stub_prompt(monkeypatch)
 

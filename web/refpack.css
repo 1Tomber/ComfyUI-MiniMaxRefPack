@@ -648,3 +648,24 @@
     flex: 1 1 auto;
     min-width: 8px;
 }
+
+/* Downscale row in the edit modal: slider + max-side entry + live output size. */
+.mmrp-scale-slider {
+    flex: 1 1 auto;
+    min-width: 80px;
+    height: 20px;
+    accent-color: #4ea1ff;
+    cursor: pointer;
+}
+
+.mmrp-scale-slider:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.mmrp-scale-out {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    color: #cfe6ff;
+    font-variant-numeric: tabular-nums;
+}

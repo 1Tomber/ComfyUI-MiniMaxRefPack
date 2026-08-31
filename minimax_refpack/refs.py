@@ -139,6 +139,26 @@ def validate_rotate(rotate: Any) -> float:
     return value % 360.0
 
 
+def validate_max_edge(value: Any) -> int:
+    """The long-edge pixel cap for this reference, or None for the source resolution.
+
+    Per-reference on purpose: H3 carries every reference frame's tokens through every
+    sampling step, so a video's resolution is multiplied by its frame count in VRAM, and a
+    heavy clip needs to be shrunk without also shrinking the still images. A positive whole
+    number of pixels; anything else is refused rather than silently coerced.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ReferenceError(f"max_edge must be a whole number of pixels, got {value!r}")
+    if isinstance(value, float) and (
+        value != value or value in (float("inf"), float("-inf")) or not value.is_integer()
+    ):
+        raise ReferenceError(f"max_edge must be a whole number of pixels, got {value!r}")
+    n = int(value)
+    if n < 1:
+        raise ReferenceError(f"max_edge must be at least 1 pixel, got {value!r}")
+    return n
+
+
 def validate_flip(flip: Any) -> str:
     """"h" / "v" / "hv" - mirror horizontally, vertically, or both."""
     if not isinstance(flip, str):
@@ -185,6 +205,10 @@ class Reference:
     rotate: float | None = None
     flip: str | None = None
     rotate_expand: bool = True
+    # A per-reference long-edge cap in pixels, applied AFTER the crop (so it measures the
+    # region actually kept). None = the source resolution. Image and video; it is how a
+    # heavy reference video is shrunk on its own. Omitted from to_dict when unset.
+    max_edge: int | None = None
 
     @property
     def oriented(self) -> bool:
@@ -209,6 +233,8 @@ class Reference:
             d["rotate_expand"] = bool(self.rotate_expand)
         if self.flip:
             d["flip"] = self.flip
+        if self.max_edge:
+            d["max_edge"] = int(self.max_edge)
         return d
 
     @classmethod
@@ -239,6 +265,8 @@ class Reference:
             rotate=validate_rotate(rotate) if rotate is not None and visual else None,
             flip=validate_flip(flip) if flip is not None and visual else None,
             rotate_expand=bool(d.get("rotate_expand", True)),
+            max_edge=(validate_max_edge(d.get("max_edge"))
+                      if d.get("max_edge") is not None and visual else None),
         )
 
 
