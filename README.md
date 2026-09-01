@@ -205,6 +205,28 @@ keeping it in step with.
 
 So a video's soundtrack is `<Audio 1>` even if you added a standalone audio clip before it. `<Video N>` and `<Audio N>` count independently.
 
+## Reading and fixing tags in the prompt
+
+Every tag in your direction text is highlighted where it sits — a quiet blue wash on a tag
+that still points at a reference, an intense red one on a tag that points at nothing. Hover
+a tag and its reference lights up on the canvas, so you can see at a glance which is which.
+
+A tag goes stray when the thing it named is gone. Deleting a reference rewrites its tag to a
+placeholder — `<Picture #>`, `<Video #>`, `<Audio #>` — rather than silently letting it
+inherit whatever took its old number, which would have left the sentence describing a
+*different* reference with nothing to flag it. A number you typed past the end of a set
+(`<Picture 4>` with three pictures) is stray for the same reason.
+
+Two ways to deal with one:
+
+- **Repoint it.** Click the tag in the prompt — it arms, and every reference outlines as a
+  target — then click the reference you meant. The tag is rewritten to that one's label.
+  Works on a `#` placeholder too. Click it again, press Escape, or click into the prose to
+  cancel.
+- **Clear them all.** When any stray exists, a **Delete stray tags** button appears at the
+  right of the subject row; it strips every broken tag from the prompt in one go. One
+  Ctrl+Z brings them back.
+
 ## Limits
 
 The model's limits, not the node's: 9 images, 3 videos, 3 soundtracks, 3 audio clips. Reference videos need at least 5 frames, get trimmed to MiniMax's 17k+5 frame grid, then capped to the length of the video you're generating. Clips are resampled to 24fps on the way in.

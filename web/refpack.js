@@ -674,6 +674,10 @@ export function assignTags(refs) {
 // the same way MMRP-MIGRATE is. Keep it free of imports and DOM.
 // >>> MMRP-RETAG
 
+// What an orphaned tag becomes. The "#" is deliberate: it is not a digit, so retag's
+// number pass leaves it untouched, and the highlighter reads it as broken.
+const STRAY_TAG = { images: "<Picture #>", videos: "<Video #>", audios: "<Audio #>" };
+
 // Flat "<Kind N>" -> "<Kind M>" map between two tag assignments, keyed by file. A file
 // that is gone from `after` contributes nothing: its tag has no successor, so mentions of
 // it are left alone rather than being pointed at whatever inherited the number.
@@ -708,11 +712,22 @@ export function tagRemap(before, after) {
                 if (seen === nth) { now = candidate; break; }
                 seen++;
             }
-            if (!now) continue;
+            if (!now) {
+                // The reference this tag named is gone. Leaving the tag to inherit whatever
+                // took its number makes the sentence describe a DIFFERENT reference - the
+                // number is still valid, so nothing flags it. Mark it broken instead:
+                // <Picture #> has no digit, so the renumber pass never touches it again, and
+                // it renders highlighted so the user can retarget or delete it.
+                map[wasTagged.tag] = STRAY_TAG[kind];
+                if (wasTagged.audioTag) map[wasTagged.audioTag] = STRAY_TAG.audios;
+                continue;
+            }
             if (now.tag !== wasTagged.tag) map[wasTagged.tag] = now.tag;
             // A video's soundtrack tag renumbers independently of its <Video N>.
-            if (wasTagged.audioTag && now.audioTag && now.audioTag !== wasTagged.audioTag) {
-                map[wasTagged.audioTag] = now.audioTag;
+            if (wasTagged.audioTag) {
+                // Soundtrack turned off (video kept) also orphans the <Audio N>.
+                if (!now.audioTag) map[wasTagged.audioTag] = STRAY_TAG.audios;
+                else if (now.audioTag !== wasTagged.audioTag) map[wasTagged.audioTag] = now.audioTag;
             }
         }
     }
@@ -748,6 +763,85 @@ export function retag(text, map) {
     return text.replace(/<(Picture|Video|Audio) (\d+)>/g, (whole) => map[whole] || whole);
 }
 // <<< MMRP-RETAG
+
+// >>> MMRP-TAGSCAN
+// Every reference tag in the direction text, with its span and whether it still points at
+// a live reference. This one reader feeds all of the tag UI: the highlight backdrop tints
+// valid tags lightly and stray ones intensely, hover maps a span back to a tile, and the
+// "delete stray tags" action walks the strays. Pure and marker-delimited so
+// tests/test_tagscan.py runs it under node.
+//
+// The `#` marker is what tagRemap leaves behind for a deleted reference (MMRP-RETAG); it is
+// stray by definition. A numbered tag is stray when its number falls outside what the set
+// currently holds - a leftover <Picture 4> after the fourth picture is gone reads fine to a
+// person and points at nothing.
+export function scanPromptTags(text, counts) {
+    counts = counts || {};
+    const maxOf = {
+        Picture: counts.images | 0,
+        Video: counts.videos | 0,
+        Audio: counts.audios | 0,
+    };
+    // Subjects are user-assigned, not positional, so validity is membership in the set that
+    // is actually in use - not a 1..N range. Undefined means "do not judge subjects": they
+    // render as ordinary tags and never count as stray.
+    let subjectSet = null;
+    if (counts.subjects != null) {
+        subjectSet = counts.subjects instanceof Set
+            ? counts.subjects : new Set(counts.subjects);
+    }
+    const out = [];
+    const re = /<(Picture|Video|Audio|Subject) (#|\d+)>/g;
+    let m;
+    while ((m = re.exec(text || "")) !== null) {
+        const kind = m[1];
+        const raw = m[2];
+        const num = raw === "#" ? null : parseInt(raw, 10);
+        let stray;
+        if (kind === "Subject") {
+            stray = raw === "#" || (subjectSet !== null && !subjectSet.has(num));
+        } else {
+            stray = raw === "#" || num < 1 || num > maxOf[kind];
+        }
+        out.push({
+            kind, num, stray, raw,
+            start: m.index, end: m.index + m[0].length, text: m[0],
+        });
+    }
+    return out;
+}
+
+// Splice a fresh tag over one scanned span. Reassignment clicks a live tile while a tag is
+// armed; the span came straight from scanPromptTags, so this is an offset splice rather
+// than another find-and-replace that could hit the wrong one of two identical tags.
+export function rewriteTagAt(text, start, end, replacement) {
+    text = text || "";
+    if (!(start >= 0) || !(end >= start) || end > text.length) return text;
+    return text.slice(0, start) + replacement + text.slice(end);
+}
+
+// Drop every stray tag from the text, what the "delete stray tags" button does. Walking
+// the scan spans left-to-right and rebuilding, rather than N regex replaces, keeps the
+// offsets valid as we go and lets each removal tidy the one space it leaves behind so
+// "a <Picture #> b" becomes "a b", not "a  b".
+export function stripStrayTags(text, counts) {
+    text = text || "";
+    const strays = scanPromptTags(text, counts).filter((t) => t.stray);
+    if (!strays.length) return text;
+    let out = "";
+    let cursor = 0;
+    for (const t of strays) {
+        out += text.slice(cursor, t.start);
+        cursor = t.end;
+        // One space, once: prefer swallowing the following space; failing that, the one
+        // that now trails in `out`. Never both, or "a <P #> <P #> b" would eat too much.
+        if (text[cursor] === " ") cursor += 1;
+        else if (out.endsWith(" ")) out = out.slice(0, -1);
+    }
+    out += text.slice(cursor);
+    return out;
+}
+// <<< MMRP-TAGSCAN
 
 // Run a mutation and carry the direction text with it. `mutate` returns the new refs.
 // Off => the refs still change, the text simply is not touched.
@@ -2047,6 +2141,10 @@ function draw(node) {
     const drag = node._mmrpDrag;
     const picker = node._mmrpPicker;
     const highlightSubject = node._mmrpHighlightSubject;
+    // Hovering a tag in the prompt lights its tile; arming a tag turns every tile into a
+    // click target for repointing it.
+    const highlightTile = node._mmrpHighlightTile;
+    const armedTag = node._mmrpArmedTag;
 
     // `layout` was computed above, from the width, before the canvas height was applied.
     // Everything below still paints in one pass with no scroll offset, because the slab
@@ -2142,10 +2240,23 @@ function draw(node) {
             const dragging = drag && drag.active && drag.kind === kind && drag.index === i;
             if (dragging) ctx.globalAlpha = 0.35;
             const picking = picker && picker.kind === kind && picker.index === i;
-            const highlighted = highlightSubject != null
-                && (ref.subjects || []).includes(highlightSubject);
+            const highlighted = (highlightSubject != null
+                && (ref.subjects || []).includes(highlightSubject))
+                || (highlightTile && highlightTile.kind === kind && highlightTile.index === i);
             drawTile(ctx, kind, ref, lines, tx, ty, selected, soundState, badgeH,
                      picking ? null : playState, highlighted);
+            // While a tag is armed, ring every tile as a repoint target - a dashed blue
+            // outline, distinct from the solid hover/subject highlight and the red
+            // selection so all three stay readable at once.
+            if (armedTag && !picking) {
+                ctx.save();
+                ctx.strokeStyle = C.highlight;
+                ctx.setLineDash([5, 4]);
+                ctx.lineWidth = 2;
+                pathRoundRect(ctx, tx + 1.5, ty + 1.5, CL.tile - 3, CL.tile - 3, 4);
+                ctx.stroke();
+                ctx.restore();
+            }
             ctx.globalAlpha = 1;
             const pickerCells = picking
                 ? drawSubjectPicker(ctx, ref, tx, ty, kind, i)
@@ -2497,6 +2608,8 @@ function onCanvasMouseDown(node, e) {
     const pos = getMousePos(node._mmrpBody.canvas, e);
     const hit = hitTest(node, pos.x, pos.y);
     if (!hit) {
+        // A press on bare slab disarms a reassignment and clears any selection/picker.
+        if (node._mmrpArmedTag) disarmTag(node);
         if (node._mmrpSelected || node._mmrpPicker) {
             node._mmrpSelected = null;
             node._mmrpPicker = null;
@@ -2535,6 +2648,12 @@ function onCanvasMouseDown(node, e) {
         openEditModal(node, hit.kind, hit.index);
     } else if (hit.type === "add") {
         node._mmrpBody.fileInputs[hit.kind].click();
+    } else if (node._mmrpArmedTag) {
+        // A tag is armed for reassignment and a tile was clicked: repoint the tag onto it,
+        // rather than selecting or starting a drag. Works for a "#" stray too - it becomes
+        // whatever tile is clicked.
+        reassignArmedTag(node, hit.kind, hit.index);
+        e.stopPropagation();
     } else {
         const ref = node._mmrpRefs[`${hit.kind}s`][hit.index];
         // A missing file has no thumbnail to drag and nothing worth reordering.
@@ -2816,14 +2935,191 @@ function retagEnabled(node) {
     return node._mmrpRetag !== false;
 }
 
+// The counts scanPromptTags judges a tag against: the highest number each kind actually
+// hands out, and which subject numbers are in use. The one shape assembled in the several
+// places that scan, so the highlighter, the stray check and the delete button can never
+// disagree about what "stray" means.
+//
+// Audio is the subtle one: a video's soundtrack claims an <Audio N> too, so the valid
+// range is (soundtracks that are on) + (standalone audio), NOT refs.audios.length. Taking
+// it from assignTags is what keeps a video's own <Audio 1> from reading as stray when there
+// is no standalone audio at all.
+function scanCounts(node) {
+    const refs = (node && node._mmrpRefs) || {};
+    const tagged = assignTags(refs);
+    let audios = (tagged.audios || []).length;
+    for (const v of (tagged.videos || [])) if (v.audioTag) audios += 1;
+    return {
+        images: (tagged.images || []).length,
+        videos: (tagged.videos || []).length,
+        audios,
+        subjects: assignedSubjectNumbers(refs),
+    };
+}
+
+// Current direction text, straight from the textarea if the body is built, else the hidden
+// widget. subjectBarExtra runs during layout, which can precede the first paint, so it
+// cannot assume the DOM.
+function directionText(node) {
+    const el = node && node._mmrpBody && node._mmrpBody.directionInput;
+    if (el) return el.value || "";
+    const w = widgetByName(node, "direction");
+    return (w && w.value) || "";
+}
+
+function hasStrayTags(node) {
+    return scanPromptTags(directionText(node), scanCounts(node)).some((t) => t.stray);
+}
+
+// tag string -> the tile it names, for the hover highlight. Built off assignTags so a
+// video's soundtrack <Audio N> maps back to the VIDEO tile that owns it, not to a
+// standalone audio slot that may not exist.
+function tagToTile(node) {
+    const tagged = assignTags(node._mmrpRefs);
+    const map = new Map();
+    for (const kind of KINDS) {
+        (tagged[`${kind}s`] || []).forEach((t, index) => {
+            if (t.tag) map.set(t.tag, { kind, index });
+            if (t.audioTag) map.set(t.audioTag, { kind, index });
+        });
+    }
+    return map;
+}
+
+// The highlight backdrop: a div sitting exactly over the textarea, click-through except on
+// the tag spans, which opt back into the pointer so hover can light their tile and a click
+// can arm them. Rebuilt from the scan on every text or reference change; the same font
+// metrics as the textarea (pinned in the CSS) make the spans line up with the real glyphs.
+function syncTagOverlay(node) {
+    const body = node._mmrpBody;
+    if (!body || !body.tagOverlay || !body.directionInput) return;
+    const overlay = body.tagOverlay;
+    const el = body.directionInput;
+    const text = el.value || "";
+    const tags = scanPromptTags(text, scanCounts(node));
+    const armed = node._mmrpArmedTag;
+    const tiles = tagToTile(node);
+    overlay.replaceChildren();
+    let cursor = 0;
+    for (const t of tags) {
+        if (t.start > cursor) {
+            overlay.appendChild(document.createTextNode(text.slice(cursor, t.start)));
+        }
+        const span = document.createElement("span");
+        span.className = "mmrp-tag" + (t.stray ? " mmrp-tag-stray" : "");
+        if (armed && armed.start === t.start && armed.text === t.text) {
+            span.classList.add("mmrp-tag-armed");
+        }
+        span.textContent = t.text;
+        const target = tiles.get(t.text) || null;
+        span.title = t.stray
+            ? "Broken tag — click it, then click a reference to repoint it"
+            : "Click to repoint this tag to another reference";
+        span.addEventListener("mouseenter", () => {
+            node._mmrpHighlightTile = target;
+            scheduleDraw(node);
+        });
+        span.addEventListener("mouseleave", () => {
+            node._mmrpHighlightTile = null;
+            scheduleDraw(node);
+        });
+        // mousedown, not click: the overlay is above the textarea, so preventing the
+        // default here also stops the caret from being placed inside the tag underneath.
+        span.addEventListener("mousedown", (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            toggleArmTag(node, t);
+        });
+        overlay.appendChild(span);
+        cursor = t.end;
+    }
+    if (cursor < text.length) overlay.appendChild(document.createTextNode(text.slice(cursor)));
+    overlay.scrollTop = el.scrollTop;
+    overlay.scrollLeft = el.scrollLeft;
+}
+
+// Arm a tag for reassignment (or disarm it if it was already the armed one). While one is
+// armed every tile paints as a click target; clicking a tile repoints the tag to it.
+function toggleArmTag(node, t) {
+    const cur = node._mmrpArmedTag;
+    if (cur && cur.start === t.start && cur.text === t.text) node._mmrpArmedTag = null;
+    else node._mmrpArmedTag = { start: t.start, end: t.end, text: t.text };
+    syncTagOverlay(node);
+    scheduleDraw(node);
+}
+
+function disarmTag(node) {
+    if (!node._mmrpArmedTag && node._mmrpHighlightTile == null) return;
+    node._mmrpArmedTag = null;
+    node._mmrpHighlightTile = null;
+    syncTagOverlay(node);
+    scheduleDraw(node);
+}
+
+// Repoint the armed tag onto the clicked tile. The armed span carries the text it was cut
+// from; if the user has typed since and it no longer sits at that offset, disarm rather
+// than splice blind.
+function reassignArmedTag(node, kind, index) {
+    const armed = node._mmrpArmedTag;
+    const el = node._mmrpBody && node._mmrpBody.directionInput;
+    if (!armed || !el) return;
+    if (el.value.slice(armed.start, armed.end) !== armed.text) { disarmTag(node); return; }
+    const tagged = assignTags(node._mmrpRefs);
+    const tile = (tagged[`${kind}s`] || [])[index];
+    if (!tile || !tile.tag) { disarmTag(node); return; }
+    const newTag = tile.tag;
+    if (!writeTextPreservingUndo(el, armed.start, armed.end, newTag, false)) {
+        el.value = rewriteTagAt(el.value, armed.start, armed.end, newTag);
+    }
+    const w = widgetByName(node, "direction");
+    if (w) { w.value = el.value; if (w.callback) w.callback(w.value); }
+    mlog("tag_reassigned", { from: armed.text, to: newTag });
+    node._mmrpArmedTag = null;
+    node._mmrpHighlightTile = null;
+    refreshDirectionUI(node);
+}
+
+// The "delete stray tags" button. Pure text surgery (stripStrayTags), written back through
+// the undo-preserving path so one Ctrl+Z brings them all back.
+function deleteStrayTags(node) {
+    const el = node._mmrpBody && node._mmrpBody.directionInput;
+    if (!el) return;
+    const next = stripStrayTags(el.value, scanCounts(node));
+    if (next === el.value) return;
+    if (!writeTextPreservingUndo(el, 0, el.value.length, next, false)) el.value = next;
+    const w = widgetByName(node, "direction");
+    if (w) { w.value = el.value; if (w.callback) w.callback(w.value); }
+    mlog("strays_deleted", {});
+    node._mmrpArmedTag = null;
+    refreshDirectionUI(node);
+}
+
+// Everything the direction text drives, re-synced after it changes: the highlight backdrop,
+// and the subject bar (which carries the delete-strays button). The bar appearing or
+// disappearing changes the node's height, so a change in whether strays exist forces a
+// relayout - but only on the transition, not on every keystroke.
+function refreshDirectionUI(node) {
+    syncTagOverlay(node);
+    const armed = node._mmrpArmedTag;
+    if (armed && directionText(node).slice(armed.start, armed.end) !== armed.text) {
+        node._mmrpArmedTag = null;
+    }
+    const stray = hasStrayTags(node);
+    const changed = stray !== node._mmrpStrayShown;
+    node._mmrpStrayShown = stray;
+    syncSubjectBar(node);
+    if (changed) relayout(node);
+}
+
 // The prompt box is the one element whose height is a preference rather than a
 // consequence, so it is the one element with an inline height.
 // The chip row's contribution to the node height: its own height plus one gap, but
-// only when it is showing. Zero otherwise, so a node with no subjects is exactly as
-// tall as it was before this feature existed.
+// only when it is showing. It shows for assigned subjects OR for stray tags (the row
+// carries the "delete stray tags" button), and is zero otherwise - a node with neither is
+// exactly as tall as it was before either feature existed.
 function subjectBarExtra(node) {
-    const refs = node && node._mmrpRefs;
-    return assignedSubjectNumbers(refs).length ? SUBJECT_BAR_H + CONTENT.gap : 0;
+    const showing = assignedSubjectNumbers(node && node._mmrpRefs).length || hasStrayTags(node);
+    return showing ? SUBJECT_BAR_H + CONTENT.gap : 0;
 }
 
 // Rebuild the chip row from the subjects currently in use. Single click on a chip
@@ -2839,8 +3135,9 @@ function syncSubjectBar(node) {
     if (node._mmrpHighlightSubject != null && !nums.includes(node._mmrpHighlightSubject)) {
         node._mmrpHighlightSubject = null;
     }
+    const stray = hasStrayTags(node);
     bar.replaceChildren();
-    if (!nums.length) {
+    if (!nums.length && !stray) {
         bar.style.display = "none";
         return;
     }
@@ -2865,6 +3162,22 @@ function syncSubjectBar(node) {
             insertIntoDirection(node, `<Subject ${n}>`);
         };
         bar.appendChild(chip);
+    }
+    // Right-aligned, appearing only while the prompt actually holds a broken tag: a spacer
+    // pushes it to the far edge so it reads as a separate action from the subject chips,
+    // the same layout the edit modal's rows use.
+    if (stray) {
+        const spacer = document.createElement("div");
+        spacer.className = "mmrp-subject-spacer";
+        bar.appendChild(spacer);
+        const clear = document.createElement("button");
+        clear.type = "button";
+        clear.className = "mmrp-stray-clear";
+        clear.textContent = "Delete stray tags";
+        clear.title = "Remove every broken tag (a \u201c#\u201d marker, or a number past the set) "
+            + "from the prompt";
+        clear.onclick = () => deleteStrayTags(node);
+        bar.appendChild(clear);
     }
 }
 
@@ -2993,6 +3306,11 @@ function renderNodeBody(node) {
     // it only in the callers missed the load path, where onConfigure re-parses the refs
     // after creation and only renderNodeBody runs again.
     syncSubjectBar(node);
+    // The reference set decides which tags are stray, so the highlight backdrop is rebuilt
+    // here too - deleting the last picture turns every <Picture 1> in the prompt stray
+    // without the text itself changing.
+    node._mmrpStrayShown = hasStrayTags(node);
+    syncTagOverlay(node);
     const refs = node._mmrpRefs;
     for (const kind of KINDS) {
         body.uploadButtons[kind].disabled = refs[`${kind}s`].length >= CAPS[kind];
@@ -3136,11 +3454,26 @@ function buildCustomBlock(node) {
     subjectBar.style.display = "none";
     container.appendChild(subjectBar);
 
+    // The textarea and its highlight backdrop share one relatively-positioned box. The
+    // backdrop (mmrp-tag-overlay) sits ON TOP but is click-through except on its tag spans,
+    // so typing still reaches the textarea underneath while a tag can catch hover and a
+    // click. The wrapper is the flex child now; its height follows the textarea's inline
+    // height exactly as the bare textarea used to.
+    const directionWrap = document.createElement("div");
+    directionWrap.className = "mmrp-direction-wrap";
+
     const directionInput = document.createElement("textarea");
     directionInput.className = "mmrp-direction";
     directionInput.placeholder = "Prompt — describe the shot…";
     directionInput.spellcheck = false;
-    container.appendChild(directionInput);
+
+    const tagOverlay = document.createElement("div");
+    tagOverlay.className = "mmrp-tag-overlay";
+    tagOverlay.setAttribute("aria-hidden", "true");
+
+    directionWrap.appendChild(directionInput);
+    directionWrap.appendChild(tagOverlay);
+    container.appendChild(directionWrap);
 
     node._mmrpBody = {
         root: container,
@@ -3150,7 +3483,9 @@ function buildCustomBlock(node) {
         canvas,
         ctx: canvas.getContext("2d"),
         subjectBar,
+        directionWrap,
         directionInput,
+        tagOverlay,
         previewVideo,
         previewAudio,
         resizeObserver,
@@ -5051,9 +5386,29 @@ app.registerExtension({
 
             node._mmrpBody.directionInput.value = directionWidget ? directionWidget.value || "" : "";
             node._mmrpBody.directionInput.addEventListener("input", () => {
-                if (!directionWidget) return;
-                directionWidget.value = node._mmrpBody.directionInput.value;
-                if (directionWidget.callback) directionWidget.callback(directionWidget.value);
+                if (directionWidget) {
+                    directionWidget.value = node._mmrpBody.directionInput.value;
+                    if (directionWidget.callback) directionWidget.callback(directionWidget.value);
+                }
+                // Repaint the highlight backdrop, and grow/shrink the node if a stray tag
+                // just appeared or the last one was typed away.
+                refreshDirectionUI(node);
+            });
+            // The backdrop scrolls with the text it tints.
+            node._mmrpBody.directionInput.addEventListener("scroll", () => {
+                const ov = node._mmrpBody.tagOverlay;
+                if (!ov) return;
+                ov.scrollTop = node._mmrpBody.directionInput.scrollTop;
+                ov.scrollLeft = node._mmrpBody.directionInput.scrollLeft;
+            });
+            // A press on the textarea proper (a tag span stops its own event before it gets
+            // here) is a click into the prose, which disarms any armed tag. Escape does too.
+            node._mmrpBody.directionInput.addEventListener("mousedown", () => disarmTag(node));
+            node._mmrpBody.directionInput.addEventListener("keydown", (ev) => {
+                if (ev.key === "Escape" && node._mmrpArmedTag) {
+                    disarmTag(node);
+                    ev.stopPropagation();
+                }
             });
 
             syncPromptHeight(node);
@@ -5117,6 +5472,8 @@ app.registerExtension({
                 const dw = widgetByName(this, "direction");
                 if (this._mmrpBody) this._mmrpBody.directionInput.value = dw ? dw.value || "" : "";
                 this._mmrpSelected = null;
+                this._mmrpArmedTag = null;
+                this._mmrpHighlightTile = null;
                 // parseRefsValue may have restored a stored prompt height off the
                 // envelope; the box has to be told before the size is re-derived.
                 syncPromptHeight(this);
