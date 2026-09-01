@@ -258,6 +258,68 @@
     color: #666;
 }
 
+/* ---- prompt tag highlighting ----
+   The textarea and a highlight backdrop share this box. The backdrop paints the tag tints
+   and the textarea paints the editable text on top of them; the backdrop is above in the
+   stack but click-through, so only its tag spans (which opt back in) catch the pointer. */
+.mmrp-direction-wrap {
+    position: relative;
+    width: 100%;
+    /* No height of its own: it wraps the textarea, whose inline height (promptHeightOf) is
+       still the one source of truth for how tall the prompt is. */
+}
+.mmrp-direction-wrap .mmrp-direction {
+    /* Keeps its own opaque #1e1e1e background and #e0e0e0 text. The backdrop sits ABOVE
+       it and is transparent except on the tag spans, whose translucent tints composite
+       over this text - so the text shows normally and the tags read as highlighted. */
+    position: relative;
+    z-index: 0;
+}
+.mmrp-tag-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    /* EVERY metric here has to match .mmrp-direction or the tints drift off the glyphs:
+       the transparent 1px border stands in for the textarea's, and box-sizing + padding +
+       font + line-height + wrapping are copied exactly. */
+    box-sizing: border-box;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin: 0;
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.45;
+    color: transparent;
+    background: transparent;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    word-break: break-word;
+    overflow: hidden;
+    pointer-events: none; /* click-through, except the tag spans below */
+    -webkit-user-select: none;
+    user-select: none;
+}
+.mmrp-tag-overlay .mmrp-tag {
+    pointer-events: auto;
+    cursor: pointer;
+    border-radius: 3px;
+    /* A quiet, cool wash on a live tag - enough to read as "this is a real reference"
+       without competing with the text. Matches C.highlight (#4ea1ff). */
+    background: rgba(78, 161, 255, 0.16);
+    box-shadow: 0 0 0 1px rgba(78, 161, 255, 0.28);
+}
+.mmrp-tag-overlay .mmrp-tag-stray {
+    /* Intense, warm, unmistakable: this tag points at nothing. Matches C.danger. */
+    background: rgba(255, 68, 68, 0.34);
+    box-shadow: 0 0 0 1px rgba(255, 68, 68, 0.75);
+}
+.mmrp-tag-overlay .mmrp-tag-armed {
+    /* Armed for reassignment - the tiles are now click targets for it. */
+    background: rgba(78, 161, 255, 0.42);
+    box-shadow: 0 0 0 2px #4ea1ff;
+}
+
 /* ---- system prompt modal (the ONLY place system_prompt is shown) ---- */
 
 .mmrp-overlay {
@@ -627,6 +689,35 @@
     background: #12354f;
     border-color: #4ea1ff;
     color: #cfe6ff;
+}
+
+/* Pushes the "delete stray tags" button to the right edge of the subject bar, so it reads
+   as a separate action from the chips - the same right-align the edit modal's rows use. */
+.mmrp-subject-spacer {
+    flex: 1 1 auto;
+    min-width: 8px;
+}
+
+/* Only present while the prompt holds a broken tag. Warm border to match the intense stray
+   highlight in the prompt, quiet fill so it is an offer, not an alarm. */
+.mmrp-stray-clear {
+    flex: 0 0 auto;
+    height: 22px;
+    padding: 0 10px;
+    font-size: 12px;
+    line-height: 20px;
+    white-space: nowrap;
+    background: #2a1a1a;
+    border: 1px solid #a33;
+    border-radius: 11px;
+    color: #ffb3b3;
+    cursor: pointer;
+    user-select: none;
+}
+
+.mmrp-stray-clear:hover {
+    background: #3a2020;
+    border-color: #d55;
 }
 
 /* Frame-navigation row in the edit modal: In / -1 / +1 / Out and the 15s guide. Compact

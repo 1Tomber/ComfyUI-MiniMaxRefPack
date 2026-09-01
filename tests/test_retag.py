@@ -121,21 +121,43 @@ def test_an_empty_map_returns_the_text_unchanged():
 
 @requires_node
 def test_deleting_an_image_renumbers_the_ones_after_it():
-    before = _refs(images=["a.png", "b.png", "c.png"])
-    after = _refs(images=["a.png", "c.png"])
-    assert _remap(before, after) == {"<Picture 3>": "<Picture 2>"}
+    before = _refs(images=["a.png", "b.png", "c.png", "d.png"])
+    after = _refs(images=["a.png", "c.png", "d.png"])
+    # b is gone (-> stray); the two after it each step down one.
+    assert _remap(before, after) == {
+        "<Picture 2>": "<Picture #>", "<Picture 3>": "<Picture 2>", "<Picture 4>": "<Picture 3>",
+    }
     assert _retag("<Picture 3> wears the jacket", before, after) == \
         "<Picture 2> wears the jacket"
 
 
 @requires_node
-def test_a_deleted_reference_is_left_alone_rather_than_repointed():
-    """Its tag has no successor. Pointing it at whatever inherited the number would make
-    the sentence describe a different image, which is worse than leaving a dangling tag
-    the user can see and fix."""
+def test_a_deleted_reference_becomes_a_stray_marker():
+    """Its tag has no successor. Leaving it to inherit whatever took its number makes the
+    sentence quietly describe a DIFFERENT image - the number stays valid, so nothing flags
+    it. It is rewritten to <Picture #> instead: broken on purpose, inert to renumbering,
+    and highlighted so the user retargets or deletes it."""
     before = _refs(images=["a.png", "b.png"])
     after = _refs(images=["a.png"])
-    assert _retag("<Picture 2> is gone", before, after) == "<Picture 2> is gone"
+    assert _remap(before, after) == {"<Picture 2>": "<Picture #>"}
+    assert _retag("<Picture 2> is gone", before, after) == "<Picture #> is gone"
+
+
+@requires_node
+def test_deleting_a_middle_reference_marks_it_stray_and_renumbers_the_rest():
+    # delete b of [a,b,c]: b's tag -> stray, c renumbers 3->2, simultaneously
+    before = _refs(images=["a.png", "b.png", "c.png"])
+    after = _refs(images=["a.png", "c.png"])
+    assert _remap(before, after) == {"<Picture 2>": "<Picture #>", "<Picture 3>": "<Picture 2>"}
+    assert _retag("<Picture 2> and <Picture 3>", before, after) == "<Picture #> and <Picture 2>"
+
+
+@requires_node
+def test_a_stray_marker_is_never_renumbered_again():
+    # a #-tag has no digit, so a later delete/reorder pass leaves it exactly alone
+    before = _refs(images=["a.png", "b.png"])
+    after = _refs(images=["b.png"])
+    assert _retag("<Picture #> stays, <Picture 2> shifts", before, after) ==         "<Picture #> stays, <Picture 1> shifts"
 
 
 # ---- the audio counter, which is the subtle one -----------------------------------
@@ -148,7 +170,8 @@ def test_turning_a_soundtrack_off_renumbers_every_audio_after_it():
     with. This is the case that is hardest to spot by hand."""
     before = _refs(videos=[("v.mp4", True)], audios=["music.wav"])
     after = _refs(videos=[("v.mp4", False)], audios=["music.wav"])
-    assert _remap(before, after) == {"<Audio 2>": "<Audio 1>"}
+    # the video's own <Audio 1> no longer refers to anything -> stray; music steps down.
+    assert _remap(before, after) == {"<Audio 1>": "<Audio #>", "<Audio 2>": "<Audio 1>"}
     assert _retag("the track in <Audio 2> sets the pace", before, after) == \
         "the track in <Audio 1> sets the pace"
 
@@ -158,7 +181,9 @@ def test_a_video_keeps_its_video_tag_when_only_its_soundtrack_moves():
     before = _refs(videos=[("a.mp4", True), ("b.mp4", True)])
     after = _refs(videos=[("a.mp4", False), ("b.mp4", True)])
     mapping = _remap(before, after)
-    assert mapping == {"<Audio 2>": "<Audio 1>"}
+    # a.mp4's soundtrack is gone (-> stray <Audio #>); b.mp4's audio steps down. Neither
+    # <Video N> is touched - the videos themselves survive.
+    assert mapping == {"<Audio 1>": "<Audio #>", "<Audio 2>": "<Audio 1>"}
     assert "<Video 1>" not in mapping and "<Video 2>" not in mapping
 
 
@@ -167,6 +192,7 @@ def test_deleting_a_video_renumbers_both_its_video_and_its_audio_neighbours():
     before = _refs(videos=[("a.mp4", True), ("b.mp4", True)], audios=["m.wav"])
     after = _refs(videos=[("b.mp4", True)], audios=["m.wav"])
     assert _remap(before, after) == {
+        "<Video 1>": "<Video #>", "<Audio 1>": "<Audio #>",
         "<Video 2>": "<Video 1>", "<Audio 2>": "<Audio 1>", "<Audio 3>": "<Audio 2>",
     }
 
@@ -314,7 +340,8 @@ def test_a_probe_finding_a_silent_clip_renumbers_the_audio_after_it():
     written against the old numbering."""
     before = _refs(videos=[("v.mp4", True)], audios=["m.wav"])
     after = _refs(videos=[("v.mp4", False)], audios=["m.wav"])
-    assert _remap(before, after) == {"<Audio 2>": "<Audio 1>"}
+    # the clip's released <Audio 1> is now dangling -> stray; m.wav steps down.
+    assert _remap(before, after) == {"<Audio 1>": "<Audio #>", "<Audio 2>": "<Audio 1>"}
 
 
 # ---- where a drop lands, once a section spans several rows --------------------------
@@ -455,8 +482,9 @@ def test_duplicate_files_do_not_collapse_onto_one_tag():
         const after = assignTags({ images: [A, A], videos: [], audios: [] });
         return tagRemap(before, after);
     })()""")
-    assert out == {"<Picture 3>": "<Picture 2>"}, (
-        "the second copy of a.png moved from slot 3 to slot 2; slot 1 did not move"
+    assert out == {"<Picture 2>": "<Picture #>", "<Picture 3>": "<Picture 2>"}, (
+        "b.png went stray; the second copy of a.png moved from slot 3 to slot 2; "
+        "slot 1 did not move"
     )
 
 
@@ -503,7 +531,10 @@ def test_distinct_files_are_unaffected():
         const after = assignTags({ images: [B, C], videos: [], audios: [] });
         return tagRemap(before, after);
     })()""")
-    assert out == {"<Picture 2>": "<Picture 1>", "<Picture 3>": "<Picture 2>"}
+    assert out == {
+        "<Picture 1>": "<Picture #>",   # a.png is gone
+        "<Picture 2>": "<Picture 1>", "<Picture 3>": "<Picture 2>",
+    }
 
 
 @requires_node

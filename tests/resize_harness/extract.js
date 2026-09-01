@@ -73,6 +73,12 @@ const FN_NAMES = [
     // be in the sandbox or those two throw. With no subjects the extra is 0, so the resize
     // contract is unchanged - which is exactly what the scenarios re-verify.
     "subjectBarExtra", "assignedSubjectNumbers",
+    // subjectBarExtra also shows the bar for stray tags now, so it reaches the whole tag
+    // scanner. Pulled in whole (not stubbed) so the harness keeps running the real height
+    // math; with no direction text and no refs the scan is empty and the extra is still 0.
+    // scanCounts derives the audio range from assignTags, so that comes along too.
+    "hasStrayTags", "scanCounts", "directionText", "scanPromptTags", "widgetByName",
+    "assignTags",
 ];
 const CONST_NAMES = ["KINDS", "CL", "CONTENT"];
 
