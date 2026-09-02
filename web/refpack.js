@@ -424,13 +424,31 @@ const CL = {
 // `perRow` tiles is guaranteed to have room for the square after it, so the square never
 // forces an extra line of its own and never lands off the edge at cap.
 // >>> MMRP-LAYOUT
+// How many tiles fit across, packed TIGHT: n tiles need n*tile + (n-1)*gap, so the most
+// that fit in viewW is floor((viewW + gap) / (tile + gap)). The add square is deliberately
+// NOT reserved here. It used to be, which wrapped tiles up to half a tile early and left a
+// strip of empty slab on every non-last row; the add square is now placed by
+// computeCanvasRows/draw, sharing the last tile row when there is room and dropping to its
+// own line only when that row is genuinely full.
 function tilesPerRow(viewW) {
-    const room = viewW - CL.addGap - CL.addBtn + CL.gap;
-    return Math.max(1, Math.floor(room / (CL.tile + CL.gap)));
+    return Math.max(1, Math.floor((viewW + CL.gap) / (CL.tile + CL.gap)));
 }
 
+// TILE rows only - the add square is accounted for separately (addSquareWraps). ceil,
+// floored at 1.
 function linesFor(count, perRow) {
-    return Math.max(1, Math.ceil(count / perRow));  // 1 even when empty: the add square
+    return Math.max(1, Math.ceil(count / perRow));
+}
+
+// True when the add square has to take a line of its own: the last tile row is exactly
+// full AND there is no room to the right of it for the square. Otherwise it shares that row
+// (a partial row always has a free slot; a full one may still have slack beside it).
+function addSquareWraps(count, perRow, viewW) {
+    if (count <= 0) return false;
+    const lastRowTiles = count - (linesFor(count, perRow) - 1) * perRow;
+    if (lastRowTiles < perRow) return false;
+    const rightOfTiles = lastRowTiles * (CL.tile + CL.gap) - CL.gap;
+    return rightOfTiles + CL.addGap + CL.addBtn > viewW;
 }
 
 // Where every section starts, how tall each is, and how tall the slab ends up. Computed
@@ -448,9 +466,10 @@ function computeCanvasRows(refs, viewW) {
             y += CL.emptyRowH + CL.rowGap;
             continue;
         }
-        const lines = linesFor(count, perRow);
+        const addNewLine = addSquareWraps(count, perRow, viewW);
+        const lines = linesFor(count, perRow) + (addNewLine ? 1 : 0);
         const stripH = CL.stripPad * 2 + lines * CL.tile + (lines - 1) * CL.gap;
-        rows.push({ kind, y, stripY: y + CL.headerH + CL.headGap, perRow, lines, stripH });
+        rows.push({ kind, y, stripY: y + CL.headerH + CL.headGap, perRow, lines, addNewLine, stripH });
         y += CL.headerH + CL.headGap + stripH + CL.rowGap;
     }
     // The trailing rowGap doubles as the slab's bottom padding.
@@ -2466,16 +2485,18 @@ function draw(node) {
             ctx.stroke();
         }
 
-        // Still "always where the next tile would go", which now means the end of the
-        // LAST LINE rather than the end of the only one. tilesPerRow reserved room for
-        // this square in a full line, so it can never be pushed off the right edge.
-        const onLastLine = arr.length === 0
-            ? 0
-            : (arr.length % perRow === 0 ? perRow : arr.length % perRow);
-        const ax = onLastLine
-            ? CL.x0 + onLastLine * (CL.tile + CL.gap) - CL.gap + CL.addGap
+        // Always "where the next tile would go". It shares the last tile row when there is
+        // room; row.addNewLine (from computeCanvasRows, the same predicate the height used)
+        // says that row was full and the square dropped to a fresh line of its own.
+        const tileLines = Math.max(1, Math.ceil(arr.length / perRow));
+        const addCol = row.addNewLine
+            ? 0                                        // its own line, hard left
+            : (arr.length % perRow === 0 ? perRow : arr.length % perRow);  // beside the tiles
+        const addLine = row.addNewLine ? tileLines : tileLines - 1;
+        const ax = addCol > 0
+            ? CL.x0 + addCol * (CL.tile + CL.gap) - CL.gap + CL.addGap
             : CL.x0;
-        const ay = tileY + Math.max(0, row.lines - 1) * (CL.tile + CL.gap)
+        const ay = tileY + addLine * (CL.tile + CL.gap)
             + Math.round((CL.tile - CL.addBtn) / 2);
         drawAddSquare(ctx, ax, ay, atCap);
         if (!atCap) {
@@ -2706,6 +2727,25 @@ function onDragMove(node, e) {
         ? null
         : dropIndexAt(node, drag.kind, pos.x, pos.y);
     scheduleDraw(node);
+}
+
+// The subject picker is painted inside a tile; close it the moment the cursor leaves that
+// tile's box, so it does not linger after the pointer has moved on. Cheap: it only does
+// anything while a picker is open, and only redraws on the transition out.
+function onCanvasMouseMove(node, e) {
+    const picker = node._mmrpPicker;
+    if (!picker) return;
+    const regions = (node._mmrpHit && node._mmrpHit.regions) || [];
+    const tile = regions.find(
+        (r) => r.type === "tile" && r.kind === picker.kind && r.index === picker.index);
+    if (!tile) return;
+    const pos = getMousePos(node._mmrpBody.canvas, e);
+    const inside = pos.x >= tile.x && pos.x <= tile.x + tile.w
+        && pos.y >= tile.y && pos.y <= tile.y + tile.h;
+    if (!inside) {
+        node._mmrpPicker = null;
+        scheduleDraw(node);
+    }
 }
 
 function onCanvasMouseDown(node, e) {
@@ -3525,6 +3565,12 @@ function buildCustomBlock(node) {
     // only so the element has a box before the first paint measures it.
     canvas.style.height = `${computeCanvasRows(emptyRefs(), 600).height}px`;
     canvas.addEventListener("mousedown", (e) => onCanvasMouseDown(node, e));
+    canvas.addEventListener("mousemove", (e) => onCanvasMouseMove(node, e));
+    // Leaving the canvas entirely (fast enough to skip the boundary mousemove) also closes
+    // an open picker.
+    canvas.addEventListener("mouseleave", () => {
+        if (node._mmrpPicker) { node._mmrpPicker = null; scheduleDraw(node); }
+    });
     canvas.addEventListener("dblclick", (e) => onCanvasDblClick(node, e));
     // Keep litegraph's node context menu off the tiles (matches the reference's
     // per-item contextmenu swallow).

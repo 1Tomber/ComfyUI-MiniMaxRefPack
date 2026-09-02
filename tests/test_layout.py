@@ -10,10 +10,10 @@ same harness tests/test_migration.py uses for MMRP-MIGRATE - so this tests the r
 rather than a copy of it that can drift. The block deliberately depends on nothing but
 the CL constants, which are passed in.
 
-The invariant worth stating once: the add square is reserved for UNCONDITIONALLY in
-tilesPerRow, which is what makes linesFor correct with no special case. A full line
-always has room for the square after it, so the square can never be pushed off the right
-edge and never forces a line of its own.
+The rule worth stating once: tiles pack TIGHT (tilesPerRow reserves nothing for the add
+square, so no width wraps them early), and the add square is placed afterwards - it shares
+the last tile row when there is room and takes a line of its own only when that row is
+exactly full with no slack beside it (addSquareWraps).
 """
 
 import json
@@ -73,8 +73,8 @@ def _refs(images=0, videos=0, audios=0):
 
 @pytest.mark.parametrize("view_w,expected", [
     (1295, 9),   # the old fixed width: the nine-tile row it was chosen to guarantee
-    (1000, 6),
-    (700, 4),
+    (1000, 7),   # tight packing: floor((1000+6)/137) = 7 (was 6 when the add square was reserved)
+    (700, 5),    # floor((700+6)/137) = 5 (was 4)
     (400, 2),
     (200, 1),
     (10, 1),     # absurd, but never zero - a zero would divide the layout by nothing
@@ -98,27 +98,67 @@ MIN_ROW_W = CL["tile"] + CL["addGap"] + CL["addBtn"]
 
 
 @requires_node
-def test_a_full_line_always_leaves_room_for_the_add_square():
-    """The invariant the whole scheme rests on. If this fails, a section at cap draws its
-    add square off the right edge of the slab, where it cannot be clicked.
+def test_a_full_row_of_tiles_never_overflows():
+    """Tiles pack tight, so a full row of `perRow` tiles must itself fit the width (the add
+    square is placed separately and wraps when it does not fit - see below).
 
     Checked from MIN_ROW_W up, not from zero. tilesPerRow clamps to a minimum of one tile,
     so below that width it deliberately overflows rather than render a section with no
     tiles at all - the honest reading is "one tile is the floor", and minNodeWidth is what
-    makes sure the node can never be dragged there. The test states the same bound rather
-    than pretending the arithmetic covers widths the UI forbids."""
+    makes sure the node can never be dragged there."""
     checks = _run(f"""
         (() => {{
             const out = [];
             for (let w = {MIN_ROW_W}; w <= 1600; w += 1) {{
                 const n = tilesPerRow(w);
-                const used = n * (CL.tile + CL.gap) - CL.gap + CL.addGap + CL.addBtn;
-                out.push(used <= w);
+                const tilesUsed = n * (CL.tile + CL.gap) - CL.gap;
+                out.push(tilesUsed <= w);
             }}
             return out;
         }})()
     """)
-    assert all(checks), "a full line overflows at some width"
+    assert all(checks), "a full row of tiles overflows at some width"
+
+
+@requires_node
+def test_the_add_square_shares_the_row_when_there_is_room_and_wraps_when_full():
+    """The replacement for the old unconditional reservation: the add square shares the last
+    tile row unless that row is exactly full with no slack beside it."""
+    # a partial last row always has a free slot -> never wraps
+    assert _run("addSquareWraps(4, 5, 700)") is False
+    # a full row (5 tiles at perRow 5, viewW 700) has no room for the square -> wraps
+    assert _run("addSquareWraps(5, 5, 700)") is True
+    # a full row WITH slack keeps the square on the same line: 2 tiles at perRow 2 in a wide
+    # 700px view leaves plenty of room, so no wrap
+    assert _run("addSquareWraps(2, 2, 700)") is False
+    # an empty section never wraps (it is a short labelled row, handled elsewhere)
+    assert _run("addSquareWraps(0, 5, 700)") is False
+
+
+@requires_node
+def test_the_add_square_never_overflows_however_it_is_placed():
+    """Whether it shares the row or wraps, the drawn add square must stay inside the slab.
+    This is the guarantee the old reservation gave directly; now it falls out of
+    addSquareWraps, so pin it."""
+    checks = _run(f"""
+        (() => {{
+            const out = [];
+            for (let w = {MIN_ROW_W}; w <= 1600; w += 7) {{
+                const perRow = tilesPerRow(w);
+                for (let count = 1; count <= 9; count++) {{
+                    const wraps = addSquareWraps(count, perRow, w);
+                    const lastRowTiles = wraps ? 0
+                        : (count % perRow === 0 ? perRow : count % perRow);
+                    const ax = lastRowTiles > 0
+                        ? lastRowTiles * (CL.tile + CL.gap) - CL.gap + CL.addGap
+                        : 0;
+                    out.push(ax + CL.addBtn <= w);
+                }}
+            }}
+            return out;
+        }})()
+    """)
+    assert all(checks), "the add square is drawn off the right edge at some width/count"
 
 
 @requires_node
@@ -132,9 +172,9 @@ def test_below_the_floor_it_still_returns_a_usable_row_rather_than_zero():
 
 
 @pytest.mark.parametrize("count,per_row,expected", [
-    (0, 6, 1),   # empty still needs a line: the add square lives on it
+    (0, 6, 1),   # floored at one line
     (1, 6, 1),
-    (6, 6, 1),   # exactly full - the add square rides on the same line, no extra
+    (6, 6, 1),   # six tiles are one row; whether the add square adds a line is addSquareWraps
     (7, 6, 2),
     (9, 6, 2),
     (9, 1, 9),

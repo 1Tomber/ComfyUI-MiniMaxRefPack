@@ -62,7 +62,7 @@ function grabConst(name) {
 }
 
 const FN_NAMES = [
-    "tilesPerRow", "linesFor", "computeCanvasRows",
+    "tilesPerRow", "linesFor", "addSquareWraps", "computeCanvasRows",
     "uploadsNaturalWidth", "minNodeWidth", "promptHeightOf", "slabViewW",
     "layoutOf", "contentHeight", "nodeSize", "domWidgetMargin",
     "domWidgetHeightPad", "reportedHeightFor", "syncDomWidgetSize",
