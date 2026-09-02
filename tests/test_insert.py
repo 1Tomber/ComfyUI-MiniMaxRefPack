@@ -47,6 +47,36 @@ def _splice(value, start, end, text="<Picture 1>"):
     return json.loads(proc.stdout.strip())
 
 
+def _caret_point(caret, tags):
+    script = (
+        _extract()
+        + f"\nconsole.log(JSON.stringify(caretInsertPoint({caret}, {json.dumps(tags)})));\n"
+    )
+    proc = subprocess.run([NODE, "--input-type=module", "-e", script],
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, f"node failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip())
+
+
+# "<Picture 1>" occupying offsets 8..19 in "wearing <Picture 1>"
+_TAG = [{"start": 8, "end": 19}]
+
+
+@requires_node
+def test_caret_inside_a_tag_moves_the_insert_after_it():
+    # a double-click while the cursor is on a tag adds the new one behind it, not inside
+    assert _caret_point(12, _TAG) == 19
+    assert _caret_point(8, _TAG) == 19    # at the very start still counts as "on the tag"
+    assert _caret_point(19, _TAG) == 19   # at the end: already after, unchanged
+
+
+@requires_node
+def test_caret_clear_of_any_tag_is_left_where_it_is():
+    assert _caret_point(3, _TAG) == 3     # before the tag
+    assert _caret_point(25, _TAG) == 25   # after the tag
+    assert _caret_point(5, []) == 5       # no tags at all
+
+
 @requires_node
 def test_into_an_empty_box_it_is_just_the_tag():
     assert _splice("", 0, 0)["value"] == "<Picture 1>"

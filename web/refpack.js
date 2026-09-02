@@ -2858,13 +2858,30 @@ export function spliceTag(value, start, end, text) {
     // past the padding spaces the writer never inserted.
     return { value: before + insert + after, caret: start + insert.length, insert };
 }
+
+// Where a double-click insert should land. When the caret is on an existing tag (a subject
+// or a media tag), the new tag goes AFTER that tag - splitting "<Picture 1>" down the middle
+// would corrupt both. `tags` is the scanPromptTags result; returns the caret unchanged when
+// it is not inside any tag.
+export function caretInsertPoint(caret, tags) {
+    for (const t of tags || []) {
+        if (caret >= t.start && caret <= t.end) return t.end;
+    }
+    return caret;
+}
 // <<< MMRP-INSERT
 
 function insertIntoDirection(node, text) {
     const el = node._mmrpBody && node._mmrpBody.directionInput;
     if (!el) return;
-    const start = el.selectionStart ?? el.value.length;
-    const end = el.selectionEnd ?? start;
+    let start = el.selectionStart ?? el.value.length;
+    let end = el.selectionEnd ?? start;
+    // A plain caret sitting on a tag pushes the insert to AFTER that tag, so a double-click
+    // adds the new tag behind the one the cursor is on (with the usual space) instead of
+    // splitting it. A selection is left alone - it is replaced as usual.
+    if (start === end) {
+        start = end = caretInsertPoint(start, scanPromptTags(el.value, scanCounts(node)));
+    }
     const { value, caret, insert } = spliceTag(el.value, start, end, text);
     // The undo-preserving path first: assigning .value resets the textarea's undo stack,
     // so typing a sentence, inserting a tag and pressing Ctrl+Z used to do nothing at all.
