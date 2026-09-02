@@ -2141,10 +2141,6 @@ function draw(node) {
     const drag = node._mmrpDrag;
     const picker = node._mmrpPicker;
     const highlightSubject = node._mmrpHighlightSubject;
-    // Hovering a tag in the prompt lights its tile; arming a tag turns every tile into a
-    // click target for repointing it.
-    const highlightTile = node._mmrpHighlightTile;
-    const armedTag = node._mmrpArmedTag;
 
     // `layout` was computed above, from the width, before the canvas height was applied.
     // Everything below still paints in one pass with no scroll offset, because the slab
@@ -2240,23 +2236,10 @@ function draw(node) {
             const dragging = drag && drag.active && drag.kind === kind && drag.index === i;
             if (dragging) ctx.globalAlpha = 0.35;
             const picking = picker && picker.kind === kind && picker.index === i;
-            const highlighted = (highlightSubject != null
-                && (ref.subjects || []).includes(highlightSubject))
-                || (highlightTile && highlightTile.kind === kind && highlightTile.index === i);
+            const highlighted = highlightSubject != null
+                && (ref.subjects || []).includes(highlightSubject);
             drawTile(ctx, kind, ref, lines, tx, ty, selected, soundState, badgeH,
                      picking ? null : playState, highlighted);
-            // While a tag is armed, ring every tile as a repoint target - a dashed blue
-            // outline, distinct from the solid hover/subject highlight and the red
-            // selection so all three stay readable at once.
-            if (armedTag && !picking) {
-                ctx.save();
-                ctx.strokeStyle = C.highlight;
-                ctx.setLineDash([5, 4]);
-                ctx.lineWidth = 2;
-                pathRoundRect(ctx, tx + 1.5, ty + 1.5, CL.tile - 3, CL.tile - 3, 4);
-                ctx.stroke();
-                ctx.restore();
-            }
             ctx.globalAlpha = 1;
             const pickerCells = picking
                 ? drawSubjectPicker(ctx, ref, tx, ty, kind, i)
@@ -2608,8 +2591,7 @@ function onCanvasMouseDown(node, e) {
     const pos = getMousePos(node._mmrpBody.canvas, e);
     const hit = hitTest(node, pos.x, pos.y);
     if (!hit) {
-        // A press on bare slab disarms a reassignment and clears any selection/picker.
-        if (node._mmrpArmedTag) disarmTag(node);
+        // A press on bare slab clears any selection/picker.
         if (node._mmrpSelected || node._mmrpPicker) {
             node._mmrpSelected = null;
             node._mmrpPicker = null;
@@ -2648,12 +2630,6 @@ function onCanvasMouseDown(node, e) {
         openEditModal(node, hit.kind, hit.index);
     } else if (hit.type === "add") {
         node._mmrpBody.fileInputs[hit.kind].click();
-    } else if (node._mmrpArmedTag) {
-        // A tag is armed for reassignment and a tile was clicked: repoint the tag onto it,
-        // rather than selecting or starting a drag. Works for a "#" stray too - it becomes
-        // whatever tile is clicked.
-        reassignArmedTag(node, hit.kind, hit.index);
-        e.stopPropagation();
     } else {
         const ref = node._mmrpRefs[`${hit.kind}s`][hit.index];
         // A missing file has no thumbnail to drag and nothing worth reordering.
@@ -2974,22 +2950,12 @@ function hasStrayTags(node) {
 // tag string -> the tile it names, for the hover highlight. Built off assignTags so a
 // video's soundtrack <Audio N> maps back to the VIDEO tile that owns it, not to a
 // standalone audio slot that may not exist.
-function tagToTile(node) {
-    const tagged = assignTags(node._mmrpRefs);
-    const map = new Map();
-    for (const kind of KINDS) {
-        (tagged[`${kind}s`] || []).forEach((t, index) => {
-            if (t.tag) map.set(t.tag, { kind, index });
-            if (t.audioTag) map.set(t.audioTag, { kind, index });
-        });
-    }
-    return map;
-}
-
-// The highlight backdrop: a div sitting exactly over the textarea, click-through except on
-// the tag spans, which opt back into the pointer so hover can light their tile and a click
-// can arm them. Rebuilt from the scan on every text or reference change; the same font
-// metrics as the textarea (pinned in the CSS) make the spans line up with the real glyphs.
+// The highlight backdrop: a div sitting exactly over the textarea, painting each tag a
+// quiet tint (light for a live tag, intense for a stray). It is purely visual and fully
+// click-through - the spans take NO pointer events, so clicking anywhere in the prompt
+// places the caret in the textarea underneath exactly as it would with no overlay. Rebuilt
+// from the scan on every text or reference change; the same font metrics as the textarea
+// (pinned in the CSS) make the tints line up with the real glyphs.
 function syncTagOverlay(node) {
     const body = node._mmrpBody;
     if (!body || !body.tagOverlay || !body.directionInput) return;
@@ -2997,8 +2963,6 @@ function syncTagOverlay(node) {
     const el = body.directionInput;
     const text = el.value || "";
     const tags = scanPromptTags(text, scanCounts(node));
-    const armed = node._mmrpArmedTag;
-    const tiles = tagToTile(node);
     overlay.replaceChildren();
     let cursor = 0;
     for (const t of tags) {
@@ -3007,76 +2971,13 @@ function syncTagOverlay(node) {
         }
         const span = document.createElement("span");
         span.className = "mmrp-tag" + (t.stray ? " mmrp-tag-stray" : "");
-        if (armed && armed.start === t.start && armed.text === t.text) {
-            span.classList.add("mmrp-tag-armed");
-        }
         span.textContent = t.text;
-        const target = tiles.get(t.text) || null;
-        span.title = t.stray
-            ? "Broken tag — click it, then click a reference to repoint it"
-            : "Click to repoint this tag to another reference";
-        span.addEventListener("mouseenter", () => {
-            node._mmrpHighlightTile = target;
-            scheduleDraw(node);
-        });
-        span.addEventListener("mouseleave", () => {
-            node._mmrpHighlightTile = null;
-            scheduleDraw(node);
-        });
-        // mousedown, not click: the overlay is above the textarea, so preventing the
-        // default here also stops the caret from being placed inside the tag underneath.
-        span.addEventListener("mousedown", (ev) => {
-            ev.preventDefault();
-            ev.stopPropagation();
-            toggleArmTag(node, t);
-        });
         overlay.appendChild(span);
         cursor = t.end;
     }
     if (cursor < text.length) overlay.appendChild(document.createTextNode(text.slice(cursor)));
     overlay.scrollTop = el.scrollTop;
     overlay.scrollLeft = el.scrollLeft;
-}
-
-// Arm a tag for reassignment (or disarm it if it was already the armed one). While one is
-// armed every tile paints as a click target; clicking a tile repoints the tag to it.
-function toggleArmTag(node, t) {
-    const cur = node._mmrpArmedTag;
-    if (cur && cur.start === t.start && cur.text === t.text) node._mmrpArmedTag = null;
-    else node._mmrpArmedTag = { start: t.start, end: t.end, text: t.text };
-    syncTagOverlay(node);
-    scheduleDraw(node);
-}
-
-function disarmTag(node) {
-    if (!node._mmrpArmedTag && node._mmrpHighlightTile == null) return;
-    node._mmrpArmedTag = null;
-    node._mmrpHighlightTile = null;
-    syncTagOverlay(node);
-    scheduleDraw(node);
-}
-
-// Repoint the armed tag onto the clicked tile. The armed span carries the text it was cut
-// from; if the user has typed since and it no longer sits at that offset, disarm rather
-// than splice blind.
-function reassignArmedTag(node, kind, index) {
-    const armed = node._mmrpArmedTag;
-    const el = node._mmrpBody && node._mmrpBody.directionInput;
-    if (!armed || !el) return;
-    if (el.value.slice(armed.start, armed.end) !== armed.text) { disarmTag(node); return; }
-    const tagged = assignTags(node._mmrpRefs);
-    const tile = (tagged[`${kind}s`] || [])[index];
-    if (!tile || !tile.tag) { disarmTag(node); return; }
-    const newTag = tile.tag;
-    if (!writeTextPreservingUndo(el, armed.start, armed.end, newTag, false)) {
-        el.value = rewriteTagAt(el.value, armed.start, armed.end, newTag);
-    }
-    const w = widgetByName(node, "direction");
-    if (w) { w.value = el.value; if (w.callback) w.callback(w.value); }
-    mlog("tag_reassigned", { from: armed.text, to: newTag });
-    node._mmrpArmedTag = null;
-    node._mmrpHighlightTile = null;
-    refreshDirectionUI(node);
 }
 
 // The "delete stray tags" button. Pure text surgery (stripStrayTags), written back through
@@ -3090,7 +2991,6 @@ function deleteStrayTags(node) {
     const w = widgetByName(node, "direction");
     if (w) { w.value = el.value; if (w.callback) w.callback(w.value); }
     mlog("strays_deleted", {});
-    node._mmrpArmedTag = null;
     refreshDirectionUI(node);
 }
 
@@ -3100,10 +3000,6 @@ function deleteStrayTags(node) {
 // relayout - but only on the transition, not on every keystroke.
 function refreshDirectionUI(node) {
     syncTagOverlay(node);
-    const armed = node._mmrpArmedTag;
-    if (armed && directionText(node).slice(armed.start, armed.end) !== armed.text) {
-        node._mmrpArmedTag = null;
-    }
     const stray = hasStrayTags(node);
     const changed = stray !== node._mmrpStrayShown;
     node._mmrpStrayShown = stray;
@@ -5401,15 +5297,6 @@ app.registerExtension({
                 ov.scrollTop = node._mmrpBody.directionInput.scrollTop;
                 ov.scrollLeft = node._mmrpBody.directionInput.scrollLeft;
             });
-            // A press on the textarea proper (a tag span stops its own event before it gets
-            // here) is a click into the prose, which disarms any armed tag. Escape does too.
-            node._mmrpBody.directionInput.addEventListener("mousedown", () => disarmTag(node));
-            node._mmrpBody.directionInput.addEventListener("keydown", (ev) => {
-                if (ev.key === "Escape" && node._mmrpArmedTag) {
-                    disarmTag(node);
-                    ev.stopPropagation();
-                }
-            });
 
             syncPromptHeight(node);
             installSizeGuards(node);
@@ -5472,8 +5359,6 @@ app.registerExtension({
                 const dw = widgetByName(this, "direction");
                 if (this._mmrpBody) this._mmrpBody.directionInput.value = dw ? dw.value || "" : "";
                 this._mmrpSelected = null;
-                this._mmrpArmedTag = null;
-                this._mmrpHighlightTile = null;
                 // parseRefsValue may have restored a stored prompt height off the
                 // envelope; the box has to be told before the size is re-derived.
                 syncPromptHeight(this);

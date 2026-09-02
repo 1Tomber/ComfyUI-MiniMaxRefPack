@@ -301,8 +301,9 @@
     user-select: none;
 }
 .mmrp-tag-overlay .mmrp-tag {
-    pointer-events: auto;
-    cursor: pointer;
+    /* Purely decorative: no pointer events, so a click falls straight through to the
+       textarea and the caret lands where the user aimed. */
+    pointer-events: none;
     border-radius: 3px;
     /* A quiet, cool wash on a live tag - enough to read as "this is a real reference"
        without competing with the text. Matches C.highlight (#4ea1ff). */
@@ -313,11 +314,6 @@
     /* Intense, warm, unmistakable: this tag points at nothing. Matches C.danger. */
     background: rgba(255, 68, 68, 0.34);
     box-shadow: 0 0 0 1px rgba(255, 68, 68, 0.75);
-}
-.mmrp-tag-overlay .mmrp-tag-armed {
-    /* Armed for reassignment - the tiles are now click targets for it. */
-    background: rgba(78, 161, 255, 0.42);
-    box-shadow: 0 0 0 2px #4ea1ff;
 }
 
 /* ---- system prompt modal (the ONLY place system_prompt is shown) ---- */

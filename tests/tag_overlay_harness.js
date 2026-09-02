@@ -21,6 +21,7 @@ function makeEl(tag) {
         scrollTop: 0,
         scrollLeft: 0,
         title: "",
+        listenerCount: 0,
         get className() { return this._className; },
         set className(v) { this._className = v; },
         classList: {
@@ -32,7 +33,7 @@ function makeEl(tag) {
             contains(c) { return el._className.split(/\s+/).includes(c); },
         },
         setAttribute() {},
-        addEventListener() {},
+        addEventListener() { el.listenerCount += 1; },
         appendChild(child) { el.childNodes.push(child); return child; },
         replaceChildren() { el.childNodes.length = 0; },
         set textContent(v) { el._text = v; },
@@ -55,15 +56,14 @@ function spans(overlay) {
 
 // ---- assemble the real functions in a sandbox with the shim -----------------------
 const NAMES = ["assignTags", "assignedSubjectNumbers", "scanPromptTags", "scanCounts",
-               "tagToTile", "syncTagOverlay"];
+               "syncTagOverlay"];
 const bodies = NAMES.map(grabFn).join("\n");
-const factory = new Function("document", "scheduleDraw", "toggleArmTag", "KINDS", `
+const factory = new Function("document", "scheduleDraw", "KINDS", `
     "use strict";
     ${bodies}
     return { syncTagOverlay };
 `);
-const { syncTagOverlay } = factory(document, () => {}, () => {},
-                                   ["image", "video", "audio"]);
+const { syncTagOverlay } = factory(document, () => {}, ["image", "video", "audio"]);
 
 // ---- scenarios --------------------------------------------------------------------
 let failures = 0;
@@ -72,11 +72,10 @@ function check(label, cond) {
     else { console.log("  FAIL  " + label); failures++; }
 }
 
-function nodeWith(text, refs, armed) {
+function nodeWith(text, refs) {
     const overlay = makeEl("div");
     return {
         _mmrpRefs: refs,
-        _mmrpArmedTag: armed || null,
         _mmrpBody: { tagOverlay: overlay, directionInput: { value: text, scrollTop: 0, scrollLeft: 0 } },
     };
 }
@@ -117,13 +116,12 @@ const R = (images = [], videos = [], audios = []) => ({
     check("soundtrack audio tag is live", s.length === 1 && !s[0].classList.contains("mmrp-tag-stray"));
 })();
 
-// 4. the armed tag gets the armed class
+// 4. spans are decorative only - no listeners are bound (so clicks reach the textarea)
 (() => {
-    const text = "a <Picture 1> b";
-    const n = nodeWith(text, R(["a.png"]), { start: 2, end: 13, text: "<Picture 1>" });
+    const n = nodeWith("a <Picture 1> b", R(["a.png"]));
     syncTagOverlay(n);
     const s = spans(n._mmrpBody.tagOverlay);
-    check("armed span carries mmrp-tag-armed", s.length === 1 && s[0].classList.contains("mmrp-tag-armed"));
+    check("tag span binds no event listeners", s.length === 1 && s[0].listenerCount === 0);
 })();
 
 // 5. empty prompt -> no spans, empty overlay
