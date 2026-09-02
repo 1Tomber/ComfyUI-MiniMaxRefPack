@@ -378,6 +378,39 @@ def test_load_video_crop_and_trim_compose(monkeypatch):
     assert frames.shape == (108, 20, 30, 3)
 
 
+def test_load_video_rotate_crop_trim_compose_on_the_socket(monkeypatch, fake_torch_rot90):
+    """All three edits on the ONE emitted tensor, in the documented order trim -> orient ->
+    crop. A rotated portrait clip's crop rect is drawn on the ROTATED frame, so orient has
+    to run before crop or the sockets emit a different region than the editor showed. Only
+    the trim+crop pair was covered before; this pins the rotate interaction to the output."""
+    monkeypatch.setattr(media, "_video_from_file_cls", lambda: _fake_video_numpy(240, 24, 40, 60))
+    # trim [2,6.5]@24 -> 108 frames; rotate 90 swaps 40x60 (HxW) -> 60x40; crop the top-left
+    # quarter of THAT -> H 60*0.5=30, W 40*0.5=20.
+    frames, _ = media.load_video(
+        "clip.mp4", crop=[0.0, 0.0, 0.5, 0.5], trim=[2.0, 6.5], rotate=90)
+    assert frames.shape == (108, 30, 20, 3)
+
+
+def test_load_video_caps_the_rotated_then_cropped_region(monkeypatch, fake_torch_rot90):
+    """max_edge measures the region AFTER orient and crop, not the source. No existing
+    video downscale test rotates, so this is the only one proving the rotated dimensions
+    feed the long-edge cap."""
+    import numpy as np
+
+    monkeypatch.setattr(media, "_video_from_file_cls",
+                        lambda: _fake_video_numpy(24, 24, 1080, 1920))  # 1920x1080 frames
+    called = {}
+    monkeypatch.setattr(media, "_frame_downscale_fn",
+                        lambda: (lambda frames, new_h, new_w: (
+                            called.__setitem__("size", (new_h, new_w))
+                            or np.zeros((frames.shape[0], new_h, new_w, 3), dtype=np.float32))))
+
+    # rotate 90 -> 1920x1080 (portrait); crop full width, top half -> 1080w x 960h; then cap
+    # the long edge (1080) at 512 -> new_w 512, new_h round(960*512/1080)=455.
+    media.load_video("clip.mp4", crop=[0.0, 0.0, 1.0, 0.5], rotate=90, max_edge=512)
+    assert called["size"] == (455, 512)
+
+
 # ---- load_audio trim -----------------------------------------------------------
 
 
@@ -558,6 +591,28 @@ def test_thumbnail_png_without_at_seconds_does_not_seek(monkeypatch):
 def fake_torch(monkeypatch):
     module = types.ModuleType("torch")
     module.from_numpy = lambda arr: arr
+    monkeypatch.setitem(sys.modules, "torch", module)
+    return module
+
+
+@pytest.fixture
+def fake_torch_rot90(monkeypatch):
+    """torch stub whose rot90 runs on the numpy fakes, so _orient_tensor's quarter-turn
+    path executes for real on a decoded video batch. Only rot90 is provided (the video
+    orient tests here rotate but do not flip); the .contiguous() call in _orient_tensor is
+    a no-op unwrap back to the rotated ndarray."""
+    import numpy as np
+
+    module = types.ModuleType("torch")
+
+    class _Rotated:
+        def __init__(self, arr):
+            self._arr = arr
+
+        def contiguous(self):
+            return self._arr
+
+    module.rot90 = lambda arr, k, dims: _Rotated(np.rot90(arr, k, axes=tuple(dims)))
     monkeypatch.setitem(sys.modules, "torch", module)
     return module
 
