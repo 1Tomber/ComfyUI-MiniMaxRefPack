@@ -2729,6 +2729,16 @@ function onCanvasMouseDown(node, e) {
         }
         return;
     }
+    // Armed reassignment takes priority over a tile's own affordances: while the caret is on
+    // a tag, a click ANYWHERE on a media tile (its play glyph, ♪, ✂ or delete included)
+    // repoints that tag to the tile, rather than playing/editing/deleting it. Move the caret
+    // off the tag to get those back. `add` (no reference) and `subject` cells are excluded.
+    if (node._mmrpCaretTag
+        && ["tile", "play", "sound", "edit", "del"].includes(hit.type)) {
+        reassignCaretTag(node, hit.kind, hit.index);
+        e.stopPropagation();
+        return;
+    }
     if (hit.type === "subject") {
         // MouseEvent.detail is the click ordinal, so `>= 2` is the second click of a
         // double-click. Skipping the toggle there is what lets double-click keep meaning
@@ -2760,11 +2770,6 @@ function onCanvasMouseDown(node, e) {
         openEditModal(node, hit.kind, hit.index);
     } else if (hit.type === "add") {
         node._mmrpBody.fileInputs[hit.kind].click();
-    } else if (node._mmrpCaretTag) {
-        // The caret is on a tag and a tile was clicked: repoint that tag onto this
-        // reference, rather than selecting or starting a drag.
-        reassignCaretTag(node, hit.kind, hit.index);
-        e.stopPropagation();
     } else {
         const ref = node._mmrpRefs[`${hit.kind}s`][hit.index];
         // A missing file has no thumbnail to drag and nothing worth reordering.
