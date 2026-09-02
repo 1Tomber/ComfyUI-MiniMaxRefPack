@@ -2729,12 +2729,11 @@ function onCanvasMouseDown(node, e) {
         }
         return;
     }
-    // Armed reassignment takes priority over a tile's own affordances: while the caret is on
-    // a tag, a click ANYWHERE on a media tile (its play glyph, ♪, ✂ or delete included)
-    // repoints that tag to the tile, rather than playing/editing/deleting it. Move the caret
-    // off the tag to get those back. `add` (no reference) and `subject` cells are excluded.
-    if (node._mmrpCaretTag
-        && ["tile", "play", "sound", "edit", "del"].includes(hit.type)) {
+    // While the caret is on a tag, a click on a media tile repoints the tag to it. This
+    // covers the tile body AND its play glyph - the glyph fills a video/audio tile's centre,
+    // so without this a click meant to repoint would just play it. The other controls (♪, ✂,
+    // delete) keep their own jobs even while armed; move the caret off the tag to play.
+    if (node._mmrpCaretTag && (hit.type === "tile" || hit.type === "play")) {
         reassignCaretTag(node, hit.kind, hit.index);
         e.stopPropagation();
         return;
