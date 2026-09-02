@@ -3148,6 +3148,12 @@ function setCaretTag(node, tag) {
     if (same) return;
     node._mmrpCaretTag = tag ? { start: tag.start, end: tag.end, text: tag.text } : null;
     node._mmrpHighlightTile = tag ? (tagToTile(node).get(tag.text) || null) : null;
+    // The caret highlight and a subject-chip highlight are the same blue ring; only one at a
+    // time. Arming the caret cancels a live subject selection and un-lights its chip.
+    if (tag && node._mmrpHighlightSubject != null) {
+        node._mmrpHighlightSubject = null;
+        syncSubjectBar(node);
+    }
     scheduleDraw(node);
 }
 
@@ -3262,6 +3268,9 @@ function syncSubjectBar(node) {
             clearTimeout(chip._mmrpTimer);
             chip._mmrpTimer = setTimeout(() => {
                 node._mmrpHighlightSubject = node._mmrpHighlightSubject === n ? null : n;
+                // Turning a subject highlight on cancels a caret highlight, the same
+                // mutual exclusion the other way round (setCaretTag).
+                if (node._mmrpHighlightSubject != null) setCaretTag(node, null);
                 syncSubjectBar(node);
                 scheduleDraw(node);
             }, DBLCLICK_MS);
