@@ -56,7 +56,7 @@ function spans(overlay) {
 
 // ---- assemble the real functions in a sandbox with the shim -----------------------
 const NAMES = ["assignTags", "assignedSubjectNumbers", "scanPromptTags", "scanCounts",
-               "syncTagOverlay"];
+               "tagSpanClass", "syncTagOverlay"];
 const bodies = NAMES.map(grabFn).join("\n");
 const factory = new Function("document", "scheduleDraw", "KINDS", `
     "use strict";

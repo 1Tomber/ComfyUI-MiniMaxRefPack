@@ -167,3 +167,47 @@ def test_strip_handles_two_adjacent_strays_without_eating_too_much():
 def test_strip_also_removes_a_number_that_outran_the_set():
     # the "did not become a #, but points at nothing" case
     assert _strip("gone <Picture 4> here", {"images": 2}) == "gone here"
+
+
+# ---- the backdrop colour class ------------------------------------------------------
+
+
+def _cls(tag, caret=None, subject=None):
+    import json as _json
+    return _call(f"tagSpanClass({_json.dumps(tag)}, {_json.dumps(caret)}, {_json.dumps(subject)})")
+
+
+_PIC1 = {"kind": "Picture", "num": 1, "stray": False, "start": 5, "end": 16, "text": "<Picture 1>"}
+_SUB2 = {"kind": "Subject", "num": 2, "stray": False, "start": 0, "end": 11, "text": "<Subject 2>"}
+
+
+@requires_node
+def test_a_plain_tag_is_the_neutral_grey_default():
+    assert _cls(_PIC1) == "mmrp-tag"
+
+
+@requires_node
+def test_a_stray_tag_is_red_even_under_the_caret():
+    stray = {**_PIC1, "stray": True}
+    assert _cls(stray) == "mmrp-tag mmrp-tag-stray"
+    # broken beats active: a stray the caret sits on still reads red
+    caret = {"start": 5, "end": 16, "text": "<Picture 1>", "kind": "Picture"}
+    assert _cls(stray, caret=caret) == "mmrp-tag mmrp-tag-stray"
+
+
+@requires_node
+def test_the_tag_the_caret_is_on_is_blue():
+    caret = {"start": 5, "end": 16, "text": "<Picture 1>", "kind": "Picture"}
+    assert _cls(_PIC1, caret=caret) == "mmrp-tag mmrp-tag-active"
+    # a different tag is not
+    other = {**_PIC1, "start": 20, "end": 31, "num": 2, "text": "<Picture 2>"}
+    assert _cls(other, caret=caret) == "mmrp-tag"
+
+
+@requires_node
+def test_a_highlighted_subject_colours_all_its_tags_blue():
+    assert _cls(_SUB2, subject=2) == "mmrp-tag mmrp-tag-active"
+    assert _cls(_SUB2, subject=3) == "mmrp-tag"      # a different subject
+    assert _cls(_SUB2, subject=None) == "mmrp-tag"   # nothing highlighted
+    # the subject rule does not touch media tags
+    assert _cls(_PIC1, subject=1) == "mmrp-tag"

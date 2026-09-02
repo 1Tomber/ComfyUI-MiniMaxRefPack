@@ -240,6 +240,12 @@
     padding: 8px 10px;
     font-size: 13px;
     line-height: 1.45;
+    /* Always reserve the vertical scrollbar's gutter, even when no scrollbar is showing.
+       Without this the scrollbar appears only once the prompt overflows, which narrows the
+       text-wrap width the moment it does - but the highlight backdrop (overflow:hidden, no
+       scrollbar) keeps the full width, so the two wrap differently and the tag tints drift
+       off the glyphs line by line. Reserving the gutter on BOTH keeps their wrap identical. */
+    scrollbar-gutter: stable;
     /* No handle of its own, deliberately, even though the node resizes now. Two drag
        handles for one height would fight: the node's edge already resizes this box (see
        absorbHeightIntoPrompt), and a CSS handle would set a height the next relayout
@@ -296,19 +302,28 @@
     overflow-wrap: break-word;
     word-break: break-word;
     overflow: hidden;
+    /* Reserve the same scrollbar gutter as the textarea so both wrap to the exact same
+       width - see the note on .mmrp-direction. */
+    scrollbar-gutter: stable;
     pointer-events: none; /* click-through, except the tag spans below */
     -webkit-user-select: none;
     user-select: none;
 }
 .mmrp-tag-overlay .mmrp-tag {
     /* Purely decorative: no pointer events, so a click falls straight through to the
-       textarea and the caret lands where the user aimed. */
+       textarea and the caret lands where the user aimed. Default (unselected) tag: a quiet
+       NEUTRAL grey wash - it reads as "this is a reference tag" without claiming the accent
+       colours, which are reserved for the active tag (blue) and a broken one (red). */
     pointer-events: none;
     border-radius: 3px;
-    /* A quiet, cool wash on a live tag - enough to read as "this is a real reference"
-       without competing with the text. Matches C.highlight (#4ea1ff). */
-    background: rgba(78, 161, 255, 0.16);
-    box-shadow: 0 0 0 1px rgba(78, 161, 255, 0.28);
+    background: rgba(170, 170, 170, 0.16);
+    box-shadow: 0 0 0 1px rgba(170, 170, 170, 0.30);
+}
+.mmrp-tag-overlay .mmrp-tag-active {
+    /* The tag the cursor is on (or every <Subject N> of a highlighted subject). Blue, to
+       match the blue ring on the media it highlights at the same time - C.highlight. */
+    background: rgba(78, 161, 255, 0.34);
+    box-shadow: 0 0 0 1px rgba(78, 161, 255, 0.85);
 }
 .mmrp-tag-overlay .mmrp-tag-stray {
     /* Intense, warm, unmistakable: this tag points at nothing. Matches C.danger. */

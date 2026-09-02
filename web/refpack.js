@@ -862,6 +862,20 @@ export function stripStrayTags(text, counts) {
     out += text.slice(cursor);
     return out;
 }
+
+// The backdrop class for one scanned tag, given what is currently active. Three states,
+// one colour each: stray -> red, active -> blue, otherwise the neutral grey default. A tag
+// is active when the caret is on it, or when it is a <Subject N> whose subject is
+// highlighted (by a chip or by the caret sitting on one of its tags). Pure, so the colour
+// rule is pinned by tests/test_tagscan.py rather than living only in the DOM.
+export function tagSpanClass(tag, caretTag, highlightSubject) {
+    if (tag.stray) return "mmrp-tag mmrp-tag-stray";
+    const onCaret = caretTag != null
+        && caretTag.start === tag.start && caretTag.text === tag.text;
+    const onSubject = tag.kind === "Subject"
+        && highlightSubject != null && tag.num === highlightSubject;
+    return (onCaret || onSubject) ? "mmrp-tag mmrp-tag-active" : "mmrp-tag";
+}
 // <<< MMRP-TAGSCAN
 
 // Run a mutation and carry the direction text with it. `mutate` returns the new refs.
@@ -2276,7 +2290,10 @@ function draw(node) {
     // The caret is on a tag in the prompt: light its reference and turn every tile into a
     // repoint target for it.
     const highlightTile = node._mmrpHighlightTile;
-    const caretTag = node._mmrpCaretTag;
+    // Only a MEDIA caret tag arms reassignment (stripes every tile); a subject caret tag
+    // just highlights its own media, so it does not stripe.
+    const armTag = node._mmrpCaretTag && node._mmrpCaretTag.kind !== "Subject"
+        ? node._mmrpCaretTag : null;
 
     // `layout` was computed above, from the width, before the canvas height was applied.
     // Everything below still paints in one pass with no scroll offset, because the slab
@@ -2377,9 +2394,9 @@ function draw(node) {
                 || (highlightTile && highlightTile.kind === kind && highlightTile.index === i);
             drawTile(ctx, kind, ref, lines, tx, ty, selected, soundState, badgeH,
                      picking ? null : playState, highlighted);
-            // The caret is on a tag: ring every tile as a repoint target (dashed blue,
+            // The caret is on a MEDIA tag: ring every tile as a repoint target (dashed blue,
             // distinct from the solid highlight and the red selection).
-            if (caretTag && !picking) {
+            if (armTag && !picking) {
                 ctx.save();
                 ctx.strokeStyle = C.highlight;
                 ctx.setLineDash([5, 4]);
@@ -2769,11 +2786,14 @@ function onCanvasMouseDown(node, e) {
         }
         return;
     }
-    // While the caret is on a tag, a click on a media tile repoints the tag to it. This
-    // covers the tile body AND its play glyph - the glyph fills a video/audio tile's centre,
-    // so without this a click meant to repoint would just play it. The other controls (♪, ✂,
-    // delete) keep their own jobs even while armed; move the caret off the tag to play.
-    if (node._mmrpCaretTag && (hit.type === "tile" || hit.type === "play")) {
+    // While the caret is on a MEDIA tag, a click on a media tile repoints the tag to it.
+    // This covers the tile body AND its play glyph - the glyph fills a video/audio tile's
+    // centre, so without this a click meant to repoint would just play it. The other controls
+    // (♪, ✂, delete) keep their own jobs even while armed; move the caret off the tag to play.
+    // A SUBJECT caret tag does not arm - repointing a subject onto a media tile is meaningless
+    // - so those clicks fall through to normal tile behaviour.
+    if (node._mmrpCaretTag && node._mmrpCaretTag.kind !== "Subject"
+        && (hit.type === "tile" || hit.type === "play")) {
         reassignCaretTag(node, hit.kind, hit.index);
         e.stopPropagation();
         return;
@@ -3164,6 +3184,8 @@ function syncTagOverlay(node) {
     const el = body.directionInput;
     const text = el.value || "";
     const tags = scanPromptTags(text, scanCounts(node));
+    const caretTag = node._mmrpCaretTag;
+    const highlightSubject = node._mmrpHighlightSubject;
     overlay.replaceChildren();
     let cursor = 0;
     for (const t of tags) {
@@ -3171,7 +3193,7 @@ function syncTagOverlay(node) {
             overlay.appendChild(document.createTextNode(text.slice(cursor, t.start)));
         }
         const span = document.createElement("span");
-        span.className = "mmrp-tag" + (t.stray ? " mmrp-tag-stray" : "");
+        span.className = tagSpanClass(t, caretTag, highlightSubject);
         span.textContent = t.text;
         overlay.appendChild(span);
         cursor = t.end;
@@ -3195,22 +3217,39 @@ function tagToTile(node) {
     return map;
 }
 
-// Reassignment without breaking text editing: the tag under the CARET is the one being
-// repointed, not a tag you clicked (clicking a tag just places the caret, as it should).
-// When the caret sits on a tag, every tile lights as a target and its own reference is
-// highlighted; clicking a tile then rewrites that tag to the clicked reference.
+// What the caret being on a tag means, split by kind:
+//   media tag   -> arm reassignment (tiles stripe), highlight the one tile it names, and
+//                  colour the tag blue.
+//   subject tag -> highlight that subject's MEDIA (like clicking its chip) and colour every
+//                  <Subject N> blue - NOT a reassignment (repointing a subject onto a media
+//                  tile is meaningless).
+// The caret highlight and a chip highlight are the same blue and never both live; the two
+// setters cancel each other. A caret-driven subject highlight is transient (it clears when
+// the caret leaves the tag); a chip-driven one is sticky, so leaving a plain caret does not
+// drop it.
 function setCaretTag(node, tag) {
     const cur = node._mmrpCaretTag;
     const same = (!cur && !tag) || (cur && tag && cur.start === tag.start && cur.text === tag.text);
     if (same) return;
-    node._mmrpCaretTag = tag ? { start: tag.start, end: tag.end, text: tag.text } : null;
-    node._mmrpHighlightTile = tag ? (tagToTile(node).get(tag.text) || null) : null;
-    // The caret highlight and a subject-chip highlight are the same blue ring; only one at a
-    // time. Arming the caret cancels a live subject selection and un-lights its chip.
-    if (tag && node._mmrpHighlightSubject != null) {
-        node._mmrpHighlightSubject = null;
+    const wasSubjectCaret = !!(cur && cur.kind === "Subject");
+    if (tag && tag.kind === "Subject") {
+        node._mmrpCaretTag = { start: tag.start, end: tag.end, text: tag.text, kind: "Subject" };
+        node._mmrpHighlightTile = null;
+        node._mmrpHighlightSubject = tag.num;
         syncSubjectBar(node);
+    } else if (tag) {
+        node._mmrpCaretTag = { start: tag.start, end: tag.end, text: tag.text, kind: tag.kind };
+        node._mmrpHighlightTile = tagToTile(node).get(tag.text) || null;
+        if (node._mmrpHighlightSubject != null) { node._mmrpHighlightSubject = null; syncSubjectBar(node); }
+    } else {
+        node._mmrpCaretTag = null;
+        node._mmrpHighlightTile = null;
+        if (wasSubjectCaret && node._mmrpHighlightSubject != null) {
+            node._mmrpHighlightSubject = null;
+            syncSubjectBar(node);
+        }
     }
+    syncTagOverlay(node);   // the active-tag colour changed
     scheduleDraw(node);
 }
 
@@ -3324,11 +3363,12 @@ function syncSubjectBar(node) {
         chip.onclick = () => {
             clearTimeout(chip._mmrpTimer);
             chip._mmrpTimer = setTimeout(() => {
+                // Clear any caret highlight FIRST (mutual exclusion) - it can drop a
+                // caret-driven subject highlight, so read the toggle state afterwards.
+                setCaretTag(node, null);
                 node._mmrpHighlightSubject = node._mmrpHighlightSubject === n ? null : n;
-                // Turning a subject highlight on cancels a caret highlight, the same
-                // mutual exclusion the other way round (setCaretTag).
-                if (node._mmrpHighlightSubject != null) setCaretTag(node, null);
                 syncSubjectBar(node);
+                syncTagOverlay(node);   // colour (or un-colour) the <Subject n> tags
                 scheduleDraw(node);
             }, DBLCLICK_MS);
         };
@@ -3656,6 +3696,15 @@ function buildCustomBlock(node) {
     directionWrap.appendChild(tagOverlay);
     container.appendChild(directionWrap);
 
+    // The textarea DOES change size (node-width and prompt-height drags). A reflow can move
+    // its scrollTop without firing a `scroll` event, which would leave the highlight backdrop
+    // at a stale offset; re-sync the overlay's scroll to it on every resize.
+    const promptResizeObserver = new ResizeObserver(() => {
+        tagOverlay.scrollTop = directionInput.scrollTop;
+        tagOverlay.scrollLeft = directionInput.scrollLeft;
+    });
+    promptResizeObserver.observe(directionInput);
+
     node._mmrpBody = {
         root: container,
         uploadRow,
@@ -3670,6 +3719,7 @@ function buildCustomBlock(node) {
         previewVideo,
         previewAudio,
         resizeObserver,
+        promptResizeObserver,
     };
     return container;
 }
@@ -5449,7 +5499,10 @@ function installSelectionHandlers(node) {
         document.removeEventListener("keydown", keyHandler, true);
         (node._mmrpHideIntervals || []).forEach((id) => clearInterval(id));
         stopPreview(node);
-        if (node._mmrpBody) node._mmrpBody.resizeObserver.disconnect();
+        if (node._mmrpBody) {
+            node._mmrpBody.resizeObserver.disconnect();
+            if (node._mmrpBody.promptResizeObserver) node._mmrpBody.promptResizeObserver.disconnect();
+        }
         // A drag in flight holds three capture-phase WINDOW listeners. Without this they
         // outlive the node until the next mouseup anywhere, whose finishDrag then applies
         // a reorder to a node that is no longer in the graph.
