@@ -227,6 +227,12 @@
 
 .mmrp-direction {
     width: 100%;
+    /* Block, not the textarea default of inline-block: an inline-block sits on a text
+       baseline, so its wrapper gains ~3px of descender space below it. The highlight
+       backdrop is `inset:0` in that wrapper, so it would be ~3px TALLER than the textarea -
+       same scrollHeight but a smaller max scroll, which shows as the tints sitting a few px
+       low once the prompt is scrolled to the bottom. */
+    display: block;
     /* Height is set inline from the stored prompt height (promptHeightOf). It is the one
        element in the block whose size is a PREFERENCE rather than a consequence, so it is
        the one with an inline height; this is the floor if that has not been applied yet. */
