@@ -513,10 +513,11 @@
     position: relative;
     flex: 1 1 auto;
     min-width: 160px;
-    height: 18px;
+    height: 24px;   /* a touch taller for a comfortable playhead grab */
     background: #141414;
     border: 1px solid #444;
     border-radius: 4px;
+    cursor: pointer;   /* click the body to move the playhead (video) */
 }
 
 .mmrp-trim-span {
@@ -535,6 +536,43 @@
     border: 1px solid #000;
     border-radius: 2px;
     cursor: ew-resize;
+    z-index: 2;   /* above the playhead line */
+}
+
+/* The scrub playhead: a thin accent line with a little cap, dragged/stepped independent of
+   the trim handles. Purely a marker - the bar underneath owns the pointer, so a click on
+   the line still scrubs. Matches C.highlight (#4ea1ff). */
+.mmrp-trim-playhead {
+    position: absolute;
+    top: -4px;
+    bottom: -4px;
+    width: 2px;
+    margin-left: -1px;
+    background: #4ea1ff;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+    pointer-events: none;
+    z-index: 1;
+}
+.mmrp-trim-playhead::before {
+    content: "";
+    position: absolute;
+    top: -5px;
+    left: -3px;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #4ea1ff;
+}
+
+/* The frame readout beside the bar: tabular figures so the numbers do not jitter. */
+.mmrp-trim-readout {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* A small fixed gap separating the transport buttons from the Set In/Set Out pair. */
+.mmrp-trim-gap {
+    flex: 0 0 auto;
+    width: 12px;
 }
 
 .mmrp-trim-num {

@@ -191,6 +191,29 @@ quarter turn maps a rect exactly; an arbitrary angle leaves it no longer axis-al
 and quietly substituting its bounding box would select pixels you never chose. The rect
 stays where it is in the rotated frame — which is where the editor draws it.
 
+## Trimming a video
+
+The trim editor works like a source monitor in an NLE: a **playhead** you scrub and step
+frame by frame, and **In / Out** cue points you mark *at* the playhead. Open it with the
+scissors chip on a video tile.
+
+- **Scrub** by clicking or dragging along the bar; the blue line is the playhead. **Step a
+  frame** with the ◀ / ▶ buttons or the **← / →** keys (**Shift** steps ten).
+- **Set In** / **Set Out** (or the **I** / **O** keys) mark the current playhead frame as the
+  first / last kept frame. **⏮ In** / **Out ⏭** (**Shift+I** / **Shift+O**) jump the playhead
+  back onto a cue. **Home / End** go to the clip's first / last frame, **Space** plays the
+  trimmed span, **Esc** closes.
+- The **In / Out fields** take an exact frame number — the reliable way to land a cue on a
+  long clip. The readout shows the playhead frame, the In/Out/total frames, and the time.
+- **15s** sets a fifteen-second window from the In point — a guide for MiniMax's limit, not a
+  cap; drag or type any length you like. **Clear trim** goes back to the whole clip.
+
+Frame numbers come from the clip's real frame rate (probed on the server, the same rate the
+decoder reads), so the frame you mark is the frame that is emitted. The saved value is still
+seconds — a start and an exclusive end — and marking never lets you pick a window shorter
+than MiniMax's five-frame minimum. On a variable-frame-rate clip the frame *labels* are
+approximate, but the trim itself is exact, because it is stored and decoded in seconds.
+
 ## The tag rule
 
 Worth reading once, because the numbering is what your prompt text refers to and it is

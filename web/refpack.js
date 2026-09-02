@@ -142,7 +142,7 @@ function shouldDismissOnBackdrop(targetIsBackdrop, pressStartedOnBackdrop) {
     return targetIsBackdrop === true && pressStartedOnBackdrop === true;
 }
 
-function dismissOnBackdrop(overlay) {
+function dismissOnBackdrop(overlay, onDismiss) {
     let pressStartedOnBackdrop = false;
     overlay.onmousedown = (e) => {
         pressStartedOnBackdrop = e.target === overlay;
@@ -150,7 +150,9 @@ function dismissOnBackdrop(overlay) {
     overlay.onclick = (e) => {
         const dismiss = shouldDismissOnBackdrop(e.target === overlay, pressStartedOnBackdrop);
         pressStartedOnBackdrop = false;
-        if (dismiss) overlay.remove();
+        // onDismiss runs BEFORE removal so a modal can tear down listeners and stop any
+        // playback that would otherwise leak on a detached element.
+        if (dismiss) { if (onDismiss) onDismiss(); overlay.remove(); }
     };
 }
 // <<< MMRP-MODAL
@@ -1129,6 +1131,117 @@ export function shiftTrim(trim, delta, duration) {
     return [start + room, end + room];
 }
 // <<< MMRP-TRIMSTEP
+
+// >>> MMRP-CUE
+// The cue-point trim editor's arithmetic, in FRAMES. The modal is a source monitor: a
+// playhead you scrub and step frame by frame, and In/Out cues you mark AT the playhead -
+// the model every NLE uses. The emitted contract is still trim:[start,end] SECONDS
+// (validate_trim, normalizeTrim are untouched); frames are the interaction layer on top,
+// converted at the boundary here. Pure and marker-delimited so tests/test_cue.py runs it
+// under node.
+//
+// A clip's fps comes from the /minimax_refpack/probe route (media.probe), the SAME av
+// average-rate the decoder reads as src_fps - so the editor's frame IS the server's frame.
+
+// H3 needs >= 5 frames AFTER the 24fps resample (media.py raises otherwise). These two are
+// the decoder's own numbers.
+const MIN_OUTPUT_FRAMES = 5;
+const RESAMPLE_FPS = 24;
+
+export function secToFrame(sec, fps) {
+    return Math.round((sec || 0) * fps);
+}
+export function frameToSec(frame, fps) {
+    return frame / fps;
+}
+// Seek to the MIDDLE of a frame's span, not its leading edge: a boundary seek in HTML
+// video commonly displays the frame BEFORE it, so stepping would land one frame short.
+// Read back with round(currentTime*fps - 0.5).
+export function frameSeekSec(frame, fps) {
+    return (frame + 0.5) / fps;
+}
+export function secToCursorFrame(sec, fps) {
+    return Math.round((sec || 0) * fps - 0.5);
+}
+export function lastFrameIndex(durSec, fps) {
+    return Math.max(0, Math.round((durSec || 0) * fps) - 1);
+}
+export function clampFrame(f, lo, hi) {
+    return Math.min(Math.max(Math.round(f), lo), hi);
+}
+
+// The output frame count a kept window [inF..outF] (inclusive) yields after the 24fps
+// resample - what the decoder's >=5 guard actually measures. n_sel = outF - inF + 1.
+export function outputFrames(inF, outF, fps) {
+    return Math.max(1, Math.round((outF - inF + 1) * RESAMPLE_FPS / fps));
+}
+
+// The smallest kept source-frame count whose resample clears the >=5 guard, plus one frame
+// of headroom against average-rate (VFR) drift between the editor and the decoder. The mark
+// helpers never produce a window shorter than this, so Save can never emit one the decode
+// raises on.
+export function minKeptFrames(fps) {
+    // round(k*24/fps) >= 5  <=>  k >= 4.5*fps/24; +1 frame of margin.
+    return Math.max(2, Math.ceil((MIN_OUTPUT_FRAMES - 0.5) * fps / RESAMPLE_FPS) + 1);
+}
+
+// Mark In at the cursor (the frame becomes the first KEPT one), keeping a legal window.
+// If the cursor lands too close to Out, push Out later; if Out is pinned at the clip end,
+// pull In back instead - never sit in an illegal state.
+export function markInFrame(cursorF, inF, outF, lastF, fps) {
+    const need = minKeptFrames(fps);
+    let ni = clampFrame(cursorF, 0, lastF);
+    let no = outF;
+    if (no - ni + 1 < need) {
+        no = ni + need - 1;
+        if (no > lastF) { no = lastF; ni = Math.max(0, no - (need - 1)); }
+    }
+    return [ni, no];
+}
+
+// Mark Out at the cursor (the frame becomes the last KEPT one), symmetric to markInFrame.
+export function markOutFrame(cursorF, inF, outF, lastF, fps) {
+    const need = minKeptFrames(fps);
+    let no = clampFrame(cursorF, 0, lastF);
+    let ni = inF;
+    if (no - ni + 1 < need) {
+        ni = no - (need - 1);
+        if (ni < 0) { ni = 0; no = Math.min(lastF, ni + need - 1); }
+    }
+    return [ni, no];
+}
+
+// Frames -> the seconds pair actually saved. Out is EXCLUSIVE: the last kept frame outF
+// maps to end=(outF+1)/fps, matching the decoder's n_sel=ceil(end*fps)-first. A selection
+// running to the last frame maps end to the real clip duration (not (lastF+1)/fps, which
+// rounding could push past it), and inF==0 maps start to exactly 0 - so a full selection
+// becomes [0, duration], which normalizeTrim collapses to null (no trim). durSec/lastF come
+// from the same fps, so the two agree.
+export function cueToTrimSeconds(inF, outF, fps, durSec, lastF) {
+    const start = inF <= 0 ? 0 : inF / fps;
+    const end = outF >= lastF ? durSec : (outF + 1) / fps;
+    return [start, end];
+}
+
+// Seconds trim -> the [inF, outF] cue pair, for opening on a saved (or legacy 2dp) trim.
+// round() recovers the frame a 2dp second was written from at any realistic fps.
+export function trimSecToCue(trim, fps, durSec, lastF) {
+    if (!Array.isArray(trim) || trim.length < 2) return [0, lastF];
+    const inF = clampFrame(secToFrame(trim[0], fps), 0, lastF);
+    const outF = clampFrame(secToFrame(trim[1], fps) - 1, inF, lastF);
+    return [inF, outF];
+}
+
+// The seconds hint shown beside the frame readouts: M:SS.mmm.
+export function formatClock(sec) {
+    sec = Math.max(0, sec || 0);
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    const ms = Math.round((sec - Math.floor(sec)) * 1000);
+    const mmm = String(Math.min(999, ms)).padStart(3, "0");
+    return `${m}:${String(s).padStart(2, "0")}.${mmm}`;
+}
+// <<< MMRP-CUE
 
 // >>> MMRP-OUTSIZE
 // The pixel size a reference actually emits: source -> rotate -> crop -> long-edge cap.
@@ -3698,7 +3811,8 @@ function openEditModal(node, kind, index) {
 
     const overlay = document.createElement("div");
     overlay.className = "mmrp-overlay";
-    dismissOnBackdrop(overlay);
+    // Tear down (stop playback, drop the keydown) before the backdrop removes the overlay.
+    dismissOnBackdrop(overlay, () => teardown());
 
     const modal = document.createElement("div");
     modal.className = "mmrp-modal mmrp-edit-modal";
@@ -4058,9 +4172,28 @@ function openEditModal(node, kind, index) {
         syncScale();
     }
 
-    // ---- trim bar + 2dp second fields (video/audio) ----
+    // ---- trim: a source-monitor cue editor for video, a seconds bar for audio ----
+    // The keyboard handler (added near the footer, after stopPlayback exists) drives these
+    // through the closures the trim block assigns; they no-op until then and for audio.
+    let cueStep = () => {};        // (deltaFrames) move the playhead
+    let cueSetIn = () => {};       // mark In at the playhead
+    let cueSetOut = () => {};      // mark Out at the playhead
+    let cueJumpIn = () => {};      // playhead -> In
+    let cueJumpOut = () => {};     // playhead -> Out (last kept frame)
+    let cueHome = () => {};        // playhead -> first frame
+    let cueEnd = () => {};         // playhead -> last frame
+    let cueSet15s = () => {};      // 15s window from In
+    let cueTogglePlay = () => {};  // Space (assigned in the playback block)
+    let cueTrackPlayhead = () => {};// called on each playback tick to move the playhead
+    let cueActive = () => false;   // are the frame cue controls live (video + fps + trimmable)?
+    // One exit path for every dismissal (Cancel, Save, backdrop, Esc): stop the playback
+    // rAF, pause the element, and drop the keyboard listener. Assigned near the footer once
+    // stopPlayback exists; the wrapper below reads it at call time.
+    let teardown = () => {};
+
     let syncTrim = () => {};
     if (wantsTrim) {
+        const isVideo = kind === "video";
         const row = document.createElement("div");
         row.className = "mmrp-trim-row";
         const label = document.createElement("span");
@@ -4068,13 +4201,16 @@ function openEditModal(node, kind, index) {
         label.textContent = "Trim";
         row.appendChild(label);
 
+        // In/Out entry. Video: integer FRAME fields - typing a frame is the reliable way to
+        // hit an exact one on a long clip - disabled until the probe reports fps. Audio: 2dp
+        // seconds, unchanged.
         const inNum = document.createElement("input");
         const outNum = document.createElement("input");
         for (const el of [inNum, outNum]) {
             el.className = "mmrp-trim-num";
             el.type = "number";
-            el.step = "0.01";
             el.min = "0";
+            el.step = isVideo ? "1" : "0.01";
             el.disabled = true;
             // Keep graph hotkeys away from typing, same as the save-name box.
             el.addEventListener("keydown", (e) => e.stopPropagation());
@@ -4091,9 +4227,17 @@ function openEditModal(node, kind, index) {
         bar.appendChild(span);
         bar.appendChild(inHandle);
         bar.appendChild(outHandle);
+        // The playhead: a thin line the user scrubs and steps, INDEPENDENT of the trim
+        // handles (the source-monitor model). Video only - audio has <audio controls>.
+        let playhead = null;
+        if (isVideo) {
+            playhead = document.createElement("div");
+            playhead.className = "mmrp-trim-playhead";
+            bar.appendChild(playhead);
+        }
 
         const durLabel = document.createElement("span");
-        durLabel.className = "mmrp-edit-label";
+        durLabel.className = "mmrp-edit-label mmrp-trim-readout";
         durLabel.textContent = "…";
 
         // "Clear crop"'s pair: back to the whole clip, so Save deletes the saved
@@ -4109,37 +4253,167 @@ function openEditModal(node, kind, index) {
         row.appendChild(clearTrimBtn);
         modal.appendChild(row);
 
+        // Seconds stays the canonical trim (setTrim/normalizeTrim/save are untouched);
+        // frames are the video interaction layer, converted at these boundaries.
+        let cursor = 0;   // playhead, seconds (video)
+        const fpsReady = () => isVideo && srcFps > 0 && !!duration;
+        const lastF = () => (fpsReady() ? lastFrameIndex(duration, srcFps) : 0);
+        // A clip too short to yield a legal >= 5-output-frame window cannot be trimmed at
+        // all (the decoder would raise); the cue controls disable and it stays full-clip.
+        const trimmable = () => !fpsReady() || (lastF() + 1) >= minKeptFrames(srcFps);
+        const curFrame = () => (fpsReady() ? clampFrame(secToCursorFrame(cursor, srcFps), 0, lastF()) : 0);
+        const cueFrames = () => (fpsReady() ? trimSecToCue(trim, srcFps, duration, lastF()) : [0, 0]);
+        cueActive = () => fpsReady() && trimmable();
+
         syncTrim = () => {
             if (!duration || !trim) return;
-            inNum.value = trim[0].toFixed(2);
-            outNum.value = trim[1].toFixed(2);
             span.style.left = `${(trim[0] / duration) * 100}%`;
             span.style.width = `${((trim[1] - trim[0]) / duration) * 100}%`;
             inHandle.style.left = `calc(${(trim[0] / duration) * 100}% - 5px)`;
             outHandle.style.left = `calc(${(trim[1] / duration) * 100}% - 5px)`;
+            if (playhead) playhead.style.left = `${clamp01(cursor / duration, 0, 1) * 100}%`;
+            if (isVideo && fpsReady()) {
+                const [ci, co] = cueFrames();
+                inNum.value = String(ci);
+                outNum.value = String(co);
+                durLabel.textContent =
+                    `f ${curFrame()} · in ${ci} / out ${co} / ${lastF() + 1}f · ${formatClock(cursor)}`;
+            } else if (isVideo) {
+                // Pre-probe: no fps yet. The bar/handles/playhead still work in seconds; the
+                // fields show seconds until the frame numbers arrive.
+                inNum.value = trim[0].toFixed(2);
+                outNum.value = trim[1].toFixed(2);
+                durLabel.textContent = `${formatClock(cursor)} / ${formatClock(duration)}`;
+            } else {
+                inNum.value = trim[0].toFixed(2);
+                outNum.value = trim[1].toFixed(2);
+                durLabel.textContent = `/ ${r2(duration).toFixed(2)}s`;
+            }
             syncClears();
         };
 
         const setTrim = (start, end, seekTo) => {
             if (!duration) return;
-            // in stays >= 0.05s before out; both stay inside the clip
+            // in stays >= 0.05s before out; both stay inside the clip. (The video cue path
+            // enforces a larger, fps-aware floor before it ever calls this.)
             start = clamp01(r2(start), 0, Math.max(0, r2(duration) - 0.05));
             end = clamp01(r2(end), start + 0.05, r2(duration));
             trim = [start, end];
             syncTrim();
-            // scrub the modal's own video so the user sees the frame they chose
+            // audio: scrub the element to the chosen edge (video moves the playhead itself)
             if (kind === "video" && seekTo !== undefined) media.currentTime = seekTo;
         };
 
+        // ---- video playhead + frame cue actions ----
+        const seekCursorSec = (s) => {
+            cursor = clamp01(s, 0, duration || 0);
+            media.currentTime = cursor;
+            syncTrim();
+        };
+        const seekCursorFrame = (f) => {
+            if (!fpsReady()) return;
+            const cf = clampFrame(f, 0, lastF());
+            // Seek to the frame's MIDPOINT so the element lands ON it, not the frame before.
+            cursor = clamp01(frameSeekSec(cf, srcFps), 0, duration);
+            media.currentTime = cursor;
+            syncTrim();
+        };
+        const applyCue = (ni, no) => {
+            const [s, e] = cueToTrimSeconds(ni, no, srcFps, duration, lastF());
+            setTrim(s, e);
+        };
+
+        if (isVideo) {
+            cueStep = (delta) => {
+                if (!cueActive()) return;
+                stopPlayback();
+                seekCursorFrame(curFrame() + delta);
+            };
+            cueSetIn = () => {
+                stopPlayback();
+                if (cueActive()) {
+                    const [ci, co] = cueFrames();
+                    applyCue(...markInFrame(curFrame(), ci, co, lastF(), srcFps));
+                } else if (duration) setTrim(cursor, trim ? trim[1] : duration);
+            };
+            cueSetOut = () => {
+                stopPlayback();
+                if (cueActive()) {
+                    const [ci, co] = cueFrames();
+                    applyCue(...markOutFrame(curFrame(), ci, co, lastF(), srcFps));
+                } else if (duration) setTrim(trim ? trim[0] : 0, cursor);
+            };
+            cueJumpIn = () => { stopPlayback(); if (trim) seekCursorSec(trim[0]); };
+            cueJumpOut = () => {
+                stopPlayback();
+                if (cueActive()) seekCursorFrame(cueFrames()[1]);
+                else if (trim) seekCursorSec(Math.max(trim[0], trim[1] - 0.04));
+            };
+            cueHome = () => { stopPlayback(); cueActive() ? seekCursorFrame(0) : seekCursorSec(0); };
+            cueEnd = () => { stopPlayback(); cueActive() ? seekCursorFrame(lastF()) : seekCursorSec(duration || 0); };
+            cueSet15s = () => {
+                stopPlayback();
+                if (trim && duration) setTrim(trim[0], Math.min(trim[0] + 15, duration));
+            };
+            cueTrackPlayhead = () => {
+                cursor = media.currentTime;
+                if (playhead && duration) {
+                    playhead.style.left = `${clamp01(cursor / duration, 0, 1) * 100}%`;
+                }
+                if (fpsReady()) {
+                    const [ci, co] = cueFrames();
+                    durLabel.textContent =
+                        `f ${curFrame()} · in ${ci} / out ${co} / ${lastF() + 1}f · ${formatClock(cursor)}`;
+                }
+            };
+
+            // Click / drag the bar body to move the playhead (never the handles).
+            const scrubTo = (clientX) => {
+                const box = bar.getBoundingClientRect();
+                if (!box.width || !duration) return;
+                const frac = clamp01((clientX - box.left) / box.width, 0, 1);
+                if (fpsReady()) seekCursorFrame(clampFrame(frac * (lastF() + 1) - 0.5, 0, lastF()));
+                else seekCursorSec(frac * duration);
+            };
+            bar.addEventListener("mousedown", (e) => {
+                if (e.target === inHandle || e.target === outHandle) return; // handles own these
+                stopPlayback();
+                e.preventDefault();
+                scrubTo(e.clientX);
+                const move = (ev) => scrubTo(ev.clientX);
+                const up = () => {
+                    window.removeEventListener("mousemove", move);
+                    window.removeEventListener("mouseup", up);
+                };
+                window.addEventListener("mousemove", move);
+                window.addEventListener("mouseup", up);
+            });
+        }
+
+        // Handle drags set the trim edges. Video snaps to whole frames when fps is known;
+        // audio seeks the element to the edge as it drags, as before.
         const dragHandle = (which) => (e) => {
             stopPlayback();
             e.preventDefault();
+            e.stopPropagation();
             const box = bar.getBoundingClientRect();
             if (!box.width || !duration) return;
             const move = (ev) => {
-                const t = clamp01((ev.clientX - box.left) / box.width, 0, 1) * duration;
-                if (which === "in") setTrim(t, trim[1], t);
-                else setTrim(trim[0], t, t);
+                const frac = clamp01((ev.clientX - box.left) / box.width, 0, 1);
+                // Video snaps to whole frames AND keeps the fps-aware min window (markIn/Out
+                // push the far edge if the drag would shrink it below a legal >=5-frame
+                // window). Audio / pre-probe drag freely in seconds, seeking as they go.
+                if (isVideo && cueActive()) {
+                    const [ci, co] = cueFrames();
+                    const f = clampFrame(frac * (lastF() + 1) - 0.5, 0, lastF());
+                    applyCue(...(which === "in"
+                        ? markInFrame(f, ci, co, lastF(), srcFps)
+                        : markOutFrame(f, ci, co, lastF(), srcFps)));
+                } else {
+                    const t = frac * duration;
+                    if (which === "in") setTrim(t, trim[1], isVideo ? undefined : t);
+                    else setTrim(trim[0], t, isVideo ? undefined : t);
+                }
             };
             const up = () => {
                 window.removeEventListener("mousemove", move);
@@ -4151,86 +4425,99 @@ function openEditModal(node, kind, index) {
         inHandle.addEventListener("mousedown", dragHandle("in"));
         outHandle.addEventListener("mousedown", dragHandle("out"));
 
-        inNum.addEventListener("change", () => stopPlayback() || setTrim(parseFloat(inNum.value) || 0, trim ? trim[1] : 0, parseFloat(inNum.value) || 0));
-        outNum.addEventListener("change", () => stopPlayback() || setTrim(trim ? trim[0] : 0, parseFloat(outNum.value) || 0));
+        if (isVideo) {
+            inNum.addEventListener("change", () => {
+                stopPlayback();
+                if (!cueActive()) return;
+                const [ci, co] = cueFrames();
+                applyCue(...markInFrame(clampFrame(parseInt(inNum.value, 10) || 0, 0, lastF()),
+                                        ci, co, lastF(), srcFps));
+            });
+            outNum.addEventListener("change", () => {
+                stopPlayback();
+                if (!cueActive()) return;
+                const [ci, co] = cueFrames();
+                applyCue(...markOutFrame(clampFrame(parseInt(outNum.value, 10) || 0, 0, lastF()),
+                                         ci, co, lastF(), srcFps));
+            });
+        } else {
+            inNum.addEventListener("change", () => stopPlayback() || setTrim(parseFloat(inNum.value) || 0, trim ? trim[1] : 0, parseFloat(inNum.value) || 0));
+            outNum.addEventListener("change", () => stopPlayback() || setTrim(trim ? trim[0] : 0, parseFloat(outNum.value) || 0));
+        }
+
         clearTrimBtn.onclick = () => {
             mlog("edit_cleared", { file: ref.file, what: "trim" });
             stopPlayback();
             setTrim(0, duration || 0);
         };
 
-        // ---- frame navigation + the 15s guide (video only) ----
-        // "Frame" here means SOURCE frame, at the clip's own fps - what the preview shows,
-        // not the resampled 24fps the socket emits.
-        let minusFrameBtn = null;
-        let plusFrameBtn = null;
-        if (kind === "video") {
+        // ---- transport: playhead + mark In/Out (video only) ----
+        if (isVideo) {
             const stepRow = document.createElement("div");
             stepRow.className = "mmrp-trim-row";
             const stepLabel = document.createElement("span");
             stepLabel.className = "mmrp-edit-label";
-            stepLabel.textContent = "Frame";
+            stepLabel.textContent = "Cue";
             stepRow.appendChild(stepLabel);
 
-            const frameDur = () => (srcFps ? 1 / srcFps : 0.04); // ~25fps guess until probed
-
-            const mkStep = (text, title, fn) => {
+            const frameBtns = [];
+            const mkBtn = (text, title, fn, needsFrames) => {
                 const b = document.createElement("button");
                 b.className = "mmrp-btn mmrp-trim-step";
                 b.textContent = text;
                 b.title = title;
-                b.onclick = () => { stopPlayback(); fn(); };
+                b.onclick = fn;
                 stepRow.appendChild(b);
+                if (needsFrames) frameBtns.push(b);
                 return b;
             };
 
-            // Jump the preview to the in-point and to the last INCLUDED frame (out-point is
-            // exclusive, so the last frame sits one frame before it).
-            mkStep("⏮ In", "Jump the preview to the first frame of the trim", () => {
-                if (trim) media.currentTime = trim[0];
-            });
-            minusFrameBtn = mkStep("◀ −1", "Slide the whole window back one frame", () => {
-                if (!srcFps || !trim) return;
-                const [s, e] = shiftTrim(trim, -1 / srcFps, duration);
-                setTrim(s, e, s);
-            });
-            plusFrameBtn = mkStep("+1 ▶", "Slide the whole window forward one frame", () => {
-                if (!srcFps || !trim) return;
-                const [s, e] = shiftTrim(trim, 1 / srcFps, duration);
-                setTrim(s, e, s);
-            });
-            mkStep("Out ⏭", "Jump the preview to the last frame of the trim", () => {
-                if (trim) media.currentTime = Math.max(trim[0], trim[1] - frameDur());
-            });
+            mkBtn("⏮ In", "Move the playhead to the In point  (Shift+I)", () => cueJumpIn());
+            mkBtn("◀ −1", "Step the playhead back one frame  (←, Shift+← = 10)", () => cueStep(-1), true);
+            mkBtn("+1 ▶", "Step the playhead forward one frame  (→, Shift+→ = 10)", () => cueStep(1), true);
+            mkBtn("Out ⏭", "Move the playhead to the Out point  (Shift+O)", () => cueJumpOut());
+            const gap1 = document.createElement("span");
+            gap1.className = "mmrp-trim-gap";
+            stepRow.appendChild(gap1);
+            // Marking works on the playhead in seconds even before the probe reports fps
+            // (it snaps to a frame once fps is known); only stepping truly needs the fps.
+            mkBtn("Set In", "Set the In point at the playhead  (I)", () => cueSetIn());
+            mkBtn("Set Out", "Set the Out point at the playhead  (O)", () => cueSetOut());
 
-            // A quick way to set a 15s window from the in-point - a GUIDE, not a cap. The
-            // user can still drag or type any length; this just saves the fiddling.
             const spacer = document.createElement("span");
             spacer.className = "mmrp-trim-spacer";
             stepRow.appendChild(spacer);
-            mkStep("15s", "Set the window to 15s from the in-point (a guide, not a limit)", () => {
-                if (!trim || !duration) return;
-                setTrim(trim[0], Math.min(trim[0] + 15, duration), trim[0]);
-            });
+            mkBtn("15s", "Set a 15s window from the In point (a guide, not a limit)",
+                  () => cueSet15s());
 
             modal.appendChild(stepRow);
 
+            // The frame-dependent buttons (step/mark) and fields wait for the probe's fps;
+            // In/Out jump and 15s work on seconds without it. When the clip is too short to
+            // trim legally, everything frame-related stays off.
             updateFrameButtons = () => {
-                // Only the per-frame nudges need the fps; In/Out/15s work without it.
-                if (minusFrameBtn) minusFrameBtn.disabled = !srcFps;
-                if (plusFrameBtn) plusFrameBtn.disabled = !srcFps;
+                const on = cueActive();   // video-only block, so this gates the frame fields
+                for (const b of frameBtns) b.disabled = !on;
+                inNum.disabled = !on;
+                outNum.disabled = !on;
+                if (duration) syncTrim();   // relabel seconds -> frames the moment fps lands
             };
             updateFrameButtons();
         }
 
         media.addEventListener("loadedmetadata", () => {
             duration = media.duration;
-            durLabel.textContent = `/ ${r2(duration).toFixed(2)}s`;
-            inNum.disabled = false;
-            outNum.disabled = false;
             if (!trim) trim = [0, r2(duration)];
-            // a saved trim on a since-replaced, shorter file still clamps sanely
-            setTrim(trim[0], trim[1], kind === "video" ? trim[0] : undefined);
+            // A saved trim on a since-replaced, shorter file still clamps sanely.
+            if (isVideo) {
+                cursor = clamp01(trim[0], 0, duration);
+                media.currentTime = fpsReady() ? frameSeekSec(curFrame(), srcFps) : cursor;
+                updateFrameButtons();
+            } else {
+                inNum.disabled = false;
+                outNum.disabled = false;
+            }
+            setTrim(trim[0], trim[1]);
         });
     }
 
@@ -4336,6 +4623,7 @@ function openEditModal(node, kind, index) {
             media.play().catch(() => stopPlayback());
             const tick = () => {
                 if (!mode) return;
+                cueTrackPlayhead();   // the playhead follows the preview as it plays
                 if (stopAt !== null && media.currentTime >= stopAt) {
                     stopPlayback();
                     return;
@@ -4348,6 +4636,8 @@ function openEditModal(node, kind, index) {
 
         origBtn.onclick = () => start("original");
         editBtn.onclick = () => start("edit");
+        // Space toggles the edit preview (plays the trimmed span).
+        cueTogglePlay = () => start("edit");
         media.addEventListener("timeupdate", () => {
             if (stopAt !== null && media.currentTime >= stopAt) stopPlayback();
         });
@@ -4378,12 +4668,13 @@ function openEditModal(node, kind, index) {
     const cancelBtn = document.createElement("button");
     cancelBtn.className = "mmrp-btn";
     cancelBtn.textContent = "Cancel";
-    cancelBtn.onclick = () => overlay.remove();
+    cancelBtn.onclick = () => { teardown(); overlay.remove(); };
 
     const saveBtn = document.createElement("button");
     saveBtn.className = "mmrp-btn mmrp-btn-primary";
     saveBtn.textContent = "Save";
     saveBtn.onclick = () => {
+        teardown();
         const next = cloneRefs(node._mmrpRefs);
         const target = next[`${kind}s`][index];
 
@@ -4424,6 +4715,40 @@ function openEditModal(node, kind, index) {
     footer.appendChild(cancelBtn);
     footer.appendChild(saveBtn);
     modal.appendChild(footer);
+
+    // ---- keyboard transport (source-monitor keys), scoped to the open modal ----
+    // A single capture-phase listener so the keys reach here before ComfyUI's window/document
+    // handlers, and preventDefault+stopPropagation on the ones we consume so the graph never
+    // sees them. It ignores anything typed into a field and any modifier chord (Cmd+I etc.),
+    // and self-removes if the overlay is gone (a dismissal path that missed teardown).
+    const closeModal = () => { teardown(); overlay.remove(); };
+    const onKey = (ev) => {
+        if (!document.body.contains(overlay)) { document.removeEventListener("keydown", onKey, true); return; }
+        if (ev.ctrlKey || ev.metaKey || ev.altKey) return;   // let Cmd+I / Ctrl+O etc. through
+        // Escape always closes, from anywhere in the modal.
+        if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); closeModal(); return; }
+        // Everything else is video transport, and never while typing in a field.
+        const t = ev.target;
+        if (kind !== "video") return;
+        if (t && t.closest && t.closest("input, textarea, [contenteditable]")) return;
+        let handled = true;
+        switch (ev.key) {
+            case " ": case "Spacebar": cueTogglePlay(); break;
+            case "ArrowLeft": cueStep(ev.shiftKey ? -10 : -1); break;
+            case "ArrowRight": cueStep(ev.shiftKey ? 10 : 1); break;
+            case "Home": cueHome(); break;
+            case "End": cueEnd(); break;
+            case "i": case "I": ev.shiftKey ? cueJumpIn() : cueSetIn(); break;
+            case "o": case "O": ev.shiftKey ? cueJumpOut() : cueSetOut(); break;
+            default: handled = false;
+        }
+        if (handled) { ev.preventDefault(); ev.stopPropagation(); }
+    };
+    document.addEventListener("keydown", onKey, true);
+    teardown = () => {
+        document.removeEventListener("keydown", onKey, true);
+        stopPlayback();   // cancels the playback rAF and pauses the element
+    };
 
     document.body.appendChild(overlay);
 }
