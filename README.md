@@ -234,6 +234,12 @@ Every tag in your direction text is highlighted where it sits — a quiet blue w
 that still points at a reference, an intense red one on a tag that points at nothing. It is
 purely a tint behind the text: the prompt box types and edits exactly as normal.
 
+**Repointing a tag.** Put the text cursor anywhere inside a tag and its reference lights up
+on the canvas while every tile outlines as a target; click the reference you meant and the
+tag is rewritten to it — a `<Picture #>` placeholder included. Because it keys off the
+cursor rather than a click on the tag, ordinary editing is untouched; click away or move the
+cursor off the tag to cancel.
+
 A tag goes stray when the thing it named is gone. Deleting a reference rewrites its tag to a
 placeholder — `<Picture #>`, `<Video #>`, `<Audio #>` — rather than silently letting it
 inherit whatever took its old number, which would have left the sentence describing a

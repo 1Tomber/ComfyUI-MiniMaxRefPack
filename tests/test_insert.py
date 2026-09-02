@@ -95,6 +95,18 @@ def test_the_caret_lands_after_what_was_inserted():
 
 
 @requires_node
+def test_insert_is_the_padded_string_the_caret_is_measured_against():
+    """The caret is start + len(insert), so the undo-preserving writer MUST be handed
+    `insert` (the padded tag), not the bare tag - otherwise it inserts fewer characters
+    than the caret advances and the cursor lands a space or two past the text. This is the
+    invariant behind the 'cursor jumps forward on double-click insert' fix."""
+    out = _splice("abcdef", 3, 3)   # a caret between two non-space chars -> padded both sides
+    assert out["insert"] == " <Picture 1> "
+    assert out["caret"] - 3 == len(out["insert"])            # caret counts the padding
+    assert out["value"][3:3 + len(out["insert"])] == out["insert"]   # and that padding IS inserted
+
+
+@requires_node
 def test_the_insert_goes_through_the_undo_preserving_writer():
     """spliceTag decides WHAT the text becomes; the writer decides whether the browser's
     undo can still see it. Assigning .value resets the undo stack, so typing a sentence,

@@ -2254,6 +2254,10 @@ function draw(node) {
     const drag = node._mmrpDrag;
     const picker = node._mmrpPicker;
     const highlightSubject = node._mmrpHighlightSubject;
+    // The caret is on a tag in the prompt: light its reference and turn every tile into a
+    // repoint target for it.
+    const highlightTile = node._mmrpHighlightTile;
+    const caretTag = node._mmrpCaretTag;
 
     // `layout` was computed above, from the width, before the canvas height was applied.
     // Everything below still paints in one pass with no scroll offset, because the slab
@@ -2349,10 +2353,22 @@ function draw(node) {
             const dragging = drag && drag.active && drag.kind === kind && drag.index === i;
             if (dragging) ctx.globalAlpha = 0.35;
             const picking = picker && picker.kind === kind && picker.index === i;
-            const highlighted = highlightSubject != null
-                && (ref.subjects || []).includes(highlightSubject);
+            const highlighted = (highlightSubject != null
+                && (ref.subjects || []).includes(highlightSubject))
+                || (highlightTile && highlightTile.kind === kind && highlightTile.index === i);
             drawTile(ctx, kind, ref, lines, tx, ty, selected, soundState, badgeH,
                      picking ? null : playState, highlighted);
+            // The caret is on a tag: ring every tile as a repoint target (dashed blue,
+            // distinct from the solid highlight and the red selection).
+            if (caretTag && !picking) {
+                ctx.save();
+                ctx.strokeStyle = C.highlight;
+                ctx.setLineDash([5, 4]);
+                ctx.lineWidth = 2;
+                pathRoundRect(ctx, tx + 1.5, ty + 1.5, CL.tile - 3, CL.tile - 3, 4);
+                ctx.stroke();
+                ctx.restore();
+            }
             ctx.globalAlpha = 1;
             const pickerCells = picking
                 ? drawSubjectPicker(ctx, ref, tx, ty, kind, i)
@@ -2704,7 +2720,8 @@ function onCanvasMouseDown(node, e) {
     const pos = getMousePos(node._mmrpBody.canvas, e);
     const hit = hitTest(node, pos.x, pos.y);
     if (!hit) {
-        // A press on bare slab clears any selection/picker.
+        // A press on bare slab clears any selection/picker and disarms a caret reassignment.
+        if (node._mmrpCaretTag) setCaretTag(node, null);
         if (node._mmrpSelected || node._mmrpPicker) {
             node._mmrpSelected = null;
             node._mmrpPicker = null;
@@ -2743,6 +2760,11 @@ function onCanvasMouseDown(node, e) {
         openEditModal(node, hit.kind, hit.index);
     } else if (hit.type === "add") {
         node._mmrpBody.fileInputs[hit.kind].click();
+    } else if (node._mmrpCaretTag) {
+        // The caret is on a tag and a tile was clicked: repoint that tag onto this
+        // reference, rather than selecting or starting a drag.
+        reassignCaretTag(node, hit.kind, hit.index);
+        e.stopPropagation();
     } else {
         const ref = node._mmrpRefs[`${hit.kind}s`][hit.index];
         // A missing file has no thumbnail to drag and nothing worth reordering.
@@ -2787,7 +2809,10 @@ export function spliceTag(value, start, end, text) {
     const lead = before && !/\s$/.test(before) ? " " : "";
     const trail = after && !/^\s/.test(after) ? " " : "";
     const insert = `${lead}${text}${trail}`;
-    return { value: before + insert + after, caret: start + insert.length };
+    // `insert` is the padded string that actually goes in - the caller must feed THIS to the
+    // undo-preserving writer, not the bare tag, or the caret (start + insert.length) lands
+    // past the padding spaces the writer never inserted.
+    return { value: before + insert + after, caret: start + insert.length, insert };
 }
 // <<< MMRP-INSERT
 
@@ -2796,12 +2821,14 @@ function insertIntoDirection(node, text) {
     if (!el) return;
     const start = el.selectionStart ?? el.value.length;
     const end = el.selectionEnd ?? start;
-    const { value, caret } = spliceTag(el.value, start, end, text);
+    const { value, caret, insert } = spliceTag(el.value, start, end, text);
     // The undo-preserving path first: assigning .value resets the textarea's undo stack,
     // so typing a sentence, inserting a tag and pressing Ctrl+Z used to do nothing at all.
     // Focus stays on the textarea here - unlike a retag, an insert IS the user typing into
-    // the prompt, so the caret belongs there afterwards.
-    if (!writeTextPreservingUndo(el, start, end, text, false)) {
+    // the prompt, so the caret belongs there afterwards. Write the PADDED `insert`, not the
+    // bare tag: `caret` counts the padding spaces, so inserting only the tag left the caret
+    // a space or two past the text (the "cursor jumps forward" bug).
+    if (!writeTextPreservingUndo(el, start, end, insert, false)) {
         el.value = value;
     }
     el.setSelectionRange(caret, caret);
@@ -3093,6 +3120,69 @@ function syncTagOverlay(node) {
     overlay.scrollLeft = el.scrollLeft;
 }
 
+// tag string -> the tile it names. Built off assignTags so a video's soundtrack <Audio N>
+// maps back to the VIDEO tile that owns it, not to a standalone audio slot.
+function tagToTile(node) {
+    const tagged = assignTags(node._mmrpRefs);
+    const map = new Map();
+    for (const kind of KINDS) {
+        (tagged[`${kind}s`] || []).forEach((t, index) => {
+            if (t.tag) map.set(t.tag, { kind, index });
+            if (t.audioTag) map.set(t.audioTag, { kind, index });
+        });
+    }
+    return map;
+}
+
+// Reassignment without breaking text editing: the tag under the CARET is the one being
+// repointed, not a tag you clicked (clicking a tag just places the caret, as it should).
+// When the caret sits on a tag, every tile lights as a target and its own reference is
+// highlighted; clicking a tile then rewrites that tag to the clicked reference.
+function setCaretTag(node, tag) {
+    const cur = node._mmrpCaretTag;
+    const same = (!cur && !tag) || (cur && tag && cur.start === tag.start && cur.text === tag.text);
+    if (same) return;
+    node._mmrpCaretTag = tag ? { start: tag.start, end: tag.end, text: tag.text } : null;
+    node._mmrpHighlightTile = tag ? (tagToTile(node).get(tag.text) || null) : null;
+    scheduleDraw(node);
+}
+
+// Recompute which tag (if any) the caret is inside. Only while the textarea is focused - a
+// blur (e.g. clicking a tile to reassign) must KEEP the last one so the click can use it.
+function updateCaretTag(node) {
+    const el = node._mmrpBody && node._mmrpBody.directionInput;
+    if (!el) return;
+    if (document.activeElement !== el) return;   // keep the armed tag through a tile click
+    const caret = el.selectionStart;
+    if (caret == null || caret !== el.selectionEnd) { setCaretTag(node, null); return; }  // a range, not a caret
+    let found = null;
+    for (const t of scanPromptTags(el.value, scanCounts(node))) {
+        if (caret >= t.start && caret <= t.end) { found = t; break; }
+    }
+    setCaretTag(node, found);
+}
+
+// Repoint the caret's tag onto a clicked tile. The armed span carries the text it was cut
+// from; if the text changed under it, disarm rather than splice blind.
+function reassignCaretTag(node, kind, index) {
+    const armed = node._mmrpCaretTag;
+    const el = node._mmrpBody && node._mmrpBody.directionInput;
+    if (!armed || !el) return;
+    if (el.value.slice(armed.start, armed.end) !== armed.text) { setCaretTag(node, null); return; }
+    const tile = (assignTags(node._mmrpRefs)[`${kind}s`] || [])[index];
+    if (!tile || !tile.tag) return;
+    const newTag = tile.tag;
+    if (!writeTextPreservingUndo(el, armed.start, armed.end, newTag, false)) {
+        el.value = rewriteTagAt(el.value, armed.start, armed.end, newTag);
+    }
+    const w = widgetByName(node, "direction");
+    if (w) { w.value = el.value; if (w.callback) w.callback(w.value); }
+    mlog("tag_reassigned", { from: armed.text, to: newTag });
+    node._mmrpCaretTag = null;
+    node._mmrpHighlightTile = null;
+    refreshDirectionUI(node);
+}
+
 // The "delete stray tags" button. Pure text surgery (stripStrayTags), written back through
 // the undo-preserving path so one Ctrl+Z brings them all back.
 function deleteStrayTags(node) {
@@ -3113,6 +3203,12 @@ function deleteStrayTags(node) {
 // relayout - but only on the transition, not on every keystroke.
 function refreshDirectionUI(node) {
     syncTagOverlay(node);
+    // Keep the caret-armed tag honest across a text change: recompute it if the box is
+    // focused, and drop it if a retag/edit moved the text out from under its span.
+    const el = node._mmrpBody && node._mmrpBody.directionInput;
+    const armed = node._mmrpCaretTag;
+    if (el && armed && el.value.slice(armed.start, armed.end) !== armed.text) setCaretTag(node, null);
+    updateCaretTag(node);
     const stray = hasStrayTags(node);
     const changed = stray !== node._mmrpStrayShown;
     node._mmrpStrayShown = stray;
@@ -4343,7 +4439,13 @@ function openEditModal(node, kind, index) {
                     applyCue(...markOutFrame(curFrame(), ci, co, lastF(), srcFps));
                 } else if (duration) setTrim(trim ? trim[0] : 0, cursor);
             };
-            cueJumpIn = () => { stopPlayback(); if (trim) seekCursorSec(trim[0]); };
+            cueJumpIn = () => {
+                stopPlayback();
+                // Seek by the In FRAME, not trim[0] seconds: the stored 2dp start can round
+                // a hair under the frame boundary and land the playhead one frame early.
+                if (cueActive()) seekCursorFrame(cueFrames()[0]);
+                else if (trim) seekCursorSec(trim[0]);
+            };
             cueJumpOut = () => {
                 stopPlayback();
                 if (cueActive()) seekCursorFrame(cueFrames()[1]);
@@ -5622,6 +5724,14 @@ app.registerExtension({
                 ov.scrollTop = node._mmrpBody.directionInput.scrollTop;
                 ov.scrollLeft = node._mmrpBody.directionInput.scrollLeft;
             });
+            // Track which tag the caret sits on so clicking a reference can repoint it,
+            // while ordinary typing and caret placement keep working. Deliberately NOT
+            // cleared on blur: clicking a tile blurs the box, and that click needs the tag
+            // that was armed a moment earlier.
+            for (const evName of ["keyup", "click", "select", "focus"]) {
+                node._mmrpBody.directionInput.addEventListener(
+                    evName, () => updateCaretTag(node));
+            }
 
             syncPromptHeight(node);
             installSizeGuards(node);
@@ -5684,6 +5794,8 @@ app.registerExtension({
                 const dw = widgetByName(this, "direction");
                 if (this._mmrpBody) this._mmrpBody.directionInput.value = dw ? dw.value || "" : "";
                 this._mmrpSelected = null;
+                this._mmrpCaretTag = null;
+                this._mmrpHighlightTile = null;
                 // parseRefsValue may have restored a stored prompt height off the
                 // envelope; the box has to be told before the size is re-derived.
                 syncPromptHeight(this);
