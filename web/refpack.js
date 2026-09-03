@@ -3148,11 +3148,10 @@ function syncReferencesWidget(node) {
     // touched neither stays byte-identical to what earlier builds wrote.
     if (Number.isFinite(node._mmrpPromptH)) envelope.prompt_h = node._mmrpPromptH;
     if (node._mmrpRetag === false) envelope.retag = false;
-    // The Regenerate mode's cache token: "always" (re-run every queue) or the resting nonce
-    // (cached/once). Omitted at the default (Cached, nonce 0) so an untouched workflow stays
-    // byte-identical to what earlier builds wrote.
-    if (node._mmrpRegenMode === "always") envelope.regen = "always";
-    else if (node._mmrpRegenNonce) envelope.regen = node._mmrpRegenNonce;
+    // The Regenerate cache token, read only by IS_CHANGED. Omitted at the default (Cached,
+    // nonce 0) so an untouched workflow stays byte-identical to what earlier builds wrote.
+    const regenToken = regenEnvelopeToken(node._mmrpRegenMode || "cached", node._mmrpRegenNonce || 0);
+    if (regenToken != null) envelope.regen = regenToken;
     w.value = JSON.stringify(envelope);
 }
 
@@ -3424,53 +3423,119 @@ function syncSubjectBar(node) {
     clear.onclick = () => deleteStrayTags(node);
     bar.appendChild(clear);
 
-    // Regenerate control: whether an unchanged node re-runs the VLM (see setRegenMode).
+    // Regenerate control. The <select> both SHOWS and SETS the next-queue behaviour:
+    //   Cached  - reuse the last prompt (only offered while nothing has changed)
+    //   Next    - regenerate on the next queue, then back to Cached. Shown automatically the
+    //             moment an input changes (dirty), or picked to force a re-roll when clean
+    //   Always  - regenerate every queue
     const regenLabel = document.createElement("span");
     regenLabel.className = "mmrp-edit-label mmrp-regen-label";
     regenLabel.textContent = "Regen";
     bar.appendChild(regenLabel);
+    const state = regenState(node);   // "cached" | "next" | "always"
+    const dirty = state === "next" && (node._mmrpRegenMode || "cached") !== "always"
+        && !node._mmrpRegenForce;     // shown as Next purely because inputs changed
     const regen = document.createElement("select");
-    regen.className = "mmrp-regen";
-    for (const [val, text] of [["cached", "Cached"], ["once", "Once"], ["always", "Always"]]) {
+    regen.className = "mmrp-regen" + (state === "cached" ? "" : " mmrp-regen-active");
+    for (const [val, text] of [["cached", "Cached"], ["next", "Next"], ["always", "Always"]]) {
         const opt = document.createElement("option");
         opt.value = val;
         opt.textContent = text;
+        // No reusing an input you just changed: Cached is unavailable while dirty.
+        if (val === "cached" && dirty) opt.disabled = true;
         regen.appendChild(opt);
     }
-    regen.value = node._mmrpRegenMode || "cached";
+    regen.value = state;
     regen.title =
-        "Regenerate the prompt when nothing changed:\n"
-        + "Cached \u2014 reuse the last prompt (default, no billed call)\n"
-        + "Once \u2014 re-run on the next queue, then back to Cached\n"
-        + "Always \u2014 re-run every queue";
+        "Regenerate the prompt:\n"
+        + "Cached \u2014 reuse the last one (no billed call)\n"
+        + "Next \u2014 regenerate on the next queue, then back to Cached\n"
+        + (dirty ? "  (shown as Next now because an input changed)\n" : "")
+        + "Always \u2014 regenerate every queue";
     regen.addEventListener("keydown", (e) => e.stopPropagation());   // keep graph hotkeys out
-    regen.onchange = () => setRegenMode(node, regen.value);
+    regen.onchange = () => setRegenChoice(node, regen.value);
     bar.appendChild(regen);
 }
 
-// The Regenerate Prompt mode lives in the references_json envelope, read only by the node's
-// IS_CHANGED. A stable nonce is the cache key's regen slot; bumping it once (Once) moves the
-// key for exactly one queue, then rests. "always" makes IS_CHANGED never-equal-itself so
-// every queue re-runs. Never a widget of its own - no ORDER_* slot, no migration.
-function setRegenMode(node, mode) {
-    node._mmrpRegenMode = mode;
-    if (mode === "once") {
-        node._mmrpRegenNonce = (node._mmrpRegenNonce || 0) + 1;   // one re-run next queue
-        node._mmrpRegenPending = true;                             // ...then revert to Cached
+// >>> MMRP-REGEN
+// The effective next-queue state from the mode, a forced one-shot, and the dirty check.
+// "always" always re-runs; a forced one-shot or a changed input ("dirty") reads as "next"
+// (re-run once, then back to cached); a clean, resting node is "cached" (reuse). The <select>
+// shows this and lets the user set the mode. Pure, so tests/test_regen.py pins it.
+export function regenStateFrom(mode, force, lastSig, curSig) {
+    if (mode === "always") return "always";
+    if (force) return "next";
+    if (lastSig == null) return "next";          // never generated this session yet
+    return curSig !== lastSig ? "next" : "cached";
+}
+
+// The token IS_CHANGED reads off the envelope, mirroring nodes.py exactly: "always" re-runs
+// every queue; the resting/bumped nonce (a forced one-shot moves it once, then it rests) is a
+// stable key otherwise; null at the default so an untouched workflow is byte-identical.
+export function regenEnvelopeToken(mode, nonce) {
+    if (mode === "always") return "always";
+    return nonce ? nonce : null;
+}
+// <<< MMRP-REGEN
+
+// A concatenation of everything IS_CHANGED weighs that the browser can see: every widget
+// except the API key and the references_json envelope, plus the CANONICAL references (crop/
+// trim/rotate/subjects...). Snapshotted at each generation; a mismatch since then is "dirty".
+// The one thing it cannot see is a file's bytes changing under the same name - ComfyUI's own
+// key still catches that at queue time.
+function promptInputSignature(node) {
+    const parts = [];
+    for (const w of node.widgets || []) {
+        if (!w || !w.name) continue;
+        if (w.name === "openrouter_api_key" || w.name === "references_json") continue;
+        parts.push(`${w.name}=${String(w.value)}`);
+    }
+    parts.push("refs=" + JSON.stringify(toReferencesList(node._mmrpRefs)));
+    return parts.join("|");
+}
+
+function regenState(node) {
+    return regenStateFrom(node._mmrpRegenMode || "cached", !!node._mmrpRegenForce,
+                          node._mmrpLastGenSig, promptInputSignature(node));
+}
+
+// Snapshot the inputs as the current "generated" state - the baseline dirtiness is measured
+// against. Called on load/create (so a freshly opened workflow reads as Cached) and after
+// each run.
+function regenSnapshot(node) {
+    node._mmrpLastGenSig = promptInputSignature(node);
+}
+
+// The <select>'s onchange. "always" is a persistent mode; "next" forces one re-roll (a nonce
+// bump - harmless if the node was already going to re-run); "cached" rests. The regen token
+// (nonce / "always") lives in the references_json envelope, read only by IS_CHANGED - never a
+// widget of its own, so no ORDER_* slot and no migration.
+function setRegenChoice(node, choice) {
+    if (choice === "always") {
+        node._mmrpRegenMode = "always";
+        node._mmrpRegenForce = false;
+    } else if (choice === "next") {
+        node._mmrpRegenMode = "cached";
+        node._mmrpRegenForce = true;
+        node._mmrpRegenNonce = (node._mmrpRegenNonce || 0) + 1;   // one re-run when nothing else changed
+    } else {
+        node._mmrpRegenMode = "cached";
+        node._mmrpRegenForce = false;
     }
     syncReferencesWidget(node);   // writes envelope.regen
     syncSubjectBar(node);         // reflect the <select>
-    mlog("regen_mode", { mode });
+    mlog("regen", { choice });
 }
 
-// Called when a prompt finishes: a Once that has now run reverts to Cached. The nonce keeps
-// its bumped value (stable), so this revert does not itself move the cache key.
+// Called when a queued prompt finishes: the node has now run, so a forced one-shot is spent
+// and the current inputs become the new clean baseline. The nonce keeps its value (stable),
+// so this does not itself move the cache key.
 function regenAfterRun(node) {
-    if (!node._mmrpRegenPending) return;
-    node._mmrpRegenPending = false;
-    node._mmrpRegenMode = "cached";
-    syncReferencesWidget(node);
-    syncSubjectBar(node);
+    node._mmrpRegenForce = false;   // the forced one-shot is spent
+    regenSnapshot(node);            // current inputs are the new clean baseline
+    // No syncReferencesWidget: clearing `force` does not change the envelope token (the nonce
+    // is unchanged), so the widget value - and the cache key - stay put.
+    syncSubjectBar(node);           // Next -> Cached in the dropdown
 }
 
 function syncPromptHeight(node) {
@@ -5949,13 +6014,31 @@ app.registerExtension({
             syncLocalBtn(node);
             renderNodeBody(node);
             syncReferencesWidget(node);
+            // The clean baseline the "dirty" state is measured against. A fresh node starts
+            // clean; onConfigure re-snapshots after a load. renderNodeBody has already drawn
+            // the Regen <select> off this.
+            regenSnapshot(node);
 
-            // When a queued prompt finishes, a "Once" that has now re-run reverts to Cached.
-            // execution_success fires for the whole prompt, which always includes this node's
-            // re-run (arming Once bumped the cache key), so it is a reliable "it ran" signal.
+            // When a queued prompt finishes, the node has run: a forced one-shot is spent and
+            // the current inputs become the new clean baseline (so the Regen control drops
+            // from Next back to Cached). execution_success fires for the whole prompt, which
+            // includes this node's run, so it is a reliable "it ran" signal.
             if (app.api && typeof app.api.addEventListener === "function") {
                 node._mmrpRegenApiHandler = () => regenAfterRun(node);
                 app.api.addEventListener("execution_success", node._mmrpRegenApiHandler);
+            }
+
+            // A change to ANY prompt-affecting widget (model, dimensions, provider, ...) can
+            // flip the node dirty, so refresh the Regen control on every widget change. Chained
+            // so each widget's own callback still runs first.
+            for (const w of node.widgets || []) {
+                if (!w) continue;
+                const orig = w.callback;
+                w.callback = function (...a) {
+                    const r = orig ? orig.apply(this, a) : undefined;
+                    try { if (node._mmrpBody) syncSubjectBar(node); } catch (e) { /* pre-mount */ }
+                    return r;
+                };
             }
 
             // The widgets' own defaults, captured while they still hold them. nodeCreated
@@ -6023,6 +6106,10 @@ app.registerExtension({
                 // bypassing our setSize wrapper — re-assert the fixed size.
                 setSizeInternal(this);
                 renderNodeBody(this);
+                // The loaded state IS the last-generated state as far as we can tell, so a
+                // freshly opened workflow reads as Cached until the user touches something.
+                regenSnapshot(this);
+                syncSubjectBar(this);
                 return out;
             };
 

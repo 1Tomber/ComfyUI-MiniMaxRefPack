@@ -809,6 +809,13 @@
 .mmrp-regen:hover {
     border-color: #666;
 }
+/* Will re-run (Next / Always) - accent, so "cached vs will re-run" reads at a glance.
+   Matches C.highlight (#4ea1ff). */
+.mmrp-regen-active {
+    border-color: #4ea1ff;
+    color: #cfe6ff;
+    background: #12283f;
+}
 
 /* Frame-navigation row in the edit modal: In / -1 / +1 / Out and the 15s guide. Compact
    buttons; the spacer pushes 15s to the right so it reads as a separate quick-set. */
