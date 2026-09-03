@@ -2916,8 +2916,21 @@ export function caretInsertPoint(caret, tags) {
 function insertIntoDirection(node, text) {
     const el = node._mmrpBody && node._mmrpBody.directionInput;
     if (!el) return;
-    let start = el.selectionStart ?? el.value.length;
-    let end = el.selectionEnd ?? start;
+    // The insert lands at the caret - but a double-click on a TILE blurs the textarea first,
+    // and a blurred textarea's selectionStart is not reliable across browsers. So we remember
+    // the caret while the box is focused (node._mmrpLastCaret) and use that "virtual cursor"
+    // when the box has lost focus, clamped in case the text shrank since.
+    const focused = document.activeElement === el;
+    const len = el.value.length;
+    let start, end;
+    if (focused) {
+        start = el.selectionStart ?? len;
+        end = el.selectionEnd ?? start;
+    } else {
+        const lc = node._mmrpLastCaret;
+        start = Math.min(lc ? lc.start : len, len);
+        end = Math.min(lc ? lc.end : start, len);
+    }
     // A plain caret sitting on a tag pushes the insert to AFTER that tag, so a double-click
     // adds the new tag behind the one the cursor is on (with the usual space) instead of
     // splitting it. A selection is left alone - it is replaced as usual.
@@ -2936,6 +2949,9 @@ function insertIntoDirection(node, text) {
     }
     el.setSelectionRange(caret, caret);
     el.focus();
+    // Keep the virtual cursor in step, so a second double-click inserts after the first even
+    // without the box being clicked again.
+    node._mmrpLastCaret = { start: caret, end: caret };
     // Mirror into the hidden widget exactly the way the textarea's own input listener
     // does — setting .value programmatically does not fire `input`.
     const w = widgetByName(node, "direction");
@@ -6009,9 +6025,24 @@ app.registerExtension({
             // while ordinary typing and caret placement keep working. Deliberately NOT
             // cleared on blur: clicking a tile blurs the box, and that click needs the tag
             // that was armed a moment earlier.
-            for (const evName of ["keyup", "click", "select", "focus"]) {
-                node._mmrpBody.directionInput.addEventListener(
-                    evName, () => updateCaretTag(node));
+            {
+                const di = node._mmrpBody.directionInput;
+                const record = () => {
+                    // Remember the caret while the box is focused - the "virtual cursor" a
+                    // later double-click insert falls back to once focus has moved away.
+                    if (document.activeElement === di) {
+                        node._mmrpLastCaret = { start: di.selectionStart, end: di.selectionEnd };
+                    }
+                };
+                for (const evName of ["keyup", "click", "select", "mouseup", "input"]) {
+                    di.addEventListener(evName, () => { record(); updateCaretTag(node); });
+                }
+                di.addEventListener("focus", () => updateCaretTag(node));
+                // Capture the final position as focus leaves (selectionStart is still valid in
+                // the blur handler, before the browser clears the visible selection).
+                di.addEventListener("blur", () => {
+                    node._mmrpLastCaret = { start: di.selectionStart, end: di.selectionEnd };
+                });
             }
 
             syncPromptHeight(node);
