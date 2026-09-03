@@ -2885,8 +2885,15 @@ function onCanvasMouseDown(node, e) {
 export function spliceTag(value, start, end, text) {
     const before = value.slice(0, start);
     const after = value.slice(end);
-    const lead = before && !/\s$/.test(before) ? " " : "";
-    const trail = after && !/^\s/.test(after) ? " " : "";
+    // Pad with a space so the tag never jams against a word, but never a DOUBLE space, and
+    // never where punctuation already does the spacing:
+    //   - no leading space after an opening bracket:  "(<Picture 1>", "[<Picture 1>"
+    //   - no trailing space before a closing bracket or sentence punctuation / possessive:
+    //     "<Picture 1>)", "<Picture 1>.", "<Picture 1>, and", "<Picture 1>'s"
+    // A space IS still wanted the other way round (after ")" or "." , before "(" ) - those
+    // are not in the skip sets.
+    const lead = before && !/\s$/.test(before) && !/[(\[{]$/.test(before) ? " " : "";
+    const trail = after && !/^\s/.test(after) && !/^[)\]}.,;:!?']/.test(after) ? " " : "";
     const insert = `${lead}${text}${trail}`;
     // `insert` is the padded string that actually goes in - the caller must feed THIS to the
     // undo-preserving writer, not the bare tag, or the caret (start + insert.length) lands

@@ -155,3 +155,37 @@ def test_the_insert_goes_through_the_undo_preserving_writer():
     assert body.index("writeTextPreservingUndo(") < body.index("el.value = value"), (
         "the direct assignment must be the FALLBACK, not the first choice"
     )
+
+
+# ---- punctuation & brackets: a space, but not where they already handle it -----------
+
+
+@requires_node
+def test_no_leading_space_after_an_opening_bracket():
+    assert _splice("look (", 6, 6)["value"] == "look (<Picture 1>"
+    assert _splice("a[", 2, 2)["value"] == "a[<Picture 1>"
+
+
+@requires_node
+def test_no_trailing_space_before_a_closing_bracket_or_punctuation():
+    assert _splice("()", 1, 1)["value"] == "(<Picture 1>)"          # inside parens: no gaps
+    assert _splice("word.", 4, 4)["value"] == "word <Picture 1>."   # before a period
+
+
+@requires_node
+def test_a_plain_word_after_still_gets_its_space():
+    # only punctuation/brackets skip the space; a letter following the tag still needs one
+    assert _splice("thes", 3, 3)["value"] == "the <Picture 1> s"
+
+
+@requires_node
+def test_no_trailing_space_before_a_comma_or_possessive():
+    assert _splice("the , then", 4, 4)["value"] == "the <Picture 1>, then"
+    assert _splice("the 's outfit", 4, 4)["value"] == "the <Picture 1>'s outfit"
+
+
+@requires_node
+def test_a_space_is_still_added_the_other_way_round():
+    # after a CLOSING bracket a space is wanted, and before an OPENING bracket too
+    assert _splice("(note)word", 6, 6)["value"] == "(note) <Picture 1> word"
+    assert _splice("see(x)", 3, 3)["value"] == "see <Picture 1> (x)"
