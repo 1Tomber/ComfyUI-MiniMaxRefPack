@@ -2913,6 +2913,55 @@ export function caretInsertPoint(caret, tags) {
 }
 // <<< MMRP-INSERT
 
+// ---------------------------------------------------------------------------
+// Mouse-wheel policy over the node body. Native ComfyUI zooms the graph on a wheel over a
+// node; our custom DOM widget sat in a fixed overlay layer that never forwarded the wheel,
+// so it was a dead zone. These pure helpers decide, per wheel tick, whether to zoom the
+// graph, scroll the prompt text, or do nothing - so the DOM listener that gathers the inputs
+// and forwards to app.canvas.processMouseWheel stays thin and this, the fiddly part, is
+// covered by tests/test_wheel.py under node. The behaviour (confirmed with the user):
+//   - over the media/tiles/subject area: always zoom.
+//   - over the prompt while its text is HIDDEN (zoomed out past the LOD threshold): zoom; the
+//     tick that reveals the text stops there and arms a barrier so the REST of that same
+//     continuous wheel gesture is inert - a fresh spin is needed to carry on.
+//   - over the prompt while its text is VISIBLE: only scroll the textbox, never zoom (to zoom
+//     when text is visible the cursor moves off the prompt).
+// >>> MMRP-WHEEL
+export const WHEEL_NEW_SPIN_MS = 150;
+export const WHEEL_ZOOM = "zoom";
+export const WHEEL_SCROLL_TEXT = "scrollText";
+export const WHEEL_NOTHING = "nothing";
+
+// A wheel event more than WHEEL_NEW_SPIN_MS after the previous one is a fresh spin, not a
+// continuation of the same gesture. Written as !(gap <= MS) so a missing/first timestamp
+// (gap NaN, undefined or Infinity) reads as a NEW spin - otherwise a barrier left engaged
+// from a prior gesture would silently swallow the very first tick of the next one.
+export function isNewSpin(gapMs) {
+    return !(gapMs <= WHEEL_NEW_SPIN_MS);
+}
+
+// The whole policy as one pure switch. `textHidden` must be derived from ds.scale (the LOD
+// threshold), NOT the frame-latched low_quality getter which lags a frame behind a zoom.
+// Order is load-bearing: a new spin releases the barrier first; off the prompt always zooms;
+// an engaged barrier makes the rest of the gesture inert; a hidden prompt zooms and arms the
+// reveal check; a visible prompt scrolls its own text.
+export function decideWheel({ overPrompt, textHidden, gapMs, barrierEngaged }) {
+    const barrier = isNewSpin(gapMs) ? false : !!barrierEngaged;
+    if (!overPrompt) return { action: WHEEL_ZOOM, armReveal: false, barrier: false };
+    if (barrier) return { action: WHEEL_NOTHING, armReveal: false, barrier: true };
+    if (textHidden) return { action: WHEEL_ZOOM, armReveal: true, barrier: false };
+    return { action: WHEEL_SCROLL_TEXT, armReveal: false, barrier: false };
+}
+
+// True only for a zoom that crossed the LOD threshold UPWARD (hidden -> visible): the tick
+// that reveals the text. Directional by construction, so a zoom-OUT (visible -> hidden) never
+// arms the barrier. Read scaleBefore/scaleAfter around processMouseWheel, which mutates
+// ds.scale synchronously - unlike low_quality, which only updates on the next frame.
+export function crossedReveal(scaleBefore, scaleAfter, threshold) {
+    return scaleBefore < threshold && scaleAfter >= threshold;
+}
+// <<< MMRP-WHEEL
+
 function insertIntoDirection(node, text) {
     const el = node._mmrpBody && node._mmrpBody.directionInput;
     if (!el) return;
@@ -5621,6 +5670,95 @@ function openSystemPromptModal(node) {
 }
 
 // ---------------------------------------------------------------------------
+// The wheel listener and the LOD (zoomed-out) grey-box toggle. The MMRP-WHEEL block above
+// holds the pure policy; these wire it to app.canvas.
+// ---------------------------------------------------------------------------
+
+// The scale below which the frontend drops to low quality and hides native text widgets. We
+// read the frontend's own threshold so our reveal point and grey box flip at the exact same
+// scale it does; 0.5 is the fallback. A threshold of 0 means the user disabled LOD, so
+// nothing is ever "hidden" (the feature degrades to scroll-only over the prompt, like native).
+function lodThreshold() {
+    const c = app.canvas;
+    const t = c && c._lowQualityZoomThreshold;
+    return (typeof t === "number" && t > 0) ? t : 0.5;
+}
+
+function onBlockWheel(node, e) {
+    const c = app.canvas;
+    if (!c || !c.ds || typeof c.processMouseWheel !== "function") return;
+    const body = node._mmrpBody;
+    if (!body || !body.root) return;
+
+    const now = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+    const gapMs = now - (node._mmrpWheelTs ?? -Infinity);
+    node._mmrpWheelTs = now;
+
+    // ctrl/cmd + wheel is the explicit zoom gesture (and the browser's page-zoom gesture,
+    // which a textarea does NOT consume). Forward it to the graph zoom like the native text
+    // widget's own handler does, so it zooms the canvas and never page-zooms the whole app.
+    if (e.ctrlKey || e.metaKey) {
+        c.processMouseWheel(e);
+        node._mmrpZoomBarrier = false;
+        return;
+    }
+
+    const thr = lodThreshold();
+    const textHidden = c.ds.scale < thr;
+    const overPrompt = !!(body.directionWrap && body.directionWrap.contains(e.target));
+    const d = decideWheel({ overPrompt, textHidden, gapMs, barrierEngaged: node._mmrpZoomBarrier });
+
+    if (d.action === WHEEL_ZOOM) {
+        if (d.armReveal) {
+            // The reveal is knowable only from ds.scale, which changeScale mutates
+            // synchronously; low_quality would still read the pre-zoom value at this point.
+            const before = c.ds.scale;
+            c.processMouseWheel(e); // preventDefaults, pivots at the cursor, honours the pan/zoom setting
+            node._mmrpZoomBarrier = crossedReveal(before, c.ds.scale, thr);
+        } else {
+            c.processMouseWheel(e);
+            node._mmrpZoomBarrier = false;
+        }
+    } else if (d.action === WHEEL_NOTHING) {
+        node._mmrpZoomBarrier = true;
+        e.preventDefault(); // the inert tick must not page-zoom or scroll anything
+    } else {
+        // WHEEL_SCROLL_TEXT: let the textarea scroll natively - its own 'scroll' listener
+        // syncs the highlight overlay. A prompt too short to scroll simply does nothing; the
+        // cursor moves off the prompt to zoom, by design.
+        node._mmrpZoomBarrier = false;
+    }
+}
+
+// The grey-box LOD toggle reacts to EVERY zoom, from any source (our wheel, the native body,
+// the zoom buttons, the keyboard), so it hangs off the one signal common to all of them:
+// DragAndScale.onChanged. onDrawForeground does NOT fire for a DOM-widget node in the
+// vue-nodes frontend (verified live), so it cannot be used. Installed ONCE per canvas,
+// chaining any handler already there (e.g. the zoom-% indicator's), and it walks liveNodes -
+// which empties as nodes are removed - so it needs no per-node teardown.
+function installLodHook() {
+    const c = app.canvas;
+    if (!c || !c.ds || c._mmrpDsHooked) return;
+    c._mmrpDsHooked = true;
+    const prev = c.ds.onChanged;
+    c.ds.onChanged = function () {
+        if (prev) prev.apply(this, arguments);
+        const hidden = c.ds.scale < lodThreshold();
+        for (const n of liveNodes) applyLodClass(n, hidden);
+    };
+}
+
+// Toggle the zoomed-out grey-box class, writing only on a real change (onChanged fires many
+// times over one smooth zoom).
+function applyLodClass(node, hidden) {
+    const wrap = node._mmrpBody && node._mmrpBody.directionWrap;
+    if (!wrap) return;
+    if (node._mmrpLodHidden === hidden) return;
+    node._mmrpLodHidden = hidden;
+    wrap.classList.toggle("mmrp-lod", hidden);
+}
+
+// ---------------------------------------------------------------------------
 // Selection + delete-key handling. The key handler is CAPTURE-phase and swallows
 // the event completely — otherwise ComfyUI's own keydown handler deletes the whole
 // NODE on Delete/Backspace. It no-ops while an INPUT/TEXTAREA has focus so
@@ -5658,10 +5796,21 @@ function installSelectionHandlers(node) {
     document.addEventListener("mousedown", clearOnOutsideClick, true);
     document.addEventListener("keydown", keyHandler, true);
 
+    // Wheel over the block: zoom the graph, scroll the prompt, or nothing (see onBlockWheel).
+    // Non-passive so preventDefault on the inert tick actually takes. It sits on the block
+    // root, which is detached with the node, but mirror the teardown of the pair above.
+    node._mmrpZoomBarrier = false;
+    node._mmrpWheelTs = 0;
+    node._mmrpWheelHandler = (e) => onBlockWheel(node, e);
+    body.root.addEventListener("wheel", node._mmrpWheelHandler, { passive: false });
+
     const origOnRemoved = node.onRemoved;
     node.onRemoved = function () {
         document.removeEventListener("mousedown", clearOnOutsideClick, true);
         document.removeEventListener("keydown", keyHandler, true);
+        if (node._mmrpWheelHandler && body.root) {
+            body.root.removeEventListener("wheel", node._mmrpWheelHandler, { passive: false });
+        }
         (node._mmrpHideIntervals || []).forEach((id) => clearInterval(id));
         stopPreview(node);
         if (node._mmrpBody) {
@@ -6048,6 +6197,10 @@ app.registerExtension({
             syncPromptHeight(node);
             installSizeGuards(node);
             installSelectionHandlers(node);
+            // The wheel/LOD wiring: one shared zoom hook, plus the grey-box state a node
+            // created while the graph is already zoomed out needs (onChanged won't fire for it).
+            installLodHook();
+            applyLodClass(node, (app.canvas && app.canvas.ds ? app.canvas.ds.scale : 1) < lodThreshold());
             watchProviderWidget(node);
             syncLocalBtn(node);
             renderNodeBody(node);
@@ -6148,6 +6301,9 @@ app.registerExtension({
                 // freshly opened workflow reads as Cached until the user touches something.
                 regenSnapshot(this);
                 syncSubjectBar(this);
+                // A node loaded into an already-zoomed-out graph must show the grey box now;
+                // onChanged only fires on the NEXT zoom change.
+                applyLodClass(this, (app.canvas && app.canvas.ds ? app.canvas.ds.scale : 1) < lodThreshold());
                 return out;
             };
 

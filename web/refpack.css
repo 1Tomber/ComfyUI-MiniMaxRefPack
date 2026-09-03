@@ -287,6 +287,23 @@
     position: relative;
     z-index: 0;
 }
+/* Zoomed out past the LOD threshold: the prompt collapses to a plain dark-grey box that
+   stands in for the input field, the way the native multiline text widgets do. Text, caret
+   and tag highlights vanish; the textarea box KEEPS its inline height (the layout math reads
+   that height, never the DOM, so removing it from flow would desync the node), only its
+   colours change. #222 fill / #666 outline matches LiteGraph's own widget box. */
+.mmrp-direction-wrap.mmrp-lod .mmrp-direction {
+    color: transparent;
+    caret-color: transparent;
+    background: #222;
+    border-color: #666;
+}
+.mmrp-direction-wrap.mmrp-lod .mmrp-direction::placeholder {
+    color: transparent;
+}
+.mmrp-direction-wrap.mmrp-lod .mmrp-tag-overlay {
+    visibility: hidden;
+}
 .mmrp-tag-overlay {
     position: absolute;
     inset: 0;
