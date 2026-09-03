@@ -80,3 +80,36 @@ def test_a_missing_subjects_field_is_harmless():
     refs = {"images": [{"file": "a"}, {"file": "b", "subjects": None}],
             "videos": [], "audios": []}
     assert _nums(refs) == []
+
+
+# ---- subjects in the prompt text, and the union the bar actually shows ----------------
+
+
+def _call(expr):
+    script = _extract() + f"\nconsole.log(JSON.stringify({expr}));\n"
+    proc = subprocess.run([NODE, "--input-type=module", "-e", script],
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, f"node failed: {proc.stderr}"
+    return json.loads(proc.stdout.strip())
+
+
+@requires_node
+def test_subject_numbers_in_text_are_found_unique_and_sorted():
+    text = "<Subject 3> talks to <Subject 1> and again <Subject 3>."
+    assert _call(f"subjectNumbersInText({json.dumps(text)})") == [1, 3]
+    assert _call('subjectNumbersInText("no subjects here")') == []
+    # out of 1..9 is ignored
+    assert _call('subjectNumbersInText("<Subject 0> <Subject 12> <Subject 4>")') == [4]
+
+
+@requires_node
+def test_subjects_in_use_unions_media_and_text():
+    """A <Subject 3> written before any reference carries it still gets a chip; a subject
+    assigned to media but never named in text also shows."""
+    refs = {"images": [{"file": "a", "subjects": [2]}], "videos": [], "audios": []}
+    text = "the plan is <Subject 3> then <Subject 2>"
+    assert _call(f"subjectsInUse({json.dumps(refs)}, {json.dumps(text)})") == [2, 3]
+    # no text, media only
+    assert _call(f'subjectsInUse({json.dumps(refs)}, "")') == [2]
+    # no media, text only
+    assert _call('subjectsInUse({"images":[],"videos":[],"audios":[]}, "<Subject 5>")') == [5]

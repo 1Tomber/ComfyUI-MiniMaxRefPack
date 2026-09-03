@@ -97,19 +97,15 @@ def test_spans_survive_repeated_and_adjacent_tags():
 
 
 @requires_node
-def test_subjects_are_not_judged_when_no_set_is_given():
-    # highlighter path: subjects render as ordinary tags, never stray, if the set is absent
-    out = _scan("<Subject 5> holds <Picture 1>", {"images": 1})
-    subj = [t for t in out if t["kind"] == "Subject"][0]
+def test_subjects_are_never_stray():
+    # Subjects are user-authored labels, not positional pointers: a <Subject N> is legitimate
+    # whether or not a reference carries it yet, so it is never red and never swept away.
+    subj = [t for t in _scan("<Subject 5> holds <Picture 1>", {"images": 1})
+            if t["kind"] == "Subject"][0]
     assert subj["stray"] is False and subj["num"] == 5
-
-
-@requires_node
-def test_a_subject_not_in_use_is_stray_once_the_set_is_supplied():
-    out = _scan("<Subject 5>", {"images": 1, "subjects": [1, 2]})
-    assert out[0]["stray"] is True
-    out2 = _scan("<Subject 2>", {"images": 1, "subjects": [1, 2]})
-    assert out2[0]["stray"] is False
+    # even with a subjects set given, and even for a subject no reference has
+    assert _scan("<Subject 5>", {"images": 1, "subjects": [1, 2]})[0]["stray"] is False
+    assert _scan("<Subject 2>", {"images": 1, "subjects": [1, 2]})[0]["stray"] is False
 
 
 @requires_node

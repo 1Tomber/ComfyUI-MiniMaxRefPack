@@ -12,6 +12,8 @@ VAE/tokenizer.
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 import os
 import time
 
@@ -151,6 +153,19 @@ def _clear_silent_soundtracks(reference_set, input_dir: str) -> list[str]:
             ref.use_soundtrack = False
             silenced.append(ref.file)
     return silenced
+
+
+def _regen_token(references_json: str):
+    """The Regenerate Prompt control's value, read off the references_json envelope. It never
+    gets a widget of its own - the browser writes it beside the references, and only
+    IS_CHANGED reads it. "always" means "re-run every queue"; anything else (a bumped nonce
+    for a one-shot, or the resting nonce for cached) is a stable token folded into the key so
+    unchanged inputs still cache-hit."""
+    try:
+        env = json.loads(references_json) if references_json else {}
+    except (ValueError, TypeError):
+        return None
+    return env.get("regen") if isinstance(env, dict) else None
 
 
 class MiniMaxH3ReferencePack:
@@ -362,6 +377,13 @@ class MiniMaxH3ReferencePack:
         local_model_slug = local_model_slug or (model_override or "")
         import folder_paths
 
+        # Regenerate Prompt = Always: return a value that never equals itself, so ComfyUI
+        # treats the node as changed every queue and re-runs the VLM. Checked first - it
+        # short-circuits the rest of the key.
+        regen = _regen_token(references_json)
+        if regen == "always":
+            return math.nan
+
         reference_set = refs.ReferenceSet.from_json(references_json)
         sig = _files_signature(reference_set, folder_paths.get_input_directory())
         # direction/model/references_json/system_prompt decide when the prompt gets
@@ -397,6 +419,9 @@ class MiniMaxH3ReferencePack:
             system_prompt_replacement,
             str(local_ttl), str(local_server), str(local_send_reasoning),
             str(local_extra_body),
+            # The resting/bumped nonce for cached/once; "always" was handled above. A bumped
+            # nonce moves the key once, then rests so the next queue caches again.
+            str(regen),
         ])
 
     def build(

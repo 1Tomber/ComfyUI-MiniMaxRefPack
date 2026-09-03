@@ -803,14 +803,6 @@ export function scanPromptTags(text, counts) {
         Video: counts.videos | 0,
         Audio: counts.audios | 0,
     };
-    // Subjects are user-assigned, not positional, so validity is membership in the set that
-    // is actually in use - not a 1..N range. Undefined means "do not judge subjects": they
-    // render as ordinary tags and never count as stray.
-    let subjectSet = null;
-    if (counts.subjects != null) {
-        subjectSet = counts.subjects instanceof Set
-            ? counts.subjects : new Set(counts.subjects);
-    }
     const out = [];
     const re = /<(Picture|Video|Audio|Subject) (#|\d+)>/g;
     let m;
@@ -818,12 +810,13 @@ export function scanPromptTags(text, counts) {
         const kind = m[1];
         const raw = m[2];
         const num = raw === "#" ? null : parseInt(raw, 10);
-        let stray;
-        if (kind === "Subject") {
-            stray = raw === "#" || (subjectSet !== null && !subjectSet.has(num));
-        } else {
-            stray = raw === "#" || num < 1 || num > maxOf[kind];
-        }
+        // Subjects are NEVER stray. They are user-authored labels, not positional pointers,
+        // and a <Subject N> written before any reference carries that subject is legitimate
+        // (it gets a chip). So they are never red and never swept by "delete stray tags".
+        // Media tags are stray on the "#" marker or a number past the current count.
+        const stray = kind === "Subject"
+            ? false
+            : (raw === "#" || num < 1 || num > maxOf[kind]);
         out.push({
             kind, num, stray, raw,
             start: m.index, end: m.index + m[0].length, text: m[0],
@@ -968,6 +961,28 @@ export function assignedSubjectNumbers(refs) {
             }
         }
     }
+    return [...seen].sort((a, b) => a - b);
+}
+
+// Subject numbers written as <Subject N> in the prompt text, 1..9. A subject can be named in
+// the direction before any reference carries it, and that is legitimate - it still gets a
+// chip - so the bar draws from text as well as media.
+export function subjectNumbersInText(text) {
+    const seen = new Set();
+    const re = /<Subject (\d+)>/g;
+    let m;
+    while ((m = re.exec(text || "")) !== null) {
+        const n = parseInt(m[1], 10);
+        if (n >= 1 && n <= 9) seen.add(n);
+    }
+    return [...seen].sort((a, b) => a - b);
+}
+
+// The union of the two, the numbers the chip row actually shows: assigned to a reference OR
+// named in the prompt.
+export function subjectsInUse(refs, text) {
+    const seen = new Set(assignedSubjectNumbers(refs));
+    for (const n of subjectNumbersInText(text)) seen.add(n);
     return [...seen].sort((a, b) => a - b);
 }
 // <<< MMRP-SUBJBAR
@@ -3096,6 +3111,16 @@ function parseRefsValue(widget, node) {
             node._mmrpPromptH = parsed.prompt_h;
         }
         if (node && parsed && typeof parsed.retag === "boolean") node._mmrpRetag = parsed.retag;
+        // Regenerate mode: "always" round-trips as itself; anything else (the resting nonce)
+        // loads as Cached with that nonce, so the saved cache state is preserved. "once" is
+        // transient and is never persisted as a mode.
+        if (node && parsed) {
+            if (parsed.regen === "always") node._mmrpRegenMode = "always";
+            else {
+                node._mmrpRegenMode = "cached";
+                if (Number.isFinite(parsed.regen)) node._mmrpRegenNonce = parsed.regen;
+            }
+        }
         return fromReferencesList((parsed && parsed.references) || []);
     } catch (e) {
         console.warn(
@@ -3123,6 +3148,11 @@ function syncReferencesWidget(node) {
     // touched neither stays byte-identical to what earlier builds wrote.
     if (Number.isFinite(node._mmrpPromptH)) envelope.prompt_h = node._mmrpPromptH;
     if (node._mmrpRetag === false) envelope.retag = false;
+    // The Regenerate mode's cache token: "always" (re-run every queue) or the resting nonce
+    // (cached/once). Omitted at the default (Cached, nonce 0) so an untouched workflow stays
+    // byte-identical to what earlier builds wrote.
+    if (node._mmrpRegenMode === "always") envelope.regen = "always";
+    else if (node._mmrpRegenNonce) envelope.regen = node._mmrpRegenNonce;
     w.value = JSON.stringify(envelope);
 }
 
@@ -3315,11 +3345,9 @@ function refreshDirectionUI(node) {
     const armed = node._mmrpCaretTag;
     if (el && armed && el.value.slice(armed.start, armed.end) !== armed.text) setCaretTag(node, null);
     updateCaretTag(node);
-    const stray = hasStrayTags(node);
-    const changed = stray !== node._mmrpStrayShown;
-    node._mmrpStrayShown = stray;
+    // The bar is a fixed-height row now, so its contents changing (chips, the delete-strays
+    // enabled state) does not resize the node - just rebuild it.
     syncSubjectBar(node);
-    if (changed) relayout(node);
 }
 
 // The prompt box is the one element whose height is a preference rather than a
@@ -3328,9 +3356,10 @@ function refreshDirectionUI(node) {
 // only when it is showing. It shows for assigned subjects OR for stray tags (the row
 // carries the "delete stray tags" button), and is zero otherwise - a node with neither is
 // exactly as tall as it was before either feature existed.
-function subjectBarExtra(node) {
-    const showing = assignedSubjectNumbers(node && node._mmrpRefs).length || hasStrayTags(node);
-    return showing ? SUBJECT_BAR_H + CONTENT.gap : 0;
+function subjectBarExtra() {
+    // The row is always shown now: it carries the always-present controls (delete-strays,
+    // regenerate) as well as any subject chips, so it reserves its height unconditionally.
+    return SUBJECT_BAR_H + CONTENT.gap;
 }
 
 // Rebuild the chip row from the subjects currently in use. Single click on a chip
@@ -3341,18 +3370,16 @@ function subjectBarExtra(node) {
 function syncSubjectBar(node) {
     const bar = node._mmrpBody && node._mmrpBody.subjectBar;
     if (!bar) return;
-    const nums = assignedSubjectNumbers(node._mmrpRefs);
-    // A highlight whose subject is no longer assigned has nothing left to point at.
+    // Chips for every subject in use: assigned to a reference OR named in the prompt (so a
+    // <Subject 3> written before any media carries it still gets one).
+    const nums = subjectsInUse(node._mmrpRefs, directionText(node));
+    // A highlight whose subject is no longer in use anywhere has nothing left to point at.
     if (node._mmrpHighlightSubject != null && !nums.includes(node._mmrpHighlightSubject)) {
         node._mmrpHighlightSubject = null;
     }
     const stray = hasStrayTags(node);
     bar.replaceChildren();
-    if (!nums.length && !stray) {
-        bar.style.display = "none";
-        return;
-    }
-    bar.style.display = "flex";
+    bar.style.display = "flex";   // always visible: it carries the row's controls
     for (const n of nums) {
         const chip = document.createElement("button");
         chip.type = "button";
@@ -3378,22 +3405,72 @@ function syncSubjectBar(node) {
         };
         bar.appendChild(chip);
     }
-    // Right-aligned, appearing only while the prompt actually holds a broken tag: a spacer
-    // pushes it to the far edge so it reads as a separate action from the subject chips,
-    // the same layout the edit modal's rows use.
-    if (stray) {
-        const spacer = document.createElement("div");
-        spacer.className = "mmrp-subject-spacer";
-        bar.appendChild(spacer);
-        const clear = document.createElement("button");
-        clear.type = "button";
-        clear.className = "mmrp-stray-clear";
-        clear.textContent = "Delete stray tags";
-        clear.title = "Remove every broken tag (a \u201c#\u201d marker, or a number past the set) "
-            + "from the prompt";
-        clear.onclick = () => deleteStrayTags(node);
-        bar.appendChild(clear);
+    // A spacer pushes the two controls to the far edge, so they read as actions separate
+    // from the subject chips (the same layout the edit modal's rows use).
+    const spacer = document.createElement("div");
+    spacer.className = "mmrp-subject-spacer";
+    bar.appendChild(spacer);
+
+    // Delete stray tags: always present, but dim and disabled when there is nothing broken
+    // to remove - it never touches <Subject N>, which are never stray.
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "mmrp-stray-clear" + (stray ? "" : " mmrp-stray-clear-idle");
+    clear.textContent = "Delete stray tags";
+    clear.disabled = !stray;
+    clear.title = stray
+        ? "Remove every broken tag (a \u201c#\u201d marker, or a number past the set) from the prompt"
+        : "No broken tags to remove";
+    clear.onclick = () => deleteStrayTags(node);
+    bar.appendChild(clear);
+
+    // Regenerate control: whether an unchanged node re-runs the VLM (see setRegenMode).
+    const regenLabel = document.createElement("span");
+    regenLabel.className = "mmrp-edit-label mmrp-regen-label";
+    regenLabel.textContent = "Regen";
+    bar.appendChild(regenLabel);
+    const regen = document.createElement("select");
+    regen.className = "mmrp-regen";
+    for (const [val, text] of [["cached", "Cached"], ["once", "Once"], ["always", "Always"]]) {
+        const opt = document.createElement("option");
+        opt.value = val;
+        opt.textContent = text;
+        regen.appendChild(opt);
     }
+    regen.value = node._mmrpRegenMode || "cached";
+    regen.title =
+        "Regenerate the prompt when nothing changed:\n"
+        + "Cached \u2014 reuse the last prompt (default, no billed call)\n"
+        + "Once \u2014 re-run on the next queue, then back to Cached\n"
+        + "Always \u2014 re-run every queue";
+    regen.addEventListener("keydown", (e) => e.stopPropagation());   // keep graph hotkeys out
+    regen.onchange = () => setRegenMode(node, regen.value);
+    bar.appendChild(regen);
+}
+
+// The Regenerate Prompt mode lives in the references_json envelope, read only by the node's
+// IS_CHANGED. A stable nonce is the cache key's regen slot; bumping it once (Once) moves the
+// key for exactly one queue, then rests. "always" makes IS_CHANGED never-equal-itself so
+// every queue re-runs. Never a widget of its own - no ORDER_* slot, no migration.
+function setRegenMode(node, mode) {
+    node._mmrpRegenMode = mode;
+    if (mode === "once") {
+        node._mmrpRegenNonce = (node._mmrpRegenNonce || 0) + 1;   // one re-run next queue
+        node._mmrpRegenPending = true;                             // ...then revert to Cached
+    }
+    syncReferencesWidget(node);   // writes envelope.regen
+    syncSubjectBar(node);         // reflect the <select>
+    mlog("regen_mode", { mode });
+}
+
+// Called when a prompt finishes: a Once that has now run reverts to Cached. The nonce keeps
+// its bumped value (stable), so this revert does not itself move the cache key.
+function regenAfterRun(node) {
+    if (!node._mmrpRegenPending) return;
+    node._mmrpRegenPending = false;
+    node._mmrpRegenMode = "cached";
+    syncReferencesWidget(node);
+    syncSubjectBar(node);
 }
 
 function syncPromptHeight(node) {
@@ -5503,6 +5580,9 @@ function installSelectionHandlers(node) {
             node._mmrpBody.resizeObserver.disconnect();
             if (node._mmrpBody.promptResizeObserver) node._mmrpBody.promptResizeObserver.disconnect();
         }
+        if (node._mmrpRegenApiHandler && app.api && typeof app.api.removeEventListener === "function") {
+            app.api.removeEventListener("execution_success", node._mmrpRegenApiHandler);
+        }
         // A drag in flight holds three capture-phase WINDOW listeners. Without this they
         // outlive the node until the next mouseup anywhere, whose finishDrag then applies
         // a reorder to a node that is no longer in the graph.
@@ -5869,6 +5949,14 @@ app.registerExtension({
             syncLocalBtn(node);
             renderNodeBody(node);
             syncReferencesWidget(node);
+
+            // When a queued prompt finishes, a "Once" that has now re-run reverts to Cached.
+            // execution_success fires for the whole prompt, which always includes this node's
+            // re-run (arming Once bumped the cache key), so it is a reliable "it ran" signal.
+            if (app.api && typeof app.api.addEventListener === "function") {
+                node._mmrpRegenApiHandler = () => regenAfterRun(node);
+                app.api.addEventListener("execution_success", node._mmrpRegenApiHandler);
+            }
 
             // The widgets' own defaults, captured while they still hold them. nodeCreated
             // runs BEFORE configure() applies widgets_values, so this is the last moment

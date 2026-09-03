@@ -775,6 +775,41 @@
     border-color: #d55;
 }
 
+/* Idle (no broken tags): still present, but faded and greyed so it reads as available-but-
+   inactive rather than an alarm. Disabled, so it does not hover-lift or click. */
+.mmrp-stray-clear-idle {
+    background: transparent;
+    border-color: #444;
+    color: #666;
+    cursor: default;
+}
+.mmrp-stray-clear-idle:hover {
+    background: transparent;
+    border-color: #444;
+}
+
+/* The Regenerate-prompt control, at the right of the subject row. */
+.mmrp-regen-label {
+    flex: 0 0 auto;
+    margin-left: 4px;
+}
+.mmrp-regen {
+    flex: 0 0 auto;
+    height: 22px;
+    padding: 0 4px;
+    font-size: 12px;
+    background: #2a2a2a;
+    border: 1px solid #444;
+    border-radius: 6px;
+    color: #e0e0e0;
+    font-family: inherit;
+    cursor: pointer;
+    outline: none;
+}
+.mmrp-regen:hover {
+    border-color: #666;
+}
+
 /* Frame-navigation row in the edit modal: In / -1 / +1 / Out and the 15s guide. Compact
    buttons; the spacer pushes 15s to the right so it reads as a separate quick-set. */
 .mmrp-trim-step {

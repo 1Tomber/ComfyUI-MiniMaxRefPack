@@ -440,6 +440,48 @@ def test_is_changed_key_moves_for_a_same_length_re_upload(fake_folder_paths):
     )
 
 
+# ---- IS_CHANGED: the Regenerate Prompt control -------------------------------------
+
+
+def _regen_key(fake_folder_paths, regen):
+    env = {"references": []}
+    if regen is not None:
+        env["regen"] = regen
+    return nodes.MiniMaxH3ReferencePack.IS_CHANGED(direction="d", references_json=json.dumps(env))
+
+
+def test_regen_always_forces_a_rerun(fake_folder_paths):
+    """Always: IS_CHANGED returns a value that never equals itself (NaN), so ComfyUI treats
+    the node as changed every queue and re-runs the VLM."""
+    import math
+
+    key = _regen_key(fake_folder_paths, "always")
+    assert isinstance(key, float) and math.isnan(key)
+    assert key != key   # the whole point - never cache-hits
+
+
+def test_regen_once_nonce_moves_the_key_then_rests(fake_folder_paths):
+    """One re-run: bumping the nonce moves the key once; the rested nonce caches again."""
+    assert _regen_key(fake_folder_paths, 1) != _regen_key(fake_folder_paths, 2)   # bumped -> re-run
+    assert _regen_key(fake_folder_paths, 2) == _regen_key(fake_folder_paths, 2)   # rested -> cache
+
+
+def test_regen_cached_default_is_a_stable_key(fake_folder_paths):
+    """Cached at the default (no regen field) is a plain stable key - identical inputs hit."""
+    assert _regen_key(fake_folder_paths, None) == _regen_key(fake_folder_paths, None)
+
+
+def test_regen_read_swallows_a_malformed_envelope(fake_folder_paths):
+    """The regen read itself must never throw on junk - _regen_token returns None rather
+    than raising, so it does not add a new way for IS_CHANGED to fail."""
+    from minimax_refpack.nodes import _regen_token
+
+    assert _regen_token("not json{") is None
+    assert _regen_token("") is None
+    assert _regen_token(json.dumps(["a", "list"])) is None   # not a dict
+    assert _regen_token(json.dumps({"references": [], "regen": "always"})) == "always"
+
+
 def test_is_changed_key_moves_when_direction_changes(fake_folder_paths):
     (fake_folder_paths / "i1.jpg").write_bytes(b"aaa")
     references_json = json.dumps({"references": [{"kind": "image", "file": "i1.jpg"}]})

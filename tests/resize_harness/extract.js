@@ -80,7 +80,7 @@ const FN_NAMES = [
     "hasStrayTags", "scanCounts", "directionText", "scanPromptTags", "widgetByName",
     "assignTags",
 ];
-const CONST_NAMES = ["KINDS", "CL", "CONTENT"];
+const CONST_NAMES = ["KINDS", "CL", "CONTENT", "SUBJECT_BAR_H"];
 
 function makeSandbox(ctx) {
     const pieces = [];
