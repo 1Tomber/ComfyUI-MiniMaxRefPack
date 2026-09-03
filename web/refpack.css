@@ -297,6 +297,9 @@
     caret-color: transparent;
     background: #222;
     border-color: #666;
+    /* A textarea shows the I-beam text cursor; the LOD box is not an editable field, so
+       hover it with the ordinary arrow the way the native zoomed-out widgets do. */
+    cursor: default;
 }
 .mmrp-direction-wrap.mmrp-lod .mmrp-direction::placeholder {
     color: transparent;
