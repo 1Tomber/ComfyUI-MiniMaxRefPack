@@ -323,18 +323,23 @@
     pointer-events: none;
     border-radius: 3px;
     background: rgba(170, 170, 170, 0.16);
-    box-shadow: 0 0 0 1px rgba(170, 170, 170, 0.30);
+    /* INSET, not outset: an outset 1px spread bled the wash 1px past each end of the tag,
+       eating ~2px out of the ~3.6px space between neighbours so you could not tell whether
+       two tags had a space between them. Drawn inset, the outline hugs the <...> glyphs
+       exactly and the gap on either side is left clean. Padding is NOT an option here - it
+       would widen the span and drift the overlay off the textarea's glyphs. */
+    box-shadow: inset 0 0 0 1px rgba(170, 170, 170, 0.34);
 }
 .mmrp-tag-overlay .mmrp-tag-active {
     /* The tag the cursor is on (or every <Subject N> of a highlighted subject). Blue, to
        match the blue ring on the media it highlights at the same time - C.highlight. */
     background: rgba(78, 161, 255, 0.34);
-    box-shadow: 0 0 0 1px rgba(78, 161, 255, 0.85);
+    box-shadow: inset 0 0 0 1px rgba(78, 161, 255, 0.90);
 }
 .mmrp-tag-overlay .mmrp-tag-stray {
     /* Intense, warm, unmistakable: this tag points at nothing. Matches C.danger. */
     background: rgba(255, 68, 68, 0.34);
-    box-shadow: 0 0 0 1px rgba(255, 68, 68, 0.75);
+    box-shadow: inset 0 0 0 1px rgba(255, 68, 68, 0.80);
 }
 
 /* ---- system prompt modal (the ONLY place system_prompt is shown) ---- */
