@@ -4385,13 +4385,15 @@ function openEditModal(node, kind, index) {
         if (rotate) parts.push(`rotate(${rotate}deg)`);
         if (flip) parts.push(`scale(${flip.includes("h") ? -1 : 1}, ${flip.includes("v") ? -1 : 1})`);
         mediaWrap.style.transform = parts.join(" ");
-        // A quarter turn swaps the media's aspect inside a wrapper sized for the other
-        // one; scaling it to fit keeps the whole frame visible rather than letting the
-        // long edge overflow the stage.
+        // A quarter turn (90/270) TRANSPOSES the oriented frame: the server's output swaps to a
+        // portrait frame and the crop is a fraction of THAT. So the viewport takes the swapped
+        // aspect (below) and the rotated media must FILL it - scale by the long/short ratio, which
+        // covers the letterbox object-fit leaves in the swapped wrapper. Now the crop rect (a
+        // fraction of the viewport) is the same fraction the node crops, and it reads portrait.
         const quarter = Math.abs((rotate % 180) - 90) < 1e-6;
         if (quarter && mediaW && mediaH) {
-            const fit = Math.min(1, mediaH / mediaW, mediaW / mediaH) || 1;
-            mediaWrap.style.transform += ` scale(${fit})`;
+            const fill = Math.max(mediaW / mediaH, mediaH / mediaW);
+            mediaWrap.style.transform += ` scale(${fill})`;
         }
         // Any multiple of 90 (0/90/180/270) is an exact transpose on the server with NO fill; the
         // `quarter` flag above is only 90/270 (the aspect-swap), so 180 needs its own check here.
@@ -4419,7 +4421,16 @@ function openEditModal(node, kind, index) {
             }
             mediaWrap.style.transform += ` scale(${f})`;
         }
-        if (cropViewport) cropViewport.style.overflow = wantFill ? "hidden" : "";
+        if (cropViewport) {
+            // The viewport (and thus the crop rect it hosts) takes the ORIENTED frame's aspect:
+            // swapped for a quarter turn, the source aspect otherwise. Overflow is clipped whenever
+            // the media is scaled up past the frame - the fit-inside fill or a quarter-turn fill.
+            if (mediaW > 0 && mediaH > 0) {
+                cropViewport.style.setProperty(
+                    "--mmrp-ar", quarter ? `${mediaH} / ${mediaW}` : `${mediaW} / ${mediaH}`);
+            }
+            cropViewport.style.overflow = (wantFill || quarter) ? "hidden" : "";
+        }
     };
 
     const overlay = document.createElement("div");
@@ -5775,7 +5786,10 @@ function openEditModal(node, kind, index) {
     // Also give the crop viewport the media's aspect, so it fits the stage and scales with the modal.
     const setViewportAspect = () => {
         if (cropViewport && mediaW > 0 && mediaH > 0) {
-            cropViewport.style.setProperty("--mmrp-ar", `${mediaW} / ${mediaH}`);
+            // Swap for a 90/270 turn so the crop viewport matches the transposed oriented frame.
+            const swap = Math.abs(((rotate || 0) % 180) - 90) < 1e-6;
+            cropViewport.style.setProperty(
+                "--mmrp-ar", swap ? `${mediaH} / ${mediaW}` : `${mediaW} / ${mediaH}`);
         }
     };
     if (kind === "image") {
@@ -5783,12 +5797,14 @@ function openEditModal(node, kind, index) {
             mediaW = media.naturalWidth;
             mediaH = media.naturalHeight;
             setViewportAspect();
+            applyOrientation();   // a reference opened WITH a rotation needs its fill now dims exist
         });
     } else if (kind === "video") {
         media.addEventListener("loadedmetadata", () => {
             mediaW = media.videoWidth;
             mediaH = media.videoHeight;
             setViewportAspect();
+            applyOrientation();
         });
     }
 
