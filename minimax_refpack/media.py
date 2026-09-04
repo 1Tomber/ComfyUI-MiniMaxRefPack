@@ -67,23 +67,38 @@ def _frame_downscale_fn():
     return resize
 
 
-def _fill_scale(w, h, rotate) -> float:
-    """Scale factor so a w×h frame rotated by `rotate` degrees COVERS a w×h box - i.e. the rotated
-    content fills the source extent with NO black corners (the overhang is cropped). This is the
-    "fit inside" meaning of rotate_expand=False: no black, the rotation fits inside the frame.
+def _fill_scale(w, h, rotate, crop=None) -> float:
+    """Minimal scale so the KEPT rect stays free of black when a w×h frame is rotated by `rotate`
+    degrees about the frame centre. This is the "straighten" fill (rotate_expand=False): the image
+    turns behind a fixed crop and is zoomed only as much as THAT crop needs - an interior crop
+    barely zooms, a full-frame crop needs the classic cover scale.
 
-    Derivation: a box corner (±w/2, ±h/2) un-rotated by -θ must land inside the scaled frame
-    [±f·w/2, ±f·h/2]; the binding corner gives f = |cosθ| + max(w/h, h/w)·|sinθ|. At θ=45° on a
-    square that is √2, exactly the scale that makes the inscribed square cover the original.
+    `crop` is the [x, y, w, h] fraction rect the frame will be cropped to, or None for the whole
+    frame. Each of the rect's four corners, inverse-rotated about the centre, must land inside the
+    scaled source; the binding corner sets f. f is never < 1 - we only ever zoom up to hide black.
+
+    With crop=None (the whole frame) this reduces to f = |cosθ| + max(w/h, h/w)·|sinθ|, i.e. √2 for
+    a square at 45°, exactly the scale that makes the inscribed rotated frame cover the original.
     """
     import math
     if not w or not h:
         return 1.0
-    r = math.radians(float(rotate) % 180.0)
-    return abs(math.cos(r)) + max(w / h, h / w) * abs(math.sin(r))
+    x0, y0, cw, ch = (0.0, 0.0, 1.0, 1.0) if crop is None else (float(crop[0]), float(crop[1]),
+                                                                 float(crop[2]), float(crop[3]))
+    r = math.radians(float(rotate))
+    cos, sin = math.cos(r), math.sin(r)
+    cx, cy = w / 2.0, h / 2.0
+    f = 1.0
+    for fx in (x0, x0 + cw):
+        for fy in (y0, y0 + ch):
+            dx, dy = fx * w - cx, fy * h - cy      # crop corner relative to the frame centre
+            ax = cos * dx + sin * dy               # inverse-rotate; the point must stay in the frame
+            ay = -sin * dx + cos * dy
+            f = max(f, 2.0 * abs(ax) / w, 2.0 * abs(ay) / h)
+    return f
 
 
-def _orient_pil(img, flip, rotate, expand: bool = True):
+def _orient_pil(img, flip, rotate, expand: bool = True, crop=None):
     """Apply flip then rotation to a PIL image. Returns it unchanged when both are unset.
 
     ORDER IS THE CONTRACT: flip, then rotate, then (at the call site) crop. The crop rect
@@ -91,6 +106,10 @@ def _orient_pil(img, flip, rotate, expand: bool = True):
     cropping first would select a different region than the user boxed. semmlerino hit
     exactly this on a portrait phone clip and wrote it down: the preview showed one region
     and the node emitted another.
+
+    `crop` (the same fraction rect the caller will crop to, or None) only feeds the "fit inside"
+    fill scale: the rotation is zoomed just enough to keep THAT crop free of black, not the whole
+    frame ("straighten" - the image turns behind a fixed crop). It never moves or applies the crop.
 
     Quarter turns go through Image.transpose, which is lossless and needs no resampling.
     Everything else resamples once, filling anything outside the source with BLACK - the
@@ -123,10 +142,11 @@ def _orient_pil(img, flip, rotate, expand: bool = True):
     if expand:
         # Grow to the whole rotated frame, filling the new corners with black.
         return img.rotate(deg, expand=True, resample=Image.BICUBIC, fillcolor=(0, 0, 0))
-    # "Fit inside": NO black. Scale the frame up so the rotated content covers the source box, keep
-    # the source size, and crop the overhang - the rotation fills the frame with no black corners.
+    # "Fit inside": NO black. Scale the frame up so the rotated content covers the KEPT crop (the
+    # whole frame when crop is None), keep the source size, and crop the overhang centred - the
+    # rotation fills the crop with no black corners while zooming only as much as the crop needs.
     w, h = img.size
-    f = _fill_scale(w, h, rotate)
+    f = _fill_scale(w, h, rotate, crop)
     bw, bh = max(1, round(w * f)), max(1, round(h * f))
     rot = img.resize((bw, bh), Image.BICUBIC).rotate(deg, expand=False, resample=Image.BICUBIC,
                                                       fillcolor=(0, 0, 0))
@@ -149,11 +169,11 @@ def _quarter_turns(rotate) -> int | None:
     return int(nearest) % 4
 
 
-def _orient_array(arr, flip, rotate, expand: bool = True):
+def _orient_array(arr, flip, rotate, expand: bool = True, crop=None):
     """The same transform for a decoded video frame (H, W, 3 uint8).
 
     Quarter turns use numpy so a clip does not pay a PIL round trip per frame; a free
-    angle has to resample, so it borrows _orient_pil.
+    angle has to resample, so it borrows _orient_pil (and its crop-aware fill scale).
     """
     if not flip and not rotate:
         return arr
@@ -173,11 +193,11 @@ def _orient_array(arr, flip, rotate, expand: bool = True):
         return np.ascontiguousarray(np.rot90(arr, -turns))
     from PIL import Image
 
-    out = _orient_pil(Image.fromarray(np.ascontiguousarray(arr)), None, rotate, expand)
+    out = _orient_pil(Image.fromarray(np.ascontiguousarray(arr)), None, rotate, expand, crop)
     return np.ascontiguousarray(np.array(out))
 
 
-def _orient_tensor(frames, flip, rotate, expand: bool = True):
+def _orient_tensor(frames, flip, rotate, expand: bool = True, crop=None):
     """The same transform for a decoded frame batch, (N, H, W, C) float in 0..1.
 
     Quarter turns and flips are strides - torch does them without touching pixel data, so
@@ -207,7 +227,7 @@ def _orient_tensor(frames, flip, rotate, expand: bool = True):
     import numpy as np
 
     src = (frames.detach().cpu().numpy() * 255.0).clip(0, 255).astype("uint8")
-    out = np.stack([_orient_array(f, None, rotate, expand) for f in src])
+    out = np.stack([_orient_array(f, None, rotate, expand, crop) for f in src])
     return torch.from_numpy(out.astype("float32") / 255.0)
 
 
@@ -350,7 +370,7 @@ def load_image(path: str, crop=None, max_edge: int = 0, flip=None, rotate=None,
         # EXIF transpose -> flip -> rotate -> crop -> max_edge. The crop rect is drawn on
         # the ORIENTED frame in the editor, so it has to be applied to the oriented frame
         # here or it selects a different region than the user boxed.
-        img = _orient_pil(img, flip, rotate, rotate_expand)
+        img = _orient_pil(img, flip, rotate, rotate_expand, crop)
         if crop is not None:
             img = img.crop(_crop_box(crop, img.width, img.height))
         if max_edge:
@@ -465,7 +485,7 @@ def _decode_video(path, target_fps, crop, trim, fields, flip=None, rotate=None,
     out = frames[[first + i for i in indices]]
     # Orient before cropping, for the reason in _orient_pil: the rect was drawn on the
     # oriented frame.
-    out = _orient_tensor(out, flip, rotate, rotate_expand)
+    out = _orient_tensor(out, flip, rotate, rotate_expand, crop)
     if crop is not None:
         left, top, right, bottom = _crop_box(crop, out.shape[2], out.shape[1])
         out = out[:, top:bottom, left:right, :]
@@ -569,7 +589,7 @@ def _transcode_window(path: str, crop, trim, flip=None, rotate=None,
                 if end is not None and t >= end - 1e-9:
                     break
                 arr = frame.to_ndarray(format="rgb24")
-                arr = _orient_array(arr, flip, rotate, rotate_expand)
+                arr = _orient_array(arr, flip, rotate, rotate_expand, crop)
                 if crop is not None:
                     left, top, right, bottom = _crop_box(crop, arr.shape[1], arr.shape[0])
                     # h264 needs an EVEN count on each axis, and the rounding below turns
@@ -692,7 +712,7 @@ def thumbnail_png(path: str, max_edge: int = 256, crop=None, at_seconds=None, fl
     # Same order as every other apply point: orient, then crop. This is the one the user
     # SEES - the tile and the editor's frame both come through here - so a mismatch with
     # the socket path would show one thing and emit another.
-    img = _orient_pil(img, flip, rotate, rotate_expand)
+    img = _orient_pil(img, flip, rotate, rotate_expand, crop)
     if crop is not None:
         img = img.crop(_crop_box(crop, img.width, img.height))
     img.thumbnail((max_edge, max_edge))

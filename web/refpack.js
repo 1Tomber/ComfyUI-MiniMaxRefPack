@@ -4393,17 +4393,33 @@ function openEditModal(node, kind, index) {
             const fit = Math.min(1, mediaH / mediaW, mediaW / mediaH) || 1;
             mediaWrap.style.transform += ` scale(${fit})`;
         }
-        // "Fit inside" (no black): scale the rotated frame UP so it covers the source box (matching
-        // _fill_scale on the server), and clip the overhang at the viewport - whose LAYOUT box is the
-        // un-rotated media (transforms don't change it), i.e. the source extent. A clip-path on the
-        // rotated wrap itself rotates WITH it and does nothing.
-        if (!expand && rotate) {
-            const rr = (rotate % 180) * Math.PI / 180;
+        // Any multiple of 90 (0/90/180/270) is an exact transpose on the server with NO fill; the
+        // `quarter` flag above is only 90/270 (the aspect-swap), so 180 needs its own check here.
+        const q90 = (((rotate || 0) % 90) + 90) % 90;
+        const isQuarterTurn = q90 < 1e-6 || q90 > 90 - 1e-6;
+        // "Fit inside" (no black): scale the rotated frame UP so it covers the KEPT crop and clip
+        // the overhang at the viewport - whose LAYOUT box is the un-rotated media (transforms don't
+        // change it), i.e. the source extent. The fill is CROP-AWARE (mirrors _fill_scale on the
+        // server): the image turns behind a fixed crop and zooms only as much as that crop needs, so
+        // an interior crop barely zooms. Quarter turns are exact (lossless transpose, no fill) - the
+        // server skips fill for them, so the preview must too or a 90° turn would over-zoom here.
+        const wantFill = !expand && rotate && !isQuarterTurn;
+        if (wantFill) {
+            const rad = rotate * Math.PI / 180;
+            const cos = Math.cos(rad), sin = Math.sin(rad);
             const W = mediaW || 1, H = mediaH || 1;
-            const f = Math.abs(Math.cos(rr)) + Math.max(W / H, H / W) * Math.abs(Math.sin(rr));
+            const c = (crop && crop.length === 4) ? crop : [0, 0, 1, 1];
+            let f = 1;
+            for (const fx of [c[0], c[0] + c[2]]) {
+                for (const fy of [c[1], c[1] + c[3]]) {
+                    const dx = fx * W - W / 2, dy = fy * H - H / 2;
+                    const ax = cos * dx + sin * dy, ay = -sin * dx + cos * dy;
+                    f = Math.max(f, 2 * Math.abs(ax) / W, 2 * Math.abs(ay) / H);
+                }
+            }
             mediaWrap.style.transform += ` scale(${f})`;
         }
-        if (cropViewport) cropViewport.style.overflow = (!expand && rotate) ? "hidden" : "";
+        if (cropViewport) cropViewport.style.overflow = wantFill ? "hidden" : "";
     };
 
     const overlay = document.createElement("div");
@@ -4489,9 +4505,12 @@ function openEditModal(node, kind, index) {
             const px = Math.max(0, x - w * CROP_PAD), py = Math.max(0, y - h * CROP_PAD);
             const pw = Math.min(1 - px, w * (1 + 2 * CROP_PAD)), ph = Math.min(1 - py, h * (1 + 2 * CROP_PAD));
             if (pw <= 0 || ph <= 0) return;
-            const scale = Math.min(1 / pw, 1 / ph);   // fit the padded crop into the stage
+            const s = Math.min(1 / pw, 1 / ph);   // fit the padded crop into the stage
+            // Centre the padded crop in the viewport (the shorter axis letterboxes, centred).
+            const tx = (1 - pw * s) / 2 - px * s;
+            const ty = (1 - ph * s) / 2 - py * s;
             viewport.style.transformOrigin = "0 0";
-            viewport.style.transform = `scale(${scale}) translate(${-px * 100}%, ${-py * 100}%)`;
+            viewport.style.transform = `translate(${tx * 100}%, ${ty * 100}%) scale(${s})`;
         };
 
         syncCropRect = () => {
@@ -4500,6 +4519,9 @@ function openEditModal(node, kind, index) {
             rectEl.style.width = `${crop[2] * 100}%`;
             rectEl.style.height = `${crop[3] * 100}%`;
             syncClears();
+            // The "fit inside" fill is crop-aware, so the rotation's zoom must re-fit as the crop
+            // changes - the image re-scales behind the fixed crop to stay black-free.
+            applyOrientation();
         };
         syncCropRect();
 
@@ -4514,6 +4536,11 @@ function openEditModal(node, kind, index) {
                 ratio = null;
                 clearAspectActive();
             }
+            // Box is captured ONCE and kept fixed for the whole drag. In cropped view we re-fit the
+            // zoom on every move (below); if the delta math used a live box, that re-fit would keep
+            // changing box.width under the same pointer and the crop would oscillate. A fixed box
+            // means the crop is a stable function of the raw pointer travel; the handle drifts a
+            // little from the cursor as the view magnifies, which is the price of live re-framing.
             const box = layer.getBoundingClientRect();
             if (!box.width || !box.height) return;
             const from = { x: e.clientX, y: e.clientY, crop: crop.slice() };
@@ -4522,11 +4549,12 @@ function openEditModal(node, kind, index) {
                 const dy = (ev.clientY - from.y) / box.height;
                 crop = dragCrop(from.crop, mode, dx, dy, ratio, mediaW, mediaH);
                 syncCropRect();
+                if (croppedView) applyCroppedView();   // live zoom-to-crop while dragging the handles
             };
             const up = () => {
                 window.removeEventListener("mousemove", move);
                 window.removeEventListener("mouseup", up);
-                applyCroppedView();   // re-fit the zoomed view to the new crop (+ padding)
+                applyCroppedView();   // final re-fit of the zoomed view to the new crop (+ padding)
             };
             window.addEventListener("mousemove", move);
             window.addEventListener("mouseup", up);
