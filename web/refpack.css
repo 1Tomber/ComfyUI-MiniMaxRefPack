@@ -475,11 +475,12 @@
 
 .mmrp-edit-modal {
     width: min(720px, 94vw);
+    height: min(760px, 90vh);
     /* Resizable, and never taller/wider than the viewport (JS re-clamps and remembers the size
-       for the session). overflow:auto both enables the resize grip and scrolls if it is dragged
-       smaller than its content. */
+       for the session). overflow:hidden - NO scrollbar: instead the video preview (the flexible
+       row) scales to whatever height is left after the controls take theirs. */
     resize: both;
-    overflow: auto;
+    overflow: hidden;
     min-width: 380px;
     min-height: 320px;
     max-width: 94vw;
@@ -488,7 +489,14 @@
 
 .mmrp-edit-stage {
     position: relative;
-    align-self: center;
+    /* The one flexible row: flex-basis 0 so it is sized PURELY by the space left after the fixed
+       controls (not by the media's natural size), and centres the scaled preview in it. */
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
     max-width: 100%;
 }
 
@@ -498,15 +506,17 @@
     position: relative;
     overflow: hidden;
     line-height: 0;
+    max-width: 100%;
+    max-height: 100%;
 }
 
 .mmrp-edit-stage img,
 .mmrp-edit-stage video {
     display: block;
-    /* Scale with the (resizable) modal instead of a fixed cap, so making the window bigger makes
-       the preview bigger. Capped by viewport height so it never pushes the controls off-screen. */
+    /* Fill the flexible stage, scaling down to whatever height is left after the controls, aspect
+       preserved (last in the size chain, after the modal's own width/height). */
     max-width: 100%;
-    max-height: 55vh;
+    max-height: 100%;
     background: #000;
 }
 
