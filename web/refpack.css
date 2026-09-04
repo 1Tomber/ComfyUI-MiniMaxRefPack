@@ -640,6 +640,11 @@
     font-family: inherit;
     outline: none;
 }
+/* The In/Out guide's window-length field is narrower - it holds a small number of seconds. */
+.mmrp-win-len {
+    width: 44px;
+    flex: 0 0 auto;
+}
 
 .mmrp-trim-num:focus {
     border-color: #888;

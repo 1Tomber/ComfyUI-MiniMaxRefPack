@@ -4618,8 +4618,9 @@ function openEditModal(node, kind, index) {
     let cueJumpOut = () => {};     // playhead -> Out (last kept frame)
     let cueHome = () => {};        // playhead -> first frame
     let cueEnd = () => {};         // playhead -> last frame
-    let cueSet15s = () => {};      // Out = In + 15s ("15 In")
-    let cueSet15sOut = () => {};   // In = Out - 15s ("15 Out")
+    let cueSet15s = () => {};      // Out = In + <winLen>s
+    let cueSet15sOut = () => {};   // In = Out - <winLen>s
+    let winLenInput = null;        // editable window length (s) the In/Out guide buttons use
     let cueTogglePlay = () => {};  // Space (assigned in the playback block)
     let cueTrackPlayhead = () => {};// called on each playback tick to move the playhead
     let cueActive = () => false;   // are the frame cue controls live (video + fps + trimmable)?
@@ -4794,13 +4795,18 @@ function openEditModal(node, kind, index) {
             };
             cueHome = () => { stopPlayback(); cueActive() ? seekCursorFrame(0) : seekCursorSec(0); };
             cueEnd = () => { stopPlayback(); cueActive() ? seekCursorFrame(lastF()) : seekCursorSec(duration || 0); };
+            // The In/Out guide buttons use the editable window length (defaults to 15s).
+            const winLen = () => {
+                const v = winLenInput ? parseFloat(winLenInput.value) : NaN;
+                return (Number.isFinite(v) && v > 0) ? v : 15;
+            };
             cueSet15s = () => {
                 stopPlayback();
-                if (trim && duration) setTrim(trim[0], Math.min(trim[0] + 15, duration));
+                if (trim && duration) setTrim(trim[0], Math.min(trim[0] + winLen(), duration));
             };
             cueSet15sOut = () => {
                 stopPlayback();
-                if (trim && duration) setTrim(Math.max(0, trim[1] - 15), trim[1]);
+                if (trim && duration) setTrim(Math.max(0, trim[1] - winLen()), trim[1]);
             };
             cueTrackPlayhead = () => {
                 cursor = media.currentTime;
@@ -4934,9 +4940,20 @@ function openEditModal(node, kind, index) {
             const spacer = document.createElement("span");
             spacer.className = "mmrp-trim-spacer";
             stepRow.appendChild(spacer);
-            mkBtn("15 In", "Set the Out point 15s after the In point (a guide, not a limit)",
+            // A customizable window-length guide: type the seconds (default 15), then In sets
+            // the Out point that far after In, Out sets the In point that far before Out.
+            winLenInput = document.createElement("input");
+            winLenInput.className = "mmrp-trim-num mmrp-win-len";
+            winLenInput.type = "number";
+            winLenInput.min = "0.1";
+            winLenInput.step = "1";
+            winLenInput.value = "15";
+            winLenInput.title = "Window length in seconds for the In / Out buttons";
+            winLenInput.addEventListener("keydown", (e) => e.stopPropagation());
+            stepRow.appendChild(winLenInput);
+            mkBtn("In", "Set the Out point this many seconds after the In point (a guide, not a limit)",
                   () => cueSet15s());
-            mkBtn("15 Out", "Set the In point 15s before the Out point (a guide, not a limit)",
+            mkBtn("Out", "Set the In point this many seconds before the Out point (a guide, not a limit)",
                   () => cueSet15sOut());
 
             modal.appendChild(stepRow);
