@@ -567,6 +567,15 @@
     border-color: #e0e0e0;
     color: #000;
 }
+/* The custom W:H ratio field, styled like the preset buttons (mmrp-btn) but a bit wider. */
+.mmrp-aspect-custom {
+    width: 56px;
+    text-align: center;
+    font-family: inherit;
+}
+.mmrp-aspect-custom::placeholder {
+    color: #888;
+}
 
 .mmrp-edit-label {
     color: #888;
@@ -744,12 +753,15 @@
     gap: 6px;
     flex-wrap: wrap;
 }
-/* Set In  ·  info  ·  Set Out */
-.mmrp-tl-set {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
+/* Set In + In field (left)  ·  transport  ·  Out field + Set Out (right) */
+.mmrp-tl-inout {
+    display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 6px;
+}
+/* The readout on its own centred row. */
+.mmrp-tl-info {
+    text-align: center;
 }
 /* Ns from In  ·  [n]  ·  Ns from Out — left / centre / right */
 .mmrp-tl-window {

@@ -4296,9 +4296,22 @@ function openLoadConfigPanel(node, anchorBtn) {
 
 const ASPECT_PRESETS = [
     ["1:1", 1],
+    ["4:3", 4 / 3],
+    ["3:4", 3 / 4],
     ["16:9", 16 / 9],
     ["9:16", 9 / 16],
+    ["21:9", 21 / 9],
 ];
+
+// Parse a "W:H" (or "W/H", "W x H") ratio string to a number; null if it is not a valid ratio.
+// >>> MMRP-RATIO
+export function parseRatio(str) {
+    const m = String(str).trim().match(/^(\d*\.?\d+)\s*[:\/xX]\s*(\d*\.?\d+)$/);
+    if (!m) return null;
+    const w = parseFloat(m[1]), h = parseFloat(m[2]);
+    return (w > 0 && h > 0) ? w / h : null;
+}
+// <<< MMRP-RATIO
 
 function openEditModal(node, kind, index) {
     const ref = node._mmrpRefs[`${kind}s`][index];
@@ -4502,6 +4515,18 @@ function openEditModal(node, kind, index) {
         presets.push(...ASPECT_PRESETS);
 
         const buttons = [];
+        // A custom "W:H" ratio field, styled like the preset buttons. Setting a preset (or Clear
+        // crop) de-highlights it; clicking back into it re-applies its ratio.
+        const customInput = document.createElement("input");
+        customInput.type = "text";
+        customInput.className = "mmrp-btn mmrp-aspect-custom";
+        customInput.placeholder = "3:2";
+        customInput.title = "Custom crop ratio, e.g. 3:2";
+        customInput.addEventListener("keydown", (e) => e.stopPropagation());
+        const clearAspectActive = () => {
+            for (const b of buttons) b.classList.remove("mmrp-active");
+            customInput.classList.remove("mmrp-active");
+        };
         for (const [text, r] of presets) {
             const btn = document.createElement("button");
             btn.className = "mmrp-btn";
@@ -4509,7 +4534,8 @@ function openEditModal(node, kind, index) {
             btn.onclick = () => {
                 stopPlayback();
                 ratio = r;
-                for (const b of buttons) b.classList.toggle("mmrp-active", b === btn);
+                clearAspectActive();
+                btn.classList.add("mmrp-active");
                 if (r) {
                     crop = setRectAspect(crop, r, mediaW, mediaH);
                     syncCropRect();
@@ -4518,6 +4544,20 @@ function openEditModal(node, kind, index) {
             row.appendChild(btn);
             buttons.push(btn);
         }
+        const applyCustomRatio = () => {
+            const r = parseRatio(customInput.value);
+            if (!r) return;
+            stopPlayback();
+            ratio = r;
+            clearAspectActive();
+            customInput.classList.add("mmrp-active");
+            crop = setRectAspect(crop, r, mediaW, mediaH);
+            syncCropRect();
+        };
+        customInput.addEventListener("change", applyCustomRatio);
+        // Clicking back inside re-activates it (re-applies the typed ratio).
+        customInput.addEventListener("focus", applyCustomRatio);
+        row.appendChild(customInput);
         // Nothing is highlighted on open. Free IS the starting behaviour (ratio = null),
         // but showing it selected reads as a choice the user made, and then "Clear crop"
         // has nothing left to visibly clear. The highlight means "you picked a lock".
@@ -4534,7 +4574,7 @@ function openEditModal(node, kind, index) {
             mlog("edit_cleared", { file: ref.file, what: "crop" });
             crop = [0, 0, 1, 1];
             ratio = null;
-            for (const b of buttons) b.classList.remove("mmrp-active");
+            clearAspectActive();
             syncCropRect();
         };
         row.appendChild(clearCropBtn);
@@ -5343,15 +5383,17 @@ function openEditModal(node, kind, index) {
             winLenInput.title = "Window length in seconds for the In / Out guide buttons";
             winLenInput.addEventListener("keydown", (e) => e.stopPropagation());
             stepRow.appendChild(winLenInput);
-            L.winIn = mkBtn("15s from In", "Set the Out point this many seconds after the In point (a guide, not a limit)",
-                  () => cueSet15s());
-            L.winOut = mkBtn("15s from Out", "Set the In point this many seconds before the Out point (a guide, not a limit)",
+            // Left sets the In point N seconds before Out; right sets the Out point N seconds
+            // after In - so each sits under the matching Set In / Set Out above it.
+            L.winIn = mkBtn("Set In 15s from Out", "Set the In point this many seconds before the Out point (a guide, not a limit)",
                   () => cueSet15sOut());
+            L.winOut = mkBtn("Set Out 15s from In", "Set the Out point this many seconds after the In point (a guide, not a limit)",
+                  () => cueSet15s());
             // Keep the guide labels showing the current window length.
             const syncWinBtns = () => {
                 const n = winLen();
-                L.winIn.textContent = `${n}s from In`;
-                L.winOut.textContent = `${n}s from Out`;
+                L.winIn.textContent = `Set In ${n}s from Out`;
+                L.winOut.textContent = `Set Out ${n}s from In`;
             };
             syncWinBtns();
             winLenInput.addEventListener("input", syncWinBtns);
@@ -5588,12 +5630,15 @@ function openEditModal(node, kind, index) {
         };
         const transport = mkRow("mmrp-tl-transport", [L.jumpIn, L.stepBack, L.play, L.stepFwd, L.jumpOut]);
         const timelineRow = mkRow("mmrp-tl-timeline", [L.barCol]);
-        const navRow = mkRow("mmrp-tl-nav", [L.inNum, transport, L.outNum]);
-        const setRow = mkRow("mmrp-tl-set", [L.setIn, L.durLabel, L.setOut]);
+        // Set In + In field (left) · transport (centre) · Out field + Set Out (right).
+        const leftGroup = mkRow("mmrp-tl-inout", [L.setIn, L.inNum]);
+        const rightGroup = mkRow("mmrp-tl-inout", [L.outNum, L.setOut]);
+        const navRow = mkRow("mmrp-tl-nav", [leftGroup, transport, rightGroup]);
+        const infoRow = mkRow("mmrp-tl-info", [L.durLabel]);   // the readout, on its own centred row
         const winRow = mkRow("mmrp-tl-window", [L.winIn, L.winLen, L.winOut]);
         const optRow = mkRow("mmrp-tl-opts", [L.tcBtn, L.clearTrim]);
         const previewRow = modal.querySelector(".mmrp-play-row");
-        for (const r of [timelineRow, navRow, setRow, winRow, optRow]) modal.insertBefore(r, previewRow);
+        for (const r of [timelineRow, navRow, infoRow, winRow, optRow]) modal.insertBefore(r, previewRow);
         if (L.trimRow) L.trimRow.remove();   // the original trim + cue rows are now empty shells
         if (L.stepRow) L.stepRow.remove();
     }
