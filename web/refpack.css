@@ -708,7 +708,53 @@
 /* The frame readout beside the bar: tabular figures so the numbers do not jitter. */
 .mmrp-trim-readout {
     font-variant-numeric: tabular-nums;
-    white-space: nowrap;
+    white-space: pre-line;   /* the info is two centred lines: fps · time / in · out · len */
+    text-align: center;
+    line-height: 1.4;
+}
+
+/* ---- the "everything under the video" trim layout (video) ---- */
+.mmrp-tl-timeline {
+    display: flex;   /* the barCol (overview + detail) fills the full width */
+}
+.mmrp-tl-timeline .mmrp-trim-col {
+    min-width: 0;
+}
+/* In  ·  transport (⏮In ◀−1 ▶ +1▶ Out⏭)  ·  Out */
+.mmrp-tl-nav {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 8px;
+}
+.mmrp-tl-transport {
+    display: flex;
+    justify-content: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+/* Set In  ·  info  ·  Set Out */
+.mmrp-tl-set {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 10px;
+}
+/* Ns from In  ·  [n]  ·  Ns from Out — left / centre / right */
+.mmrp-tl-window {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 8px;
+}
+.mmrp-tl-window > :first-child { justify-self: start; }
+.mmrp-tl-window > :last-child { justify-self: end; }
+.mmrp-tl-window .mmrp-win-len { justify-self: center; }
+/* timecode toggle  ·  Clear trim */
+.mmrp-tl-opts {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
 }
 
 /* A small fixed gap separating the transport buttons from the Set In/Set Out pair. */

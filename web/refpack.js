@@ -4386,6 +4386,10 @@ function openEditModal(node, kind, index) {
     modal.className = "mmrp-modal mmrp-edit-modal";
     overlay.appendChild(modal);
 
+    // Refs stashed here as the rows are built so the final "all under the video" relayout (video)
+    // can regroup elements that live in different block scopes into the new row structure.
+    const L = {};
+
     const header = document.createElement("div");
     header.className = "mmrp-modal-header";
     header.textContent = `Edit — ${ref.file}`;
@@ -4753,6 +4757,12 @@ function openEditModal(node, kind, index) {
     let cueSet15s = () => {};      // Out = In + <winLen>s
     let cueSet15sOut = () => {};   // In = Out - <winLen>s
     let winLenInput = null;        // editable window length (s) the In/Out guide buttons use
+    // The guide buttons and their "Ns from In/Out" labels read this. Defined in the wantsTrim
+    // scope so BOTH the cue-action block and the (separate) transport-row block can reach it.
+    const winLen = () => {
+        const v = winLenInput ? parseFloat(winLenInput.value) : NaN;
+        return (Number.isFinite(v) && v > 0) ? v : 15;
+    };
     let cueTogglePlay = () => {};  // Space (assigned in the playback block)
     let cueTrackPlayhead = () => {};// called on each playback tick to move the playhead
     let cueActive = () => false;   // are the frame cue controls live (video + fps + trimmable)?
@@ -4851,6 +4861,8 @@ function openEditModal(node, kind, index) {
         row.appendChild(durLabel);
         row.appendChild(clearTrimBtn);
         modal.appendChild(row);
+        L.trimRow = row; L.inNum = inNum; L.outNum = outNum; L.barCol = barCol;
+        L.durLabel = durLabel; L.clearTrim = clearTrimBtn;
 
         // Seconds stays the canonical trim (setTrim/normalizeTrim/save are untouched);
         // frames are the video interaction layer, converted at these boundaries.
@@ -4938,9 +4950,10 @@ function openEditModal(node, kind, index) {
                 inNum.value = fmtFrame(ci);
                 outNum.value = fmtFrame(co);
                 const cur = tcMode ? framesToTimecode(curFrame(), srcFps) : `f ${curFrame()}`;
-                const total = tcMode ? "" : ` / ${lastF() + 1}f`;
+                const lenFrames = co - ci + 1;   // inclusive out
+                const len = tcMode ? framesToTimecode(lenFrames, srcFps) : `${lenFrames}f`;
                 durLabel.textContent =
-                    `${Math.round(srcFps)}fps · ${cur} · in ${fmtFrame(ci)} / out ${fmtFrame(co)}${total}`;
+                    `${Math.round(srcFps)}fps · ${cur}\nin ${fmtFrame(ci)} · out ${fmtFrame(co)} · len ${len}`;
             } else if (isVideo) {
                 // Pre-probe: no fps yet. The bar/handles/playhead still work in seconds; the
                 // fields show seconds until the frame numbers arrive.
@@ -5020,11 +5033,6 @@ function openEditModal(node, kind, index) {
             };
             cueHome = () => { stopPlayback(); cueActive() ? seekCursorFrame(0) : seekCursorSec(0); };
             cueEnd = () => { stopPlayback(); cueActive() ? seekCursorFrame(lastF()) : seekCursorSec(duration || 0); };
-            // The In/Out guide buttons use the editable window length (defaults to 15s).
-            const winLen = () => {
-                const v = winLenInput ? parseFloat(winLenInput.value) : NaN;
-                return (Number.isFinite(v) && v > 0) ? v : 15;
-            };
             cueSet15s = () => {
                 stopPlayback();
                 if (trim && duration) setTrim(trim[0], Math.min(trim[0] + winLen(), duration));
@@ -5237,36 +5245,45 @@ function openEditModal(node, kind, index) {
                 return b;
             };
 
-            mkBtn("⏮ In", "Move the playhead to the In point  (Shift+I)", () => cueJumpIn());
-            mkBtn("◀ −1", "Step the playhead back one frame  (←, Shift+← = 10)", () => cueStep(-1), true);
-            mkBtn("+1 ▶", "Step the playhead forward one frame  (→, Shift+→ = 10)", () => cueStep(1), true);
-            mkBtn("Out ⏭", "Move the playhead to the Out point  (Shift+O)", () => cueJumpOut());
+            L.jumpIn = mkBtn("⏮ In", "Move the playhead to the In point  (Shift+I)", () => cueJumpIn());
+            L.stepBack = mkBtn("◀ −1", "Step the playhead back one frame  (←, Shift+← = 10)", () => cueStep(-1), true);
+            L.stepFwd = mkBtn("+1 ▶", "Step the playhead forward one frame  (→, Shift+→ = 10)", () => cueStep(1), true);
+            L.jumpOut = mkBtn("Out ⏭", "Move the playhead to the Out point  (Shift+O)", () => cueJumpOut());
             const gap1 = document.createElement("span");
             gap1.className = "mmrp-trim-gap";
             stepRow.appendChild(gap1);
             // Marking works on the playhead in seconds even before the probe reports fps
             // (it snaps to a frame once fps is known); only stepping truly needs the fps.
-            mkBtn("Set In", "Set the In point at the playhead  (I)", () => cueSetIn());
-            mkBtn("Set Out", "Set the Out point at the playhead  (O)", () => cueSetOut());
+            L.setIn = mkBtn("Set In", "Set the In point at the playhead  (I)", () => cueSetIn());
+            L.setOut = mkBtn("Set Out", "Set the Out point at the playhead  (O)", () => cueSetOut());
 
             const spacer = document.createElement("span");
             spacer.className = "mmrp-trim-spacer";
             stepRow.appendChild(spacer);
-            // A customizable window-length guide: type the seconds (default 15), then In sets
-            // the Out point that far after In, Out sets the In point that far before Out.
+            // A customizable window-length guide: type the seconds (default 15); "Ns from In" sets
+            // the Out point that far after In, "Ns from Out" sets the In point that far before Out.
             winLenInput = document.createElement("input");
             winLenInput.className = "mmrp-trim-num mmrp-win-len";
             winLenInput.type = "number";
             winLenInput.min = "0.1";
             winLenInput.step = "1";
             winLenInput.value = "15";
-            winLenInput.title = "Window length in seconds for the In / Out buttons";
+            winLenInput.title = "Window length in seconds for the In / Out guide buttons";
             winLenInput.addEventListener("keydown", (e) => e.stopPropagation());
             stepRow.appendChild(winLenInput);
-            mkBtn("In", "Set the Out point this many seconds after the In point (a guide, not a limit)",
+            L.winIn = mkBtn("15s from In", "Set the Out point this many seconds after the In point (a guide, not a limit)",
                   () => cueSet15s());
-            mkBtn("Out", "Set the In point this many seconds before the Out point (a guide, not a limit)",
+            L.winOut = mkBtn("15s from Out", "Set the In point this many seconds before the Out point (a guide, not a limit)",
                   () => cueSet15sOut());
+            // Keep the guide labels showing the current window length.
+            const syncWinBtns = () => {
+                const n = winLen();
+                L.winIn.textContent = `${n}s from In`;
+                L.winOut.textContent = `${n}s from Out`;
+            };
+            syncWinBtns();
+            winLenInput.addEventListener("input", syncWinBtns);
+            L.winLen = winLenInput; L.tcBtn = tcBtn; L.stepRow = stepRow;
 
             modal.appendChild(stepRow);
 
@@ -5332,6 +5349,7 @@ function openEditModal(node, kind, index) {
         playPauseBtn.title = "Play / pause from the playhead";
         playPauseBtn.textContent = PLAY_GLYPH;
         row.appendChild(playPauseBtn);
+        L.play = playPauseBtn;   // the video relayout moves this into the transport, between -1/+1
 
         const origBtn = document.createElement("button");
         origBtn.className = "mmrp-btn";
@@ -5479,6 +5497,34 @@ function openEditModal(node, kind, index) {
     // Initial disabled state for the Clear pair — the sync calls above ran before
     // the buttons existed. (Clear trim re-syncs again on loadedmetadata.)
     syncClears();
+
+    // ---- LAYOUT: the "everything under the video" trim editor (video only) ----
+    // Regroup the rows built above - which live in different block scopes, so their elements were
+    // stashed on L as they were made - into the stacked design: crop/rotate/scale above the video,
+    // the two full-width timelines under it, then In · transport · Out, Set In · info · Set Out,
+    // the seconds-window row, options, and Preview. Pure DOM re-parenting; no behaviour changes.
+    if (kind === "video" && wantsTrim && L.barCol) {
+        for (const sel of [".mmrp-aspect-row", ".mmrp-edit-row", ".mmrp-scale-row"]) {
+            const r = modal.querySelector(sel);
+            if (r) modal.insertBefore(r, stage);   // crop / rotate / scale move above the video
+        }
+        const mkRow = (cls, kids) => {
+            const d = document.createElement("div");
+            d.className = cls;
+            for (const k of kids) if (k) d.appendChild(k);
+            return d;
+        };
+        const transport = mkRow("mmrp-tl-transport", [L.jumpIn, L.stepBack, L.play, L.stepFwd, L.jumpOut]);
+        const timelineRow = mkRow("mmrp-tl-timeline", [L.barCol]);
+        const navRow = mkRow("mmrp-tl-nav", [L.inNum, transport, L.outNum]);
+        const setRow = mkRow("mmrp-tl-set", [L.setIn, L.durLabel, L.setOut]);
+        const winRow = mkRow("mmrp-tl-window", [L.winIn, L.winLen, L.winOut]);
+        const optRow = mkRow("mmrp-tl-opts", [L.tcBtn, L.clearTrim]);
+        const previewRow = modal.querySelector(".mmrp-play-row");
+        for (const r of [timelineRow, navRow, setRow, winRow, optRow]) modal.insertBefore(r, previewRow);
+        if (L.trimRow) L.trimRow.remove();   // the original trim + cue rows are now empty shells
+        if (L.stepRow) L.stepRow.remove();
+    }
 
     // ---- footer ----
     const footer = document.createElement("div");
