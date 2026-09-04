@@ -4846,10 +4846,15 @@ function openEditModal(node, kind, index) {
         bar.className = "mmrp-trim-bar";
         // A filmstrip of frame thumbnails behind the detail bar (video), spanning the zoom window,
         // so you can see WHAT is where you scrub. Extracted client-side, debounced on zoom/pan.
-        let filmstrip = null;
+        let filmstrip = null, filmTrack = null;
         if (isVideo) {
             filmstrip = document.createElement("div");
             filmstrip.className = "mmrp-filmstrip";
+            // The thumbnails live on an inner track that is slid/scaled for the interim reframe,
+            // while the outer filmstrip stays put and clips it.
+            filmTrack = document.createElement("div");
+            filmTrack.className = "mmrp-film-track";
+            filmstrip.appendChild(filmTrack);
             bar.appendChild(filmstrip);
         }
         const span = document.createElement("div");
@@ -5000,6 +5005,20 @@ function openEditModal(node, kind, index) {
                 setTimeout(finish, 700);   // some seeks never fire 'seeked'; do not hang the strip
                 thumbVid.currentTime = clamp01(t, 0, Math.max(0, (duration || 0) - 0.03));
             });
+            // The [start,end] the CURRENT thumbnails were extracted for. While the overview is
+            // dragged, the real (slow) extract is debounced, so give instant feedback by sliding /
+            // scaling the existing strip from that window to the live one - a smooth "the detail is
+            // following me" until the accurate frames land.
+            let filmWindow = null;
+            const reframeFilmstrip = () => {
+                if (!filmTrack || !filmWindow || !duration) return;
+                const w0 = filmWindow[1] - filmWindow[0], w = view[1] - view[0];
+                if (w0 <= 0 || w <= 0) { filmTrack.style.transform = "none"; return; }
+                const a = w0 / w;                       // how much the window shrank -> zoom
+                const b = (filmWindow[0] - view[0]) / w; // pan, as a fraction of the bar width
+                filmTrack.style.transformOrigin = "left center";
+                filmTrack.style.transform = `translateX(${b * 100}%) scaleX(${a})`;
+            };
             const extractFilmstrip = async () => {
                 if (!filmstrip || !duration || !thumbVid.videoWidth) return;
                 const token = ++filmToken;
@@ -5015,16 +5034,19 @@ function openEditModal(node, kind, index) {
                     if (token !== filmToken || !thumbVid.videoWidth) return;
                     thumbCanvas.width = thumbW; thumbCanvas.height = THUMB_H;
                     thumbCtx.drawImage(thumbVid, 0, 0, thumbW, THUMB_H);
-                    let img = filmstrip.children[i];
-                    if (!img) { img = document.createElement("img"); img.className = "mmrp-film-frame"; filmstrip.appendChild(img); }
+                    let img = filmTrack.children[i];
+                    if (!img) { img = document.createElement("img"); img.className = "mmrp-film-frame"; filmTrack.appendChild(img); }
                     img.src = thumbCanvas.toDataURL("image/jpeg", 0.6);
                     img.style.left = `${(i / N) * 100}%`;
                     img.style.width = `${100 / N}%`;
                 }
-                while (filmstrip.children.length > N) filmstrip.lastChild.remove();
+                while (filmTrack.children.length > N) filmTrack.lastChild.remove();
+                filmWindow = [vs, ve];             // the strip now represents this window...
+                filmTrack.style.transform = "none"; // ...so drop the interim slide/scale
             };
             let filmTimer = null;
             scheduleFilmstrip = () => {
+                reframeFilmstrip();   // instant: slide/scale the current strip to the live window
                 clearTimeout(filmTimer);
                 filmTimer = setTimeout(extractFilmstrip, 200);
             };

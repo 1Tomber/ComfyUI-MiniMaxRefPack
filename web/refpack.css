@@ -793,6 +793,11 @@
     background: #0a0a0a;
     pointer-events: none;
 }
+.mmrp-film-track {
+    position: absolute;
+    inset: 0;
+    transform-origin: left center;   /* slid/scaled for the interim reframe on zoom/pan */
+}
 .mmrp-film-frame {
     position: absolute;
     top: 0;
