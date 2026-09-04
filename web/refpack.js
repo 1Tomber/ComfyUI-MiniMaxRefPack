@@ -4356,6 +4356,8 @@ function openEditModal(node, kind, index) {
     let clearAspectActive = () => {}; // deselect all crop-ratio presets + the custom field
     let croppedView = false;          // "Cropped view" zooms the preview to the crop (+ padding)
     let applyCroppedView = () => {};  // (re)apply that zoom - assigned in the crop-layer block
+    let cropViewport = null;          // wraps media + crop layer; its LAYOUT box is the un-rotated
+                                      // source extent, so "Fit inside" clips the rotated frame to it
     let mediaW = 0;
     let mediaH = 0;
     const r2 = (v) => Math.round(v * 100) / 100;
@@ -4391,10 +4393,11 @@ function openEditModal(node, kind, index) {
             const fit = Math.min(1, mediaH / mediaW, mediaW / mediaH) || 1;
             mediaWrap.style.transform += ` scale(${fit})`;
         }
-        // "Fit inside" clips the overhang to the source's extent, which is what the
-        // server does with rotate_expand: false. Showing the overhang while the node
-        // would drop it is the same class of lie as cropping before rotating.
-        mediaWrap.style.clipPath = (!expand && rotate) ? "inset(0)" : "";
+        // "Fit inside" clips the overhang to the source's extent, which is what the server does
+        // with rotate_expand: false. The viewport's LAYOUT box is the un-rotated media (transforms
+        // do not change it), so clipping there = clipping the rotated frame to the source box.
+        // (A clip-path on the rotated wrap itself rotates WITH it and does nothing.)
+        if (cropViewport) cropViewport.style.overflow = (!expand && rotate) ? "hidden" : "";
     };
 
     const overlay = document.createElement("div");
@@ -4470,6 +4473,8 @@ function openEditModal(node, kind, index) {
         viewport.appendChild(mediaWrap);
         viewport.appendChild(layer);
         cropLayer = layer;
+        cropViewport = viewport;   // for applyOrientation's Fit-inside clip
+        applyOrientation();        // re-run now that the clip host exists (fit inside)
 
         const CROP_PAD = 0.12;
         applyCroppedView = () => {
@@ -4588,6 +4593,10 @@ function openEditModal(node, kind, index) {
             if (w > 64 && h > 64 && srcW > 0 && srcH > 0) {
                 const cw = Math.min(1, w / srcW), ch = Math.min(1, h / srcH);
                 crop = [(1 - cw) / 2, (1 - ch) / 2, cw, ch];
+                // A pixel size also sets the output scale, so the emitted resolution matches it
+                // (capped at the source - it never upscales).
+                maxEdge = Math.min(Math.max(srcW, srcH), Math.round(Math.max(w, h)));
+                syncScale();
             } else {
                 crop = setRectAspect(crop, ratio, mediaW, mediaH);
             }
