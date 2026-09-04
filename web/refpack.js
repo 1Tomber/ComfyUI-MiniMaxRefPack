@@ -4644,18 +4644,36 @@ function openEditModal(node, kind, index) {
         angle.max = "180";
         angle.step = "0.5";
         angle.title = "Free rotation. Snaps to the quarter turns, which are lossless.";
-        const angleOut = document.createElement("span");
-        angleOut.className = "mmrp-angle-out";
+        // An editable angle field beside the slider - typing an exact degree is easier than
+        // dragging to it.
+        const angleNum = document.createElement("input");
+        angleNum.type = "number";
+        angleNum.className = "mmrp-trim-num mmrp-angle-num";
+        angleNum.min = "-180";
+        angleNum.max = "180";
+        angleNum.step = "0.5";
+        angleNum.title = "Rotation angle in degrees";
+        angleNum.addEventListener("keydown", (e) => e.stopPropagation());
+        const angleDeg = document.createElement("span");
+        angleDeg.className = "mmrp-angle-out";
+        angleDeg.textContent = "°";
         const syncAngle = () => {
-            angleOut.textContent = `${rotate ? (rotate > 180 ? rotate - 360 : rotate).toFixed(1) : "0.0"}°`;
             const shown = rotate > 180 ? rotate - 360 : rotate;
             if (Number(angle.value) !== shown) angle.value = String(shown);
+            if (document.activeElement !== angleNum) angleNum.value = (rotate ? shown : 0).toFixed(1);
             // Only a free angle can spill outside the source, so the fit toggle is dead
             // weight on a quarter turn and says so rather than sitting there inert.
             const free = !!rotate && Math.abs((rotate % 90)) > 1e-6;
             fitBox.disabled = !free;
             fitRow.classList.toggle("mmrp-dim", !free);
         };
+        angleNum.addEventListener("change", () => {
+            stopPlayback();
+            rotate = snapAngle(angleNum.value);
+            applyOrientation();
+            syncAngle();
+            syncClears();
+        });
         angle.oninput = () => {
             stopPlayback();
             // The crop rect is NOT rotated with a free angle. A quarter turn maps the
@@ -4670,7 +4688,8 @@ function openEditModal(node, kind, index) {
         };
         syncAngleRef = syncAngle;
         orow.appendChild(angle);
-        orow.appendChild(angleOut);
+        orow.appendChild(angleNum);
+        orow.appendChild(angleDeg);
 
         const fitRow = document.createElement("label");
         fitRow.className = "mmrp-fit";
@@ -4690,7 +4709,7 @@ function openEditModal(node, kind, index) {
         orow.appendChild(fitRow);
 
         clearRotateBtn = document.createElement("button");
-        clearRotateBtn.className = "mmrp-btn mmrp-clear-btn";
+        clearRotateBtn.className = "mmrp-btn mmrp-clear-btn";   // margin-left:auto -> far right (flex row)
         clearRotateBtn.textContent = "Clear rotation";
         clearRotateBtn.onclick = () => {
             stopPlayback();

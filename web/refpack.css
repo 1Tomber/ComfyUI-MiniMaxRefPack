@@ -546,6 +546,7 @@
 .mmrp-crop-se { right: -6px; bottom: -6px; cursor: nwse-resize; }
 
 .mmrp-aspect-row,
+.mmrp-edit-row,
 .mmrp-trim-row,
 .mmrp-play-row {
     display: flex;
@@ -931,11 +932,15 @@
 }
 
 .mmrp-angle-out {
-    min-width: 46px;
-    text-align: right;
+    min-width: 12px;
+    text-align: left;
     color: #aaa;
     font-variant-numeric: tabular-nums; /* the number must not jitter while dragging */
     font-size: 12px;
+}
+.mmrp-angle-num {
+    width: 56px;
+    flex: 0 0 auto;
 }
 
 .mmrp-fit {
