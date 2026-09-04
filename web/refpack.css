@@ -542,6 +542,14 @@
     gap: 6px;
     flex-wrap: wrap;
 }
+/* The play / pause toggle: a fixed-width square so swapping ▶ for ⏸ never nudges the row. */
+.mmrp-play-toggle {
+    flex: 0 0 auto;
+    min-width: 30px;
+    text-align: center;
+    font-size: 13px;
+    line-height: 1;
+}
 
 .mmrp-aspect-row .mmrp-btn.mmrp-active {
     background: #e0e0e0;

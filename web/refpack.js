@@ -4618,7 +4618,8 @@ function openEditModal(node, kind, index) {
     let cueJumpOut = () => {};     // playhead -> Out (last kept frame)
     let cueHome = () => {};        // playhead -> first frame
     let cueEnd = () => {};         // playhead -> last frame
-    let cueSet15s = () => {};      // 15s window from In
+    let cueSet15s = () => {};      // Out = In + 15s ("15 In")
+    let cueSet15sOut = () => {};   // In = Out - 15s ("15 Out")
     let cueTogglePlay = () => {};  // Space (assigned in the playback block)
     let cueTrackPlayhead = () => {};// called on each playback tick to move the playhead
     let cueActive = () => false;   // are the frame cue controls live (video + fps + trimmable)?
@@ -4797,6 +4798,10 @@ function openEditModal(node, kind, index) {
                 stopPlayback();
                 if (trim && duration) setTrim(trim[0], Math.min(trim[0] + 15, duration));
             };
+            cueSet15sOut = () => {
+                stopPlayback();
+                if (trim && duration) setTrim(Math.max(0, trim[1] - 15), trim[1]);
+            };
             cueTrackPlayhead = () => {
                 cursor = media.currentTime;
                 if (playhead && duration) {
@@ -4929,8 +4934,10 @@ function openEditModal(node, kind, index) {
             const spacer = document.createElement("span");
             spacer.className = "mmrp-trim-spacer";
             stepRow.appendChild(spacer);
-            mkBtn("15s", "Set a 15s window from the In point (a guide, not a limit)",
+            mkBtn("15 In", "Set the Out point 15s after the In point (a guide, not a limit)",
                   () => cueSet15s());
+            mkBtn("15 Out", "Set the In point 15s before the Out point (a guide, not a limit)",
+                  () => cueSet15sOut());
 
             modal.appendChild(stepRow);
 
@@ -4977,6 +4984,17 @@ function openEditModal(node, kind, index) {
         label.textContent = "Preview";
         row.appendChild(label);
 
+        // A plain play / pause: plays from where the playhead already is and PAUSES IN PLACE
+        // (keeps the position), so you can play a bit, stop, scrub, and play on to fine-tune a
+        // cut. Both audio and video, alongside the socket-preview buttons and (audio) the
+        // native controls bar - none of which it replaces.
+        const PLAY_GLYPH = "▶", PAUSE_GLYPH = "⏸";
+        const playPauseBtn = document.createElement("button");
+        playPauseBtn.className = "mmrp-btn mmrp-play-toggle";
+        playPauseBtn.title = "Play / pause from the playhead";
+        playPauseBtn.textContent = PLAY_GLYPH;
+        row.appendChild(playPauseBtn);
+
         const origBtn = document.createElement("button");
         origBtn.className = "mmrp-btn";
         const editBtn = document.createElement("button");
@@ -4989,7 +5007,7 @@ function openEditModal(node, kind, index) {
         row.appendChild(editBtn);
         modal.appendChild(row);
 
-        let mode = null;      // null | "original" | "edit"
+        let mode = null;      // null | "original" | "edit" | "play"
         let stopAt = null;
         let raf = null;       // out-point watchdog; timeupdate alone fires every ~250ms,
                               // which overshoots the out-point by a visible quarter second.
@@ -5024,9 +5042,14 @@ function openEditModal(node, kind, index) {
             }
         };
 
+        // The glyph follows the ELEMENT's real state, not just our mode, so it stays honest
+        // when playback is toggled by the native audio controls, the Space key, or the clip
+        // ending - not only by this button.
+        const syncPlayPause = () => { playPauseBtn.textContent = media.paused ? PLAY_GLYPH : PAUSE_GLYPH; };
         const sync = () => {
             origBtn.textContent = mode === "original" ? "Stop" : ORIG;
             editBtn.textContent = mode === "edit" ? "Stop" : EDIT;
+            syncPlayPause();
         };
 
         stopPlayback = () => {
@@ -5054,9 +5077,17 @@ function openEditModal(node, kind, index) {
                 frame(true);
                 media.currentTime = trim ? trim[0] : 0;
                 stopAt = trim ? trim[1] : null;
-            } else {
+            } else if (next === "original") {
                 media.currentTime = 0;
                 stopAt = null;
+            } else {
+                // "play": a plain play from wherever the playhead sits, to the end - no reframe,
+                // no out-point. If it is parked at the very end, restart from the in-point so
+                // the button always does something.
+                stopAt = null;
+                if (duration && media.currentTime >= duration - 0.03) {
+                    media.currentTime = trim ? trim[0] : 0;
+                }
             }
             media.muted = false;   // the point of pressing play is to hear it too
             mlog("preview", { file: ref.file, mode: next,
@@ -5078,12 +5109,20 @@ function openEditModal(node, kind, index) {
 
         origBtn.onclick = () => start("original");
         editBtn.onclick = () => start("edit");
+        playPauseBtn.onclick = () => {
+            if (media.paused) start("play");        // play on from the playhead
+            else if (mode) stopPlayback();          // pause our own playback in place
+            else media.pause();                     // was playing via the native audio bar
+        };
         // Space toggles the edit preview (plays the trimmed span).
         cueTogglePlay = () => start("edit");
         media.addEventListener("timeupdate", () => {
             if (stopAt !== null && media.currentTime >= stopAt) stopPlayback();
         });
         media.addEventListener("ended", () => stopPlayback());
+        // Keep the play/pause glyph honest however playback was toggled.
+        for (const ev of ["play", "pause", "ended"]) media.addEventListener(ev, syncPlayPause);
+        syncPlayPause();
     }
 
     // For an image, size math only needs the natural dimensions.
