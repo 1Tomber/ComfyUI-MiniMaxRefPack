@@ -4830,7 +4830,9 @@ function openEditModal(node, kind, index) {
             mlog("edit_cleared", { file: ref.file, what: "rotation" });
             rotate = 0;
             flip = null;
-            expand = true;
+            // Keep the "Fit inside" preference: clearing the angle disables the checkbox (nothing to
+            // fit at 0deg) but must NOT silently flip `expand`, or re-rotating comes back with fit
+            // inside off while the box still looks checked.
             applyOrientation();
             syncAngleRef();
             syncCropRect();
