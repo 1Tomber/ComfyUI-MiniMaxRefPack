@@ -4865,16 +4865,23 @@ function openEditModal(node, kind, index) {
         bar.className = "mmrp-trim-bar";
         // A filmstrip of frame thumbnails behind the detail bar (video), spanning the zoom window,
         // so you can see WHAT is where you scrub. Extracted client-side, debounced on zoom/pan.
-        let filmstrip = null, filmTrack = null;
+        let filmstrip = null, filmTrack = null, dimLeft = null, dimRight = null;
         if (isVideo) {
             filmstrip = document.createElement("div");
             filmstrip.className = "mmrp-filmstrip";
-            // The thumbnails live on an inner track that is slid/scaled for the interim reframe,
-            // while the outer filmstrip stays put and clips it.
+            // The thumbnails live on an inner track; each is PINNED at its own time-point (no
+            // horizontal stretch) so a zoom/pan just re-places them, with gaps between.
             filmTrack = document.createElement("div");
             filmTrack.className = "mmrp-film-track";
             filmstrip.appendChild(filmTrack);
             bar.appendChild(filmstrip);
+            // Dim the bar OUTSIDE [In, Out] so the selection reads at a glance.
+            dimLeft = document.createElement("div");
+            dimLeft.className = "mmrp-trim-dim";
+            dimRight = document.createElement("div");
+            dimRight.className = "mmrp-trim-dim";
+            bar.appendChild(dimLeft);
+            bar.appendChild(dimRight);
         }
         const span = document.createElement("div");
         span.className = "mmrp-trim-span";
@@ -5024,19 +5031,18 @@ function openEditModal(node, kind, index) {
                 setTimeout(finish, 700);   // some seeks never fire 'seeked'; do not hang the strip
                 thumbVid.currentTime = clamp01(t, 0, Math.max(0, (duration || 0) - 0.03));
             });
-            // The [start,end] the CURRENT thumbnails were extracted for. While the overview is
-            // dragged, the real (slow) extract is debounced, so give instant feedback by sliding /
-            // scaling the existing strip from that window to the live one - a smooth "the detail is
-            // following me" until the accurate frames land.
-            let filmWindow = null;
-            const reframeFilmstrip = () => {
-                if (!filmTrack || !filmWindow || !duration) return;
-                const w0 = filmWindow[1] - filmWindow[0], w = view[1] - view[0];
-                if (w0 <= 0 || w <= 0) { filmTrack.style.transform = "none"; return; }
-                const a = w0 / w;                       // how much the window shrank -> zoom
-                const b = (filmWindow[0] - view[0]) / w; // pan, as a fraction of the bar width
-                filmTrack.style.transformOrigin = "left center";
-                filmTrack.style.transform = `translateX(${b * 100}%) scaleX(${a})`;
+            let thumbW = 40;
+            const frameTimes = [];   // the time each thumbnail represents, parallel to filmTrack.children
+            // Re-place every thumbnail at its OWN time-point in the current window (fixed width, no
+            // horizontal stretch). A zoom/pan just re-places them - gaps open up between them and
+            // frames outside the window slide off and are clipped. Instant, so the strip follows the
+            // drag; the accurate re-extract lands on settle.
+            const positionFrames = () => {
+                if (!filmTrack || !duration || view[1] <= view[0]) return;
+                const kids = filmTrack.children;
+                for (let i = 0; i < kids.length; i++) {
+                    kids[i].style.left = `calc(${winFrac(frameTimes[i], view[0], view[1]) * 100}% - ${thumbW / 2}px)`;
+                }
             };
             const extractFilmstrip = async () => {
                 if (!filmstrip || !duration || !thumbVid.videoWidth) return;
@@ -5044,35 +5050,48 @@ function openEditModal(node, kind, index) {
                 const barW = bar.clientWidth;
                 if (!barW) return;
                 const aspect = thumbVid.videoWidth / thumbVid.videoHeight || 16 / 9;
-                const thumbW = Math.max(20, Math.round(THUMB_H * aspect));
-                const N = Math.min(16, Math.max(3, Math.round(barW / thumbW)));
+                thumbW = Math.max(20, Math.round(THUMB_H * aspect));
                 const [vs, ve] = view;
+                const viewW = ve - vs;
+                if (viewW <= 0) return;
+                // Extract a range WIDER than the window - a buffer on each side, clamped to the clip -
+                // so a pan or a window-length change already has frames just outside the visible part.
+                const margin = viewW * 0.75;
+                const es = Math.max(0, vs - margin), ee = Math.min(duration, ve + margin);
+                const inView = Math.max(3, Math.round(barW / thumbW));   // density to tile the window
+                const N = Math.min(48, Math.max(inView, Math.round((inView * (ee - es)) / viewW)));
                 for (let i = 0; i < N; i++) {
                     if (token !== filmToken) return;   // a newer window superseded this run
-                    await seekThumb(vs + ((i + 0.5) / N) * (ve - vs));
+                    const t = es + ((i + 0.5) / N) * (ee - es);
+                    await seekThumb(t);
                     if (token !== filmToken || !thumbVid.videoWidth) return;
                     thumbCanvas.width = thumbW; thumbCanvas.height = THUMB_H;
                     thumbCtx.drawImage(thumbVid, 0, 0, thumbW, THUMB_H);
                     let img = filmTrack.children[i];
                     if (!img) { img = document.createElement("img"); img.className = "mmrp-film-frame"; filmTrack.appendChild(img); }
                     img.src = thumbCanvas.toDataURL("image/jpeg", 0.6);
-                    img.style.left = `${(i / N) * 100}%`;
-                    img.style.width = `${100 / N}%`;
+                    img.style.width = `${thumbW}px`;
+                    frameTimes[i] = t;
+                    img.style.left = `calc(${winFrac(t, view[0], view[1]) * 100}% - ${thumbW / 2}px)`;
                 }
-                while (filmTrack.children.length > N) filmTrack.lastChild.remove();
-                filmWindow = [vs, ve];             // the strip now represents this window...
-                filmTrack.style.transform = "none"; // ...so drop the interim slide/scale
+                while (filmTrack.children.length > N) { filmTrack.lastChild.remove(); frameTimes.pop(); }
             };
             let filmTimer = null;
             scheduleFilmstrip = () => {
-                reframeFilmstrip();   // instant: slide/scale the current strip to the live window
+                positionFrames();   // instant: re-place the existing frames at their points
                 clearTimeout(filmTimer);
                 filmTimer = setTimeout(extractFilmstrip, 200);
             };
             thumbVid.addEventListener("loadedmetadata", () => scheduleFilmstrip());
+            // The modal is resizable, so the bar width (and the tiling density) changes; re-place
+            // instantly and re-extract, debounced.
+            const barResizeObs = (typeof ResizeObserver === "function")
+                ? new ResizeObserver(() => scheduleFilmstrip()) : null;
+            if (barResizeObs) barResizeObs.observe(bar);
             stopFilmstrip = () => {
                 clearTimeout(filmTimer);
                 filmToken++;               // supersede any in-flight extract
+                if (barResizeObs) barResizeObs.disconnect();
                 thumbVid.removeAttribute("src");
             };
         }
@@ -5086,6 +5105,11 @@ function openEditModal(node, kind, index) {
             span.style.left = `${sl * 100}%`;
             span.style.width = `${Math.max(0, sr - sl) * 100}%`;
             span.style.display = svis ? "" : "none";
+            if (dimLeft) {   // dim the bar outside [In, Out]
+                dimLeft.style.width = `${sl * 100}%`;
+                dimRight.style.left = `${sr * 100}%`;
+                dimRight.style.width = `${Math.max(0, 1 - sr) * 100}%`;
+            }
             const [inF, inSide] = pinToBar(trim[0], view[0], view[1]);
             const [outF, outSide] = pinToBar(trim[1], view[0], view[1]);
             inHandle.style.left = `calc(${inF * 100}% - 5px)`;

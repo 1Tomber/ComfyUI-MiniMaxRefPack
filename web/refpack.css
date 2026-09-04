@@ -838,9 +838,20 @@
     position: absolute;
     top: 0;
     height: 100%;
+    width: auto;           /* fixed px width set inline; pinned to its time-point, never stretched */
     object-fit: cover;
     opacity: 0.9;
     pointer-events: none;
+}
+/* Dim the detail bar outside [In, Out] so the selection reads at a glance. */
+.mmrp-trim-dim {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    background: rgba(0, 0, 0, 0.35);
+    pointer-events: none;
+    z-index: 0;
 }
 
 /* A small fixed gap separating the transport buttons from the Set In/Set Out pair. */
