@@ -131,5 +131,18 @@ const R = (images = [], videos = [], audios = []) => ({
     check("empty prompt builds nothing", n._mmrpBody.tagOverlay.childNodes.length === 0);
 })();
 
+// 6. a trailing newline appends a zero-width sentinel so the div keeps the empty last line the
+//    textarea shows; without it the overlay is shorter and the tints drift once the box scrolls.
+(() => {
+    const withNl = nodeWith("a <Picture 1> b\n\n", R(["a.png"]));
+    syncTagOverlay(withNl);
+    check("trailing newline appends the sentinel",
+          overlayText(withNl._mmrpBody.tagOverlay) === "a <Picture 1> b\n\n\u200b");
+    const noNl = nodeWith("a <Picture 1> b", R(["a.png"]));
+    syncTagOverlay(noNl);
+    check("no trailing newline leaves the prose byte-for-byte",
+          overlayText(noNl._mmrpBody.tagOverlay) === "a <Picture 1> b");
+})();
+
 console.log(failures ? `\n${failures} overlay check(s) FAILED` : "\nall overlay checks pass");
 process.exit(failures ? 1 : 0);

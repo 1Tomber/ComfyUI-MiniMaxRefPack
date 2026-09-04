@@ -3425,6 +3425,13 @@ function syncTagOverlay(node) {
         cursor = t.end;
     }
     if (cursor < text.length) overlay.appendChild(document.createTextNode(text.slice(cursor)));
+    // A <div> with pre-wrap drops the empty final line that a <textarea> keeps after a trailing
+    // newline, so the overlay ends up shorter than the textarea and, once the box scrolls, the
+    // tints drift below the glyphs (worse the more trailing blank lines there are). When the text
+    // ends on a newline, a zero-width sentinel forces that last line to render, so the two boxes
+    // have the identical height and scroll. Only one is ever needed - the div drops just the final
+    // line, whatever the number of trailing newlines.
+    if (text.endsWith("\n")) overlay.appendChild(document.createTextNode("\u200b"));
     overlay.scrollTop = el.scrollTop;
     overlay.scrollLeft = el.scrollLeft;
 }
