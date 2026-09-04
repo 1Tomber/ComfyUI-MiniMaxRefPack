@@ -4381,55 +4381,57 @@ function openEditModal(node, kind, index) {
     // media.py applies it in.
     const applyOrientation = () => {
         if (!mediaWrap) return;
-        const parts = [];
-        if (rotate) parts.push(`rotate(${rotate}deg)`);
-        if (flip) parts.push(`scale(${flip.includes("h") ? -1 : 1}, ${flip.includes("v") ? -1 : 1})`);
-        mediaWrap.style.transform = parts.join(" ");
-        // A quarter turn (90/270) TRANSPOSES the oriented frame: the server's output swaps to a
-        // portrait frame and the crop is a fraction of THAT. So the viewport takes the swapped
-        // aspect (below) and the rotated media must FILL it - scale by the long/short ratio, which
-        // covers the letterbox object-fit leaves in the swapped wrapper. Now the crop rect (a
-        // fraction of the viewport) is the same fraction the node crops, and it reads portrait.
-        const quarter = Math.abs((rotate % 180) - 90) < 1e-6;
-        if (quarter && mediaW && mediaH) {
-            const fill = Math.max(mediaW / mediaH, mediaH / mediaW);
-            mediaWrap.style.transform += ` scale(${fill})`;
-        }
-        // Any multiple of 90 (0/90/180/270) is an exact transpose on the server with NO fill; the
-        // `quarter` flag above is only 90/270 (the aspect-swap), so 180 needs its own check here.
-        const q90 = (((rotate || 0) % 90) + 90) % 90;
-        const isQuarterTurn = q90 < 1e-6 || q90 > 90 - 1e-6;
-        // "Fit inside" (no black): scale the rotated frame UP so it covers the KEPT crop and clip
-        // the overhang at the viewport - whose LAYOUT box is the un-rotated media (transforms don't
-        // change it), i.e. the source extent. The fill is CROP-AWARE (mirrors _fill_scale on the
-        // server): the image turns behind a fixed crop and zooms only as much as that crop needs, so
-        // an interior crop barely zooms. Quarter turns are exact (lossless transpose, no fill) - the
-        // server skips fill for them, so the preview must too or a 90° turn would over-zoom here.
-        const wantFill = !expand && rotate && !isQuarterTurn;
-        if (wantFill) {
-            const rad = rotate * Math.PI / 180;
-            const cos = Math.cos(rad), sin = Math.sin(rad);
-            const W = mediaW || 1, H = mediaH || 1;
+        const W = mediaW || 1, H = mediaH || 1;
+        const rot = rotate || 0;
+        const rad = rot * Math.PI / 180;
+        const acos = Math.abs(Math.cos(rad)), asin = Math.abs(Math.sin(rad));
+        const q90 = ((rot % 90) + 90) % 90;
+        const isQuarterTurn = q90 < 1e-6 || q90 > 90 - 1e-6;   // 0 / 90 / 180 / 270
+        const swap = Math.abs((rot % 180) - 90) < 1e-6;        // 90 / 270: axes transpose
+
+        // The ORIENTED FRAME is the frame media.py crops - the crop rect is a fraction of THIS, so
+        // the viewport must equal it or the rect the user drags is not the region the node emits.
+        //   - no rotation / 180:      the source box, unscaled.
+        //   - quarter turn 90/270:    the transposed box; the rotated media FILLS it (long/short).
+        //   - free angle, "fit inside" (expand=false): the source box; the media zooms UP only as
+        //     much as the crop needs to stay black-free (the straighten fill, crop-aware).
+        //   - free angle, expand=true: the rotation's BOUNDING BOX (black corners and all); the
+        //     media shrinks so the WHOLE rotated frame fits - this is what "show the whole image"
+        //     needs, and it is the box the node's expand=True crop is a fraction of.
+        let ow, oh, scale, clip;
+        if (!rot) {
+            ow = W; oh = H; scale = 1; clip = false;
+        } else if (swap) {
+            ow = H; oh = W; scale = Math.max(W / H, H / W); clip = true;
+        } else if (isQuarterTurn) {            // 180: same box, exact
+            ow = W; oh = H; scale = 1; clip = false;
+        } else if (!expand) {                  // fit inside: source box + crop-aware straighten fill
+            ow = W; oh = H; clip = true;
+            const cr = Math.cos(rad), sr = Math.sin(rad);
             const c = (crop && crop.length === 4) ? crop : [0, 0, 1, 1];
-            let f = 1;
+            scale = 1;
             for (const fx of [c[0], c[0] + c[2]]) {
                 for (const fy of [c[1], c[1] + c[3]]) {
                     const dx = fx * W - W / 2, dy = fy * H - H / 2;
-                    const ax = cos * dx + sin * dy, ay = -sin * dx + cos * dy;
-                    f = Math.max(f, 2 * Math.abs(ax) / W, 2 * Math.abs(ay) / H);
+                    const ax = cr * dx + sr * dy, ay = -sr * dx + cr * dy;
+                    scale = Math.max(scale, 2 * Math.abs(ax) / W, 2 * Math.abs(ay) / H);
                 }
             }
-            mediaWrap.style.transform += ` scale(${f})`;
+        } else {                               // expand: bounding box, media shrinks to fit it whole
+            ow = acos * W + asin * H;
+            oh = asin * W + acos * H;
+            scale = Math.max(W / ow, H / oh);
+            clip = false;
         }
+
+        const parts = [];
+        if (rot) parts.push(`rotate(${rot}deg)`);
+        if (flip) parts.push(`scale(${flip.includes("h") ? -1 : 1}, ${flip.includes("v") ? -1 : 1})`);
+        if (Math.abs(scale - 1) > 1e-9) parts.push(`scale(${scale})`);
+        mediaWrap.style.transform = parts.join(" ");
         if (cropViewport) {
-            // The viewport (and thus the crop rect it hosts) takes the ORIENTED frame's aspect:
-            // swapped for a quarter turn, the source aspect otherwise. Overflow is clipped whenever
-            // the media is scaled up past the frame - the fit-inside fill or a quarter-turn fill.
-            if (mediaW > 0 && mediaH > 0) {
-                cropViewport.style.setProperty(
-                    "--mmrp-ar", quarter ? `${mediaH} / ${mediaW}` : `${mediaW} / ${mediaH}`);
-            }
-            cropViewport.style.overflow = (wantFill || quarter) ? "hidden" : "";
+            if (mediaW > 0 && mediaH > 0) cropViewport.style.setProperty("--mmrp-ar", `${ow} / ${oh}`);
+            cropViewport.style.overflow = clip ? "hidden" : "";
         }
     };
 
