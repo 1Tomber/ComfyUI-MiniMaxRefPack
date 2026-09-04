@@ -4354,6 +4354,8 @@ function openEditModal(node, kind, index) {
     }
     let ratio = null; // aspect lock; null = free
     let clearAspectActive = () => {}; // deselect all crop-ratio presets + the custom field
+    let croppedView = false;          // "Cropped view" zooms the preview to the crop (+ padding)
+    let applyCroppedView = () => {};  // (re)apply that zoom - assigned in the crop-layer block
     let mediaW = 0;
     let mediaH = 0;
     const r2 = (v) => Math.round(v * 100) / 100;
@@ -4459,8 +4461,27 @@ function openEditModal(node, kind, index) {
             rectEl.appendChild(h);
             handles[corner] = h;
         }
-        stage.appendChild(layer);
+        // Both the media and the crop rect live in a viewport that "Cropped view" zooms into the
+        // crop (+ a little padding), so they zoom TOGETHER and stay aligned and the handles keep
+        // working (dragging into the padding grows the crop; on release the view re-fits).
+        const viewport = document.createElement("div");
+        viewport.className = "mmrp-crop-viewport";
+        stage.insertBefore(viewport, mediaWrap);
+        viewport.appendChild(mediaWrap);
+        viewport.appendChild(layer);
         cropLayer = layer;
+
+        const CROP_PAD = 0.12;
+        applyCroppedView = () => {
+            if (!croppedView) { viewport.style.transform = ""; viewport.style.transformOrigin = ""; return; }
+            const [x, y, w, h] = crop;
+            const px = Math.max(0, x - w * CROP_PAD), py = Math.max(0, y - h * CROP_PAD);
+            const pw = Math.min(1 - px, w * (1 + 2 * CROP_PAD)), ph = Math.min(1 - py, h * (1 + 2 * CROP_PAD));
+            if (pw <= 0 || ph <= 0) return;
+            const scale = Math.min(1 / pw, 1 / ph);   // fit the padded crop into the stage
+            viewport.style.transformOrigin = "0 0";
+            viewport.style.transform = `scale(${scale}) translate(${-px * 100}%, ${-py * 100}%)`;
+        };
 
         syncCropRect = () => {
             rectEl.style.left = `${crop[0] * 100}%`;
@@ -4494,6 +4515,7 @@ function openEditModal(node, kind, index) {
             const up = () => {
                 window.removeEventListener("mousemove", move);
                 window.removeEventListener("mouseup", up);
+                applyCroppedView();   // re-fit the zoomed view to the new crop (+ padding)
             };
             window.addEventListener("mousemove", move);
             window.addEventListener("mouseup", up);
@@ -4547,6 +4569,7 @@ function openEditModal(node, kind, index) {
                     crop = setRectAspect(crop, r, mediaW, mediaH);
                     syncCropRect();
                 }
+                applyCroppedView();
             };
             row.appendChild(btn);
             buttons.push(btn);
@@ -4569,11 +4592,25 @@ function openEditModal(node, kind, index) {
                 crop = setRectAspect(crop, ratio, mediaW, mediaH);
             }
             syncCropRect();
+            applyCroppedView();
         };
         customInput.addEventListener("change", applyCustomRatio);
         // Clicking back inside re-activates it (re-applies the typed ratio).
         customInput.addEventListener("focus", applyCustomRatio);
         row.appendChild(customInput);
+        // Toggle: the whole image (default) vs zoom into the crop (+ padding). The button shows
+        // the OTHER view - what clicking switches to.
+        const viewToggle = document.createElement("button");
+        viewToggle.className = "mmrp-btn mmrp-view-toggle";
+        const syncViewToggle = () => { viewToggle.textContent = croppedView ? "Whole image" : "Cropped view"; };
+        syncViewToggle();
+        viewToggle.onclick = () => {
+            stopPlayback();
+            croppedView = !croppedView;
+            syncViewToggle();
+            applyCroppedView();
+        };
+        row.appendChild(viewToggle);
         // Nothing is highlighted on open. Free IS the starting behaviour (ratio = null),
         // but showing it selected reads as a choice the user made, and then "Clear crop"
         // has nothing left to visibly clear. The highlight means "you picked a lock".
@@ -4592,6 +4629,7 @@ function openEditModal(node, kind, index) {
             ratio = null;
             clearAspectActive();
             syncCropRect();
+            applyCroppedView();
         };
         row.appendChild(clearCropBtn);
         modal.appendChild(row);

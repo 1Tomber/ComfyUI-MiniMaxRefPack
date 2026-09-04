@@ -500,6 +500,15 @@
     max-width: 100%;
 }
 
+/* Holds the media AND the crop layer so "Cropped view" can zoom both together (staying
+   aligned). Shrink-wraps the media, so the crop layer (inset:0) matches the media box. */
+.mmrp-crop-viewport {
+    position: relative;
+    max-width: 100%;
+    max-height: 100%;
+    line-height: 0;
+}
+
 /* The edit preview reframes the media inside this box: it becomes the crop's window
    (explicit size + overflow hidden), with the media absolutely placed inside it. */
 .mmrp-edit-media-wrap {
