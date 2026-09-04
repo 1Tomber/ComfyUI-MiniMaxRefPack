@@ -475,6 +475,15 @@
 
 .mmrp-edit-modal {
     width: min(720px, 94vw);
+    /* Resizable, and never taller/wider than the viewport (JS re-clamps and remembers the size
+       for the session). overflow:auto both enables the resize grip and scrolls if it is dragged
+       smaller than its content. */
+    resize: both;
+    overflow: auto;
+    min-width: 380px;
+    min-height: 320px;
+    max-width: 94vw;
+    max-height: 92vh;
 }
 
 .mmrp-edit-stage {
@@ -494,8 +503,10 @@
 .mmrp-edit-stage img,
 .mmrp-edit-stage video {
     display: block;
-    max-width: 672px;
-    max-height: 400px;
+    /* Scale with the (resizable) modal instead of a fixed cap, so making the window bigger makes
+       the preview bigger. Capped by viewport height so it never pushes the controls off-screen. */
+    max-width: 100%;
+    max-height: 55vh;
     background: #000;
 }
 

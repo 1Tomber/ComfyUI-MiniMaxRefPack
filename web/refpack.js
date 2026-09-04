@@ -1794,6 +1794,10 @@ function hideWidget(w) {
 
 const LOG_PREFIX = "[MiniMaxRefPack]";
 
+// The edit modal is resizable; the chosen size carries across every edit modal opened THIS
+// session (module-level, never serialised into the workflow). Clamped to the viewport on apply.
+let editModalSize = null;
+
 function logValue(value) {
     if (typeof value === "boolean") return value ? "true" : "false";
     if (typeof value === "number") {
@@ -5616,6 +5620,33 @@ function openEditModal(node, kind, index) {
     };
 
     document.body.appendChild(overlay);
+
+    // Resizable modal. Apply the size remembered from earlier this session, CLAMPED to the viewport
+    // (a size saved on a bigger screen must shrink to fit), remember any resize the user makes, and
+    // re-clamp if the window shrinks while the modal is open. Session-only - never serialised.
+    const applyModalSize = () => {
+        const maxW = Math.round(window.innerWidth * 0.94);
+        const maxH = Math.round(window.innerHeight * 0.92);
+        modal.style.maxWidth = maxW + "px";
+        modal.style.maxHeight = maxH + "px";
+        if (editModalSize) {
+            modal.style.width = Math.min(editModalSize.w, maxW) + "px";
+            modal.style.height = Math.min(editModalSize.h, maxH) + "px";
+        }
+    };
+    applyModalSize();
+    const modalResizeObs = new ResizeObserver(() => {
+        if (document.body.contains(modal)) editModalSize = { w: modal.offsetWidth, h: modal.offsetHeight };
+    });
+    modalResizeObs.observe(modal);
+    const onWinResize = () => applyModalSize();
+    window.addEventListener("resize", onWinResize);
+    const prevTeardown = teardown;
+    teardown = () => {
+        modalResizeObs.disconnect();
+        window.removeEventListener("resize", onWinResize);
+        if (prevTeardown) prevTeardown();
+    };
 }
 
 // ---------------------------------------------------------------------------
