@@ -1289,6 +1289,32 @@ export function formatClock(sec) {
     const mmm = String(Math.min(999, ms)).padStart(3, "0");
     return `${m}:${String(s).padStart(2, "0")}.${mmm}`;
 }
+
+// A frame count as MM:SS:FF timecode (minutes:seconds:frames), the frames component running
+// 0..fps-1. The default read-out for the trim editor; the raw frame number is the toggle's
+// other face.
+export function framesToTimecode(frame, fps) {
+    const r = Math.max(1, Math.round(fps || 0));
+    const f = Math.max(0, Math.round(frame || 0));
+    const ff = f % r;
+    const totalSec = Math.floor(f / r);
+    const ss = totalSec % 60;
+    const mm = Math.floor(totalSec / 60);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${mm}:${p(ss)}:${p(ff)}`;
+}
+
+// Parse a timecode back to a frame count. Lenient about how many colon-parts are given -
+// "M:SS:FF", "SS:FF" or a bare "FF" - so a half-typed field still commits to something sane.
+export function timecodeToFrames(str, fps) {
+    const r = Math.max(1, Math.round(fps || 0));
+    const parts = String(str).trim().split(":").map((p) => parseInt(p, 10) || 0);
+    let mm = 0, ss = 0, ff = 0;
+    if (parts.length >= 3) [mm, ss, ff] = parts.slice(-3);
+    else if (parts.length === 2) [ss, ff] = parts;
+    else ff = parts[0] || 0;
+    return Math.max(0, (mm * 60 + ss) * r + ff);
+}
 // <<< MMRP-CUE
 
 // >>> MMRP-OUTSIZE
@@ -4843,6 +4869,18 @@ function openEditModal(node, kind, index) {
         const zoomable = () => isVideo && duration > 0 && (duration - minWin()) > minWin() * 0.05;
         const dTime = (frac) => fracToWin(frac, view[0], view[1]);
 
+        // The frame read-out and In/Out fields toggle between timecode (MM:SS:FF, the default) and
+        // raw frame numbers. Timecode needs a colon, so the fields become text in that mode.
+        let tcMode = true;
+        const fmtFrame = (f) => (tcMode ? framesToTimecode(f, srcFps) : String(f));
+        const parseFrameField = (v) => (tcMode ? timecodeToFrames(v, srcFps) : (parseInt(v, 10) || 0));
+        const syncFieldType = () => {
+            if (!isVideo) return;
+            const t = tcMode ? "text" : "number";
+            inNum.type = t;
+            outNum.type = t;
+        };
+
         // The playhead is painted on EVERY playback tick, so it is split out of syncTrim: the detail
         // playhead uses the zoom window (pinning at the edge when the cursor leaves it) and the
         // overview playhead the whole clip.
@@ -4890,10 +4928,12 @@ function openEditModal(node, kind, index) {
             }
             if (isVideo && fpsReady()) {
                 const [ci, co] = cueFrames();
-                inNum.value = String(ci);
-                outNum.value = String(co);
+                inNum.value = fmtFrame(ci);
+                outNum.value = fmtFrame(co);
+                const cur = tcMode ? framesToTimecode(curFrame(), srcFps) : `f ${curFrame()}`;
+                const total = tcMode ? "" : ` / ${lastF() + 1}f`;
                 durLabel.textContent =
-                    `f ${curFrame()} · in ${ci} / out ${co} / ${lastF() + 1}f · ${formatClock(cursor)}`;
+                    `${Math.round(srcFps)}fps · ${cur} · in ${fmtFrame(ci)} / out ${fmtFrame(co)}${total}`;
             } else if (isVideo) {
                 // Pre-probe: no fps yet. The bar/handles/playhead still work in seconds; the
                 // fields show seconds until the frame numbers arrive.
@@ -5129,14 +5169,14 @@ function openEditModal(node, kind, index) {
                 stopPlayback();
                 if (!cueActive()) return;
                 const [ci, co] = cueFrames();
-                applyCue(...markInFrame(clampFrame(parseInt(inNum.value, 10) || 0, 0, lastF()),
+                applyCue(...markInFrame(clampFrame(parseFrameField(inNum.value), 0, lastF()),
                                         ci, co, lastF(), srcFps));
             });
             outNum.addEventListener("change", () => {
                 stopPlayback();
                 if (!cueActive()) return;
                 const [ci, co] = cueFrames();
-                applyCue(...markOutFrame(clampFrame(parseInt(outNum.value, 10) || 0, 0, lastF()),
+                applyCue(...markOutFrame(clampFrame(parseFrameField(outNum.value), 0, lastF()),
                                          ci, co, lastF(), srcFps));
             });
         } else {
@@ -5158,6 +5198,25 @@ function openEditModal(node, kind, index) {
             stepLabel.className = "mmrp-edit-label";
             stepLabel.textContent = "Cue";
             stepRow.appendChild(stepLabel);
+
+            // Toggle the read-out and In/Out fields between timecode (MM:SS:FF, default) and frames.
+            const tcBtn = document.createElement("button");
+            tcBtn.className = "mmrp-btn mmrp-trim-step";
+            const syncTcBtn = () => {
+                tcBtn.textContent = tcMode ? "⏱ MM:SS:FF" : "# Frames";
+                tcBtn.title = tcMode
+                    ? "Read-out: timecode (minutes:seconds:frames). Click for frame numbers."
+                    : "Read-out: frame numbers. Click for timecode.";
+            };
+            syncTcBtn();
+            syncFieldType();   // video fields start as text for the default timecode mode
+            tcBtn.onclick = () => {
+                tcMode = !tcMode;
+                syncTcBtn();
+                syncFieldType();
+                if (duration) syncTrim();
+            };
+            stepRow.appendChild(tcBtn);
 
             const frameBtns = [];
             const mkBtn = (text, title, fn, needsFrames) => {

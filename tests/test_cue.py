@@ -151,3 +151,31 @@ def test_format_clock():
     assert _call("formatClock(0)") == "0:00.000"
     assert _call("formatClock(6.25)") == "0:06.250"
     assert _call("formatClock(75.5)") == "1:15.500"
+
+
+# ---- timecode MM:SS:FF <-> frames (the read-out toggle) -----------------------------------
+
+
+@requires_node
+def test_frames_to_timecode():
+    assert _call("framesToTimecode(0, 24)") == "0:00:00"
+    assert _call("framesToTimecode(12, 24)") == "0:00:12"     # 12 frames into the first second
+    assert _call("framesToTimecode(180, 24)") == "0:07:12"    # 7.5s = 7s + 12 frames
+    assert _call("framesToTimecode(24, 24)") == "0:01:00"     # exactly one second
+    assert _call("framesToTimecode(1449, 24)") == "1:00:09"   # past a minute
+
+
+@requires_node
+def test_timecode_to_frames_round_trip():
+    for f in (0, 12, 180, 24, 1449, 719):
+        tc = _call(f"framesToTimecode({f}, 24)")
+        assert _call(f'timecodeToFrames("{tc}", 24)') == f, f"round trip broke at {f} ({tc})"
+
+
+@requires_node
+def test_timecode_to_frames_is_lenient():
+    assert _call('timecodeToFrames("0:07:12", 24)') == 180
+    assert _call('timecodeToFrames("07:12", 24)') == 180      # SS:FF, minutes omitted
+    assert _call('timecodeToFrames("12", 24)') == 12          # bare frames
+    assert _call('timecodeToFrames("  1:00:09 ", 24)') == 1449  # whitespace tolerated
+    assert _call('timecodeToFrames("", 24)') == 0             # empty -> 0, never NaN
