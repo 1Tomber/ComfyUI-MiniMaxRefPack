@@ -4520,7 +4520,7 @@ function openEditModal(node, kind, index) {
         const customInput = document.createElement("input");
         customInput.type = "text";
         customInput.className = "mmrp-btn mmrp-aspect-custom";
-        customInput.placeholder = "3:2";
+        customInput.placeholder = "custom";
         customInput.title = "Custom crop ratio, e.g. 3:2";
         customInput.addEventListener("keydown", (e) => e.stopPropagation());
         const clearAspectActive = () => {
@@ -5390,6 +5390,15 @@ function openEditModal(node, kind, index) {
             // (it snaps to a frame once fps is known); only stepping truly needs the fps.
             L.setIn = mkBtn("Set In", "Set the In point at the playhead  (I)", () => cueSetIn());
             L.setOut = mkBtn("Set Out", "Set the Out point at the playhead  (O)", () => cueSetOut());
+            // ✕ resets the In/Out point to the clip start/end.
+            L.resetIn = mkBtn("✕", "Reset the In point to the clip start", () => {
+                stopPlayback(); if (duration) setTrim(0, trim ? trim[1] : duration);
+            });
+            L.resetOut = mkBtn("✕", "Reset the Out point to the clip end", () => {
+                stopPlayback(); if (duration) setTrim(trim ? trim[0] : 0, duration);
+            });
+            L.resetIn.classList.add("mmrp-reset-btn");
+            L.resetOut.classList.add("mmrp-reset-btn");
 
             const spacer = document.createElement("span");
             spacer.className = "mmrp-trim-spacer";
@@ -5498,6 +5507,7 @@ function openEditModal(node, kind, index) {
         row.appendChild(origBtn);
         row.appendChild(editBtn);
         modal.appendChild(row);
+        L.origBtn = origBtn; L.editBtn = editBtn;   // the video relayout moves these into the footer
 
         let mode = null;      // null | "original" | "edit" | "play"
         let stopAt = null;
@@ -5652,15 +5662,20 @@ function openEditModal(node, kind, index) {
         };
         const transport = mkRow("mmrp-tl-transport", [L.jumpIn, L.stepBack, L.play, L.stepFwd, L.jumpOut]);
         const timelineRow = mkRow("mmrp-tl-timeline", [L.barCol]);
-        // Set In + In field (left) · transport (centre) · Out field + Set Out (right).
-        const leftGroup = mkRow("mmrp-tl-inout", [L.setIn, L.inNum]);
-        const rightGroup = mkRow("mmrp-tl-inout", [L.outNum, L.setOut]);
+        // Set In (+ ✕ reset) + In field (left) · transport (centre) · Out field + (✕ reset) Set Out (right).
+        const leftGroup = mkRow("mmrp-tl-inout", [L.setIn, L.resetIn, L.inNum]);
+        const rightGroup = mkRow("mmrp-tl-inout", [L.outNum, L.resetOut, L.setOut]);
         const navRow = mkRow("mmrp-tl-nav", [leftGroup, transport, rightGroup]);
-        const infoRow = mkRow("mmrp-tl-info", [L.durLabel]);   // the readout, on its own centred row
-        const winRow = mkRow("mmrp-tl-window", [L.winIn, L.winLen, L.winOut]);
-        const optRow = mkRow("mmrp-tl-opts", [L.tcBtn, L.clearTrim]);
+        // The In/Out guides flank the readout: "Set In Ns from Out" · info · "Set Out Ns from In".
+        const infoRow = mkRow("mmrp-tl-info", [L.winIn, L.durLabel, L.winOut]);
+        // Options: timecode toggle · the guide window-length field with a brief label · Clear trim.
+        const lenLabel = document.createElement("span");
+        lenLabel.className = "mmrp-edit-label";
+        lenLabel.textContent = "In/Out window (s)";
+        const lenGroup = mkRow("mmrp-tl-lengroup", [lenLabel, L.winLen]);
+        const optRow = mkRow("mmrp-tl-opts", [L.tcBtn, lenGroup, L.clearTrim]);
         const previewRow = modal.querySelector(".mmrp-play-row");
-        for (const r of [timelineRow, navRow, infoRow, winRow, optRow]) modal.insertBefore(r, previewRow);
+        for (const r of [timelineRow, navRow, infoRow, optRow]) modal.insertBefore(r, previewRow);
         if (L.trimRow) L.trimRow.remove();   // the original trim + cue rows are now empty shells
         if (L.stepRow) L.stepRow.remove();
     }
@@ -5719,6 +5734,19 @@ function openEditModal(node, kind, index) {
     footer.appendChild(cancelBtn);
     footer.appendChild(saveBtn);
     modal.appendChild(footer);
+
+    // Video: fold the Preview buttons (Play original / Play edit) into the footer, left of a spacer
+    // that pushes Cancel / Save to the right; then drop the now-empty Preview row.
+    if (kind === "video" && wantsTrim && L.origBtn) {
+        footer.classList.add("mmrp-footer-with-preview");
+        const spacer = document.createElement("span");
+        spacer.className = "mmrp-footer-spacer";
+        footer.insertBefore(spacer, cancelBtn);
+        footer.insertBefore(L.editBtn, spacer);
+        footer.insertBefore(L.origBtn, L.editBtn);
+        const previewRow = modal.querySelector(".mmrp-play-row");
+        if (previewRow) previewRow.remove();
+    }
 
     // ---- keyboard transport (source-monitor keys), scoped to the open modal ----
     // A single capture-phase listener so the keys reach here before ComfyUI's window/document

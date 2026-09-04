@@ -569,7 +569,7 @@
 }
 /* The custom W:H ratio field, styled like the preset buttons (mmrp-btn) but a bit wider. */
 .mmrp-aspect-custom {
-    width: 56px;
+    width: 68px;
     text-align: center;
     font-family: inherit;
 }
@@ -759,9 +759,33 @@
     align-items: center;
     gap: 6px;
 }
-/* The readout on its own centred row. */
+/* "Set In Ns from Out" (left) · readout (centre) · "Set Out Ns from In" (right). */
 .mmrp-tl-info {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 10px;
+}
+.mmrp-tl-info .mmrp-trim-readout {
     text-align: center;
+}
+/* A small ✕ that resets the In/Out point to the clip start/end. */
+.mmrp-reset-btn {
+    flex: 0 0 auto;
+    padding: 0 6px;
+    min-width: 22px;
+    color: #bbb;
+}
+/* The guide window-length field with its brief label, centred in the options row. */
+.mmrp-tl-lengroup {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    justify-content: center;
+}
+/* Preview buttons folded into the footer: a spacer pushes Cancel / Save to the right. */
+.mmrp-footer-spacer {
+    flex: 1 1 auto;
 }
 /* Ns from In  ·  [n]  ·  Ns from Out — left / centre / right */
 .mmrp-tl-window {
@@ -773,11 +797,12 @@
 .mmrp-tl-window > :first-child { justify-self: start; }
 .mmrp-tl-window > :last-child { justify-self: end; }
 .mmrp-tl-window .mmrp-win-len { justify-self: center; }
-/* timecode toggle  ·  Clear trim */
+/* timecode toggle  ·  In/Out window length  ·  Clear trim */
 .mmrp-tl-opts {
-    display: flex;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
     align-items: center;
+    gap: 8px;
 }
 /* Filmstrip of frame thumbnails behind the detail bar, spanning the zoom window. Behind the trim
    span / handles / playhead (which have z-index >= 0 and paint later). */
