@@ -617,6 +617,94 @@
     border-top: 5px solid #4ea1ff;
 }
 
+/* ---- overview timeline + zoom window (video) ---- */
+/* The overview and the detail bar stack in a column that takes the row's flexible middle slot,
+   so the In/Out number fields keep flanking the (detail) bar. */
+.mmrp-trim-col {
+    flex: 1 1 auto;
+    min-width: 160px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-height: 0;
+}
+.mmrp-trim-col .mmrp-trim-bar {
+    flex: 0 0 auto;   /* fixed height in the column; width stretches to it */
+    min-width: 0;     /* the column owns the min-width now */
+}
+.mmrp-trim-overview {
+    position: relative;
+    flex: 0 0 auto;
+    height: 13px;
+    background: #101010;
+    border: 1px solid #383838;
+    border-radius: 3px;
+    cursor: pointer;   /* click an empty spot to recentre the window there */
+}
+.mmrp-trim-overview.mmrp-off {
+    opacity: 0.5;
+    cursor: default;   /* clip too short to zoom: the overview is inert */
+}
+.mmrp-overview-span {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: rgba(224, 224, 224, 0.16);
+    pointer-events: none;
+}
+.mmrp-overview-playhead {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    margin-left: -0.5px;
+    background: #4ea1ff;
+    pointer-events: none;
+    z-index: 1;
+}
+.mmrp-overview-window {
+    position: absolute;
+    top: -1px;
+    bottom: -1px;
+    box-sizing: border-box;
+    background: rgba(78, 161, 255, 0.18);
+    border: 1px solid rgba(78, 161, 255, 0.7);
+    border-radius: 3px;
+    cursor: grab;
+    z-index: 2;
+}
+.mmrp-overview-window:active {
+    cursor: grabbing;
+}
+.mmrp-trim-overview.mmrp-off .mmrp-overview-window {
+    cursor: default;
+}
+.mmrp-overview-handle {
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    width: 8px;
+    background: #4ea1ff;
+    border-radius: 2px;
+    cursor: ew-resize;
+    z-index: 3;
+}
+.mmrp-overview-handle-in {
+    left: -4px;
+}
+.mmrp-overview-handle-out {
+    right: -4px;
+}
+.mmrp-trim-overview.mmrp-off .mmrp-overview-handle {
+    cursor: default;
+}
+/* A detail trim handle whose trim edge is outside the zoom window pins at the bar edge and goes
+   inert - dragging it would snap the trim to the visible edge. Show it faded and click-through. */
+.mmrp-trim-handle-clipped {
+    pointer-events: none;
+    opacity: 0.4;
+}
+
 /* The frame readout beside the bar: tabular figures so the numbers do not jitter. */
 .mmrp-trim-readout {
     font-variant-numeric: tabular-nums;

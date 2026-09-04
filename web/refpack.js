@@ -2962,6 +2962,105 @@ export function crossedReveal(scaleBefore, scaleAfter, threshold) {
 }
 // <<< MMRP-WHEEL
 
+// ---------------------------------------------------------------------------
+// Geometry for the trim editor's overview + zoom window. The overview bar maps the whole clip;
+// the detail bar is re-scaled to a zoom window [start,end] (seconds) so scrubbing a long clip is
+// precise. Windows are [start,end] arrays of seconds; every helper is pure (no DOM, no time
+// source) so tests/test_zoom.py covers them under node. The window is a VIEW layer only - it never
+// touches `trim`, which still goes out through setTrim/normalizeTrim unchanged.
+// >>> MMRP-ZOOM
+export function zClamp(v, lo, hi) { return Math.min(Math.max(v, lo), hi); }
+
+// The effective minimum window: the requested floor, never larger than the whole clip (a clip
+// shorter than the floor simply is not zoomable).
+export function effMinWin(duration, minWin) { return zClamp(minWin, 0, duration > 0 ? duration : 0); }
+
+// RAW (unclamped) fraction of t along [start,end] - negative before the window, >1 after, so the
+// pin/clip helpers can tell which side. A zero-width window maps everything to 0 (no NaN/Infinity).
+export function winFrac(t, start, end) { const w = end - start; return w > 0 ? (t - start) / w : 0; }
+export function fracToWin(frac, start, end) { return start + frac * (end - start); }
+
+// Place a window of `size` starting at `desiredStart`, size preserved, parked flush at either end.
+// The single primitive pan and center both delegate to, so the size-preserving clamp is proven once.
+export function placeWindow(desiredStart, size, duration) {
+    const d = duration > 0 ? duration : 0;
+    const s = zClamp(size, 0, d);
+    const start = zClamp(desiredStart, 0, d - s);
+    return [start, start + s];
+}
+
+// Pan by deltaSec, size preserved, stopping flush at 0 and duration. No minWin param - the size is
+// preserved by construction, which is the structural proof a pan can never shrink the window.
+export function panWindow(start, end, deltaSec, duration) {
+    return placeWindow(start + deltaSec, end - start, duration);
+}
+
+// A window of `size` centred on t, size preserved, clamped at the ends. Used for click-to-recentre.
+export function centerWindow(t, size, duration) {
+    return placeWindow(t - size / 2, size, duration);
+}
+
+// Left-handle drag: move start, right edge fixed, never below the min window or past the right edge.
+export function resizeWindowStart(newStart, end, duration, minWin) {
+    const d = duration > 0 ? duration : 0;
+    const m = effMinWin(d, minWin);
+    if (d <= m) return [0, d];
+    const e = zClamp(end, m, d);
+    return [zClamp(newStart, 0, e - m), e];
+}
+
+// Right-handle drag: move end, left edge fixed. Symmetric to resizeWindowStart.
+export function resizeWindowEnd(start, newEnd, duration, minWin) {
+    const d = duration > 0 ? duration : 0;
+    const m = effMinWin(d, minWin);
+    if (d <= m) return [0, d];
+    const s = zClamp(start, 0, d - m);
+    return [s, zClamp(newEnd, s + m, d)];
+}
+
+// Invariant enforcer / safety net: clamp any window into a legal [0,duration] one of at least the
+// min size. Idempotent. Used on loadedmetadata (the clip may have shrunk) and to re-validate a view
+// when the fps - and so the min window - arrives.
+export function clampWindow(start, end, duration, minWin) {
+    const d = duration > 0 ? duration : 0;
+    if (d <= 0) return [0, 0];
+    const m = effMinWin(d, minWin);
+    if (d <= m) return [0, d];
+    let s = zClamp(start, 0, d);
+    let e = zClamp(end, 0, d);
+    if (e < s) e = s;                       // collapse a crossed window, then grow it below
+    if (e - s < m) {
+        e = s + m;                          // push the end out first (anchor the start)
+        if (e > d) { e = d; s = d - m; }    // if that overflows, pin the end and pull start back
+    }
+    return [s, e];
+}
+
+// A time's position on a bar mapped to [start,end]: fraction clamped to [0,1], plus which side it is
+// off (-1 before, 0 visible, +1 after) so a pinned handle/playhead can flag itself off-screen.
+export function pinToBar(t, start, end) {
+    const raw = winFrac(t, start, end);
+    const side = raw < 0 ? -1 : raw > 1 ? 1 : 0;
+    return [zClamp(raw, 0, 1), side];
+}
+
+// A trim span [a,b] drawn on a bar mapped to [start,end]: clamped left/right fractions plus whether
+// any of it is visible, so a fully-off-window span is not painted as a zero-width sliver at an edge.
+export function clipSpan(a, b, start, end) {
+    const fa = winFrac(a, start, end), fb = winFrac(b, start, end);
+    const visible = fa < 1 && fb > 0 && b > a;
+    return [zClamp(fa, 0, 1), zClamp(fb, 0, 1), visible];
+}
+
+// The zoom floor in seconds: a window big enough for comfortable frame grabbing. Falls back to a
+// seconds floor when fps is unknown (pre-probe) so it can still zoom; never larger than the clip.
+export function minWindowSec(duration, fps, nFrames) {
+    const perFrame = (Number.isFinite(fps) && fps > 0) ? nFrames / fps : 0;
+    const floor = Math.max(0.2, perFrame);
+    return duration > 0 ? Math.min(duration, floor) : floor;
+}
+// <<< MMRP-ZOOM
+
 function insertIntoDirection(node, text) {
     const el = node._mmrpBody && node._mmrpBody.directionInput;
     if (!el) return;
@@ -4674,6 +4773,35 @@ function openEditModal(node, kind, index) {
             bar.appendChild(playhead);
         }
 
+        // The OVERVIEW bar (video only): the whole clip, with a draggable/resizable window that
+        // the detail bar above's `bar` is zoomed to. It also shows the trim span and playhead for
+        // context. The two bars stack in a column that takes the row's flexible middle slot, so
+        // the In/Out number fields keep flanking the (detail) bar.
+        let overview = null, ovWindow = null, ovSpan = null, ovPlayhead = null, ovInH = null, ovOutH = null;
+        const barCol = document.createElement("div");
+        barCol.className = "mmrp-trim-col";
+        if (isVideo) {
+            overview = document.createElement("div");
+            overview.className = "mmrp-trim-overview";
+            ovSpan = document.createElement("div");
+            ovSpan.className = "mmrp-overview-span";
+            ovPlayhead = document.createElement("div");
+            ovPlayhead.className = "mmrp-overview-playhead";
+            ovWindow = document.createElement("div");
+            ovWindow.className = "mmrp-overview-window";
+            ovInH = document.createElement("div");
+            ovInH.className = "mmrp-overview-handle mmrp-overview-handle-in";
+            ovOutH = document.createElement("div");
+            ovOutH.className = "mmrp-overview-handle mmrp-overview-handle-out";
+            ovWindow.appendChild(ovInH);
+            ovWindow.appendChild(ovOutH);
+            overview.appendChild(ovSpan);
+            overview.appendChild(ovPlayhead);
+            overview.appendChild(ovWindow);
+            barCol.appendChild(overview);
+        }
+        barCol.appendChild(bar);
+
         const durLabel = document.createElement("span");
         durLabel.className = "mmrp-edit-label mmrp-trim-readout";
         durLabel.textContent = "…";
@@ -4685,7 +4813,7 @@ function openEditModal(node, kind, index) {
         clearTrimBtn.textContent = "Clear trim";
 
         row.appendChild(inNum);
-        row.appendChild(bar);
+        row.appendChild(barCol);
         row.appendChild(outNum);
         row.appendChild(durLabel);
         row.appendChild(clearTrimBtn);
@@ -4703,13 +4831,63 @@ function openEditModal(node, kind, index) {
         const cueFrames = () => (fpsReady() ? trimSecToCue(trim, srcFps, duration, lastF()) : [0, 0]);
         cueActive = () => fpsReady() && trimmable();
 
+        // The zoom window (seconds) the DETAIL `bar` is scaled to. Full clip until the overview
+        // narrows it (video only); audio keeps it at the full clip, so the transforms below are the
+        // identity and the audio bar is unchanged. dTime/dFrac map between a detail-bar fraction and
+        // a time within the window.
+        let view = [0, duration || 0];
+        const ZOOM_MIN_FRAMES = 16; // ~10px/frame at max zoom on the min-width detail bar
+        const minWin = () => minWindowSec(duration || 0, srcFps, ZOOM_MIN_FRAMES);
+        // Zoomable only when the clip is comfortably longer than the smallest window (a few % of
+        // headroom, so the handles are never live over a sub-pixel range).
+        const zoomable = () => isVideo && duration > 0 && (duration - minWin()) > minWin() * 0.05;
+        const dTime = (frac) => fracToWin(frac, view[0], view[1]);
+
+        // The playhead is painted on EVERY playback tick, so it is split out of syncTrim: the detail
+        // playhead uses the zoom window (pinning at the edge when the cursor leaves it) and the
+        // overview playhead the whole clip.
+        const paintPlayheads = () => {
+            if (playhead && duration) {
+                const [pf, side] = pinToBar(cursor, view[0], view[1]);
+                playhead.style.left = `${pf * 100}%`;
+                playhead.classList.toggle("mmrp-clipped", side !== 0);
+            }
+            if (ovPlayhead && duration) {
+                ovPlayhead.style.left = `${clamp01(cursor / duration, 0, 1) * 100}%`;
+            }
+        };
+
+        // Paint the overview window rect + enable/disable state. Separate from syncTrim because a
+        // pan/resize changes the view (and thus the DETAIL bar) without touching trim.
+        const syncView = () => {
+            if (!overview || !duration) return;
+            const s = clamp01(view[0] / duration, 0, 1), e = clamp01(view[1] / duration, 0, 1);
+            ovWindow.style.left = `${s * 100}%`;
+            ovWindow.style.width = `${Math.max(0, e - s) * 100}%`;
+            overview.classList.toggle("mmrp-off", !zoomable());
+        };
+
         syncTrim = () => {
             if (!duration || !trim) return;
-            span.style.left = `${(trim[0] / duration) * 100}%`;
-            span.style.width = `${((trim[1] - trim[0]) / duration) * 100}%`;
-            inHandle.style.left = `calc(${(trim[0] / duration) * 100}% - 5px)`;
-            outHandle.style.left = `calc(${(trim[1] / duration) * 100}% - 5px)`;
-            if (playhead) playhead.style.left = `${clamp01(cursor / duration, 0, 1) * 100}%`;
+            // DETAIL bar: scaled to the zoom window. An off-window trim edge pins at the bar edge and
+            // its handle goes inert (a live pinned handle would snap the trim to the visible edge);
+            // a span wholly off-window is not painted.
+            const [sl, sr, svis] = clipSpan(trim[0], trim[1], view[0], view[1]);
+            span.style.left = `${sl * 100}%`;
+            span.style.width = `${Math.max(0, sr - sl) * 100}%`;
+            span.style.display = svis ? "" : "none";
+            const [inF, inSide] = pinToBar(trim[0], view[0], view[1]);
+            const [outF, outSide] = pinToBar(trim[1], view[0], view[1]);
+            inHandle.style.left = `calc(${inF * 100}% - 5px)`;
+            outHandle.style.left = `calc(${outF * 100}% - 5px)`;
+            inHandle.classList.toggle("mmrp-trim-handle-clipped", inSide !== 0);
+            outHandle.classList.toggle("mmrp-trim-handle-clipped", outSide !== 0);
+            paintPlayheads();
+            // OVERVIEW bar: the whole clip, for context.
+            if (ovSpan) {
+                ovSpan.style.left = `${clamp01(trim[0] / duration, 0, 1) * 100}%`;
+                ovSpan.style.width = `${clamp01((trim[1] - trim[0]) / duration, 0, 1) * 100}%`;
+            }
             if (isVideo && fpsReady()) {
                 const [ci, co] = cueFrames();
                 inNum.value = String(ci);
@@ -4810,9 +4988,7 @@ function openEditModal(node, kind, index) {
             };
             cueTrackPlayhead = () => {
                 cursor = media.currentTime;
-                if (playhead && duration) {
-                    playhead.style.left = `${clamp01(cursor / duration, 0, 1) * 100}%`;
-                }
+                paintPlayheads();
                 if (fpsReady()) {
                     const [ci, co] = cueFrames();
                     durLabel.textContent =
@@ -4825,8 +5001,11 @@ function openEditModal(node, kind, index) {
                 const box = bar.getBoundingClientRect();
                 if (!box.width || !duration) return;
                 const frac = clamp01((clientX - box.left) / box.width, 0, 1);
-                if (fpsReady()) seekCursorFrame(clampFrame(frac * (lastF() + 1) - 0.5, 0, lastF()));
-                else seekCursorSec(frac * duration);
+                // Map the detail-bar fraction to a time INSIDE the zoom window, then to a frame, so
+                // a zoomed bar addresses the visible window and not the whole clip.
+                const t = dTime(frac);
+                if (fpsReady()) seekCursorFrame(clampFrame(secToCursorFrame(t, srcFps), 0, lastF()));
+                else seekCursorSec(t);
             };
             bar.addEventListener("mousedown", (e) => {
                 if (e.target === inHandle || e.target === outHandle) return; // handles own these
@@ -4841,11 +5020,78 @@ function openEditModal(node, kind, index) {
                 window.addEventListener("mousemove", move);
                 window.addEventListener("mouseup", up);
             });
+
+            // ---- overview: resize the window (handles), pan it (body), recentre (empty click) ----
+            const ovTimeAt = (clientX) => {
+                const box = overview.getBoundingClientRect();
+                if (!box.width || !duration) return 0;
+                return clamp01((clientX - box.left) / box.width, 0, 1) * duration;
+            };
+            // A window handle drag: resize (end/start fixed). Applied on the press too so the edge
+            // meets the cursor, then tracked; stopPropagation keeps it off the body-pan / recentre.
+            const ovResize = (onMove) => (e) => {
+                if (!zoomable()) return;
+                stopPlayback();
+                e.preventDefault();
+                e.stopPropagation();
+                const apply = (ev) => { onMove(ev); syncView(); syncTrim(); };
+                apply(e);
+                const move = (ev) => apply(ev);
+                const up = () => {
+                    window.removeEventListener("mousemove", move);
+                    window.removeEventListener("mouseup", up);
+                };
+                window.addEventListener("mousemove", move);
+                window.addEventListener("mouseup", up);
+            };
+            ovInH.addEventListener("mousedown", ovResize((ev) => {
+                view = resizeWindowStart(ovTimeAt(ev.clientX), view[1], duration, minWin());
+            }));
+            ovOutH.addEventListener("mousedown", ovResize((ev) => {
+                view = resizeWindowEnd(view[0], ovTimeAt(ev.clientX), duration, minWin());
+            }));
+            // Window body: pan by the drag DELTA from a fixed anchor (never snap the window to the
+            // cursor, which would jump it on grab).
+            ovWindow.addEventListener("mousedown", (e) => {
+                if (e.target === ovInH || e.target === ovOutH) return;
+                if (!zoomable()) return;
+                stopPlayback();
+                e.preventDefault();
+                e.stopPropagation();
+                const box = overview.getBoundingClientRect();
+                const start0 = view[0], end0 = view[1], downX = e.clientX;
+                const move = (ev) => {
+                    if (!box.width || !duration) return;
+                    const deltaSec = ((ev.clientX - downX) / box.width) * duration;
+                    view = panWindow(start0, end0, deltaSec, duration);
+                    syncView(); syncTrim();
+                };
+                const up = () => {
+                    window.removeEventListener("mousemove", move);
+                    window.removeEventListener("mouseup", up);
+                };
+                window.addEventListener("mousemove", move);
+                window.addEventListener("mouseup", up);
+            });
+            // Click the empty overview (outside the window): recentre the window there, size kept.
+            overview.addEventListener("mousedown", (e) => {
+                if (e.target === ovWindow || e.target === ovInH || e.target === ovOutH) return;
+                if (!zoomable()) return;
+                stopPlayback();
+                e.preventDefault();
+                view = centerWindow(ovTimeAt(e.clientX), view[1] - view[0], duration);
+                syncView(); syncTrim();
+            });
         }
 
         // Handle drags set the trim edges. Video snaps to whole frames when fps is known;
         // audio seeks the element to the edge as it drags, as before.
         const dragHandle = (which) => (e) => {
+            const h = which === "in" ? inHandle : outHandle;
+            // An off-window handle is pinned at the bar edge; dragging it would snap the trim to the
+            // window edge, silently losing the trim it represents. Inert - use the overview or the
+            // number field to reach a trim edge outside the current zoom.
+            if (h.classList.contains("mmrp-trim-handle-clipped")) return;
             stopPlayback();
             e.preventDefault();
             e.stopPropagation();
@@ -4853,17 +5099,17 @@ function openEditModal(node, kind, index) {
             if (!box.width || !duration) return;
             const move = (ev) => {
                 const frac = clamp01((ev.clientX - box.left) / box.width, 0, 1);
+                const t = dTime(frac);   // a time inside the zoom window
                 // Video snaps to whole frames AND keeps the fps-aware min window (markIn/Out
                 // push the far edge if the drag would shrink it below a legal >=5-frame
                 // window). Audio / pre-probe drag freely in seconds, seeking as they go.
                 if (isVideo && cueActive()) {
                     const [ci, co] = cueFrames();
-                    const f = clampFrame(frac * (lastF() + 1) - 0.5, 0, lastF());
+                    const f = clampFrame(secToCursorFrame(t, srcFps), 0, lastF());
                     applyCue(...(which === "in"
                         ? markInFrame(f, ci, co, lastF(), srcFps)
                         : markOutFrame(f, ci, co, lastF(), srcFps)));
                 } else {
-                    const t = frac * duration;
                     if (which === "in") setTrim(t, trim[1], isVideo ? undefined : t);
                     else setTrim(trim[0], t, isVideo ? undefined : t);
                 }
@@ -4966,7 +5212,12 @@ function openEditModal(node, kind, index) {
                 for (const b of frameBtns) b.disabled = !on;
                 inNum.disabled = !on;
                 outNum.disabled = !on;
-                if (duration) syncTrim();   // relabel seconds -> frames the moment fps lands
+                if (duration) {
+                    // fps - and so the min window - may have just arrived; re-validate the view.
+                    view = clampWindow(view[0], view[1], duration, minWin());
+                    syncView();
+                    syncTrim();   // relabel seconds -> frames the moment fps lands
+                }
             };
             updateFrameButtons();
         }
@@ -4974,6 +5225,10 @@ function openEditModal(node, kind, index) {
         media.addEventListener("loadedmetadata", () => {
             duration = media.duration;
             if (!trim) trim = [0, r2(duration)];
+            // The zoom window starts at the whole clip; reset every load (a re-probed or replaced,
+            // shorter file must not keep a window running past the new end).
+            view = clampWindow(0, duration, duration, minWin());
+            syncView();
             // A saved trim on a since-replaced, shorter file still clamps sanely.
             if (isVideo) {
                 cursor = clamp01(trim[0], 0, duration);
