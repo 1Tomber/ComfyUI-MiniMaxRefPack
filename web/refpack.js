@@ -4769,6 +4769,8 @@ function openEditModal(node, kind, index) {
     };
     let cueTogglePlay = () => {};  // Space (assigned in the playback block)
     let cueTrackPlayhead = () => {};// called on each playback tick to move the playhead
+    let scheduleFilmstrip = () => {};// (re)build the detail-bar thumbnails, debounced (video)
+    let stopFilmstrip = () => {};   // cancel a pending/running extract and free the thumb decoder
     let cueActive = () => false;   // are the frame cue controls live (video + fps + trimmable)?
     // One exit path for every dismissal (Cancel, Save, backdrop, Esc): stop the playback
     // rAF, pause the element, and drop the keyboard listener. Assigned near the footer once
@@ -4802,6 +4804,14 @@ function openEditModal(node, kind, index) {
 
         const bar = document.createElement("div");
         bar.className = "mmrp-trim-bar";
+        // A filmstrip of frame thumbnails behind the detail bar (video), spanning the zoom window,
+        // so you can see WHAT is where you scrub. Extracted client-side, debounced on zoom/pan.
+        let filmstrip = null;
+        if (isVideo) {
+            filmstrip = document.createElement("div");
+            filmstrip.className = "mmrp-filmstrip";
+            bar.appendChild(filmstrip);
+        }
         const span = document.createElement("div");
         span.className = "mmrp-trim-span";
         const inHandle = document.createElement("div");
@@ -4926,7 +4936,65 @@ function openEditModal(node, kind, index) {
             ovWindow.style.left = `${s * 100}%`;
             ovWindow.style.width = `${Math.max(0, e - s) * 100}%`;
             overview.classList.toggle("mmrp-off", !zoomable());
+            scheduleFilmstrip();   // the visible window changed - refresh the thumbnails
         };
+
+        // ---- filmstrip: frame thumbnails behind the detail bar (video) ----
+        // Extract client-side from a SEPARATE hidden <video> so it never disturbs the playback
+        // element, seeking across the current zoom window. Sequential (a video seeks one frame at a
+        // time), token-guarded so a newer window supersedes an in-flight run, and scheduled with a
+        // debounce so dragging the zoom does not thrash the decoder.
+        if (isVideo) {
+            const thumbVid = document.createElement("video");
+            thumbVid.muted = true;
+            thumbVid.preload = "auto";
+            thumbVid.src = fileUrl(ref.file);
+            const thumbCanvas = document.createElement("canvas");
+            const thumbCtx = thumbCanvas.getContext("2d");
+            const THUMB_H = 40;
+            let filmToken = 0;
+            const seekThumb = (t) => new Promise((resolve) => {
+                let done = false;
+                const finish = () => { if (done) return; done = true; thumbVid.removeEventListener("seeked", finish); resolve(); };
+                thumbVid.addEventListener("seeked", finish);
+                setTimeout(finish, 700);   // some seeks never fire 'seeked'; do not hang the strip
+                thumbVid.currentTime = clamp01(t, 0, Math.max(0, (duration || 0) - 0.03));
+            });
+            const extractFilmstrip = async () => {
+                if (!filmstrip || !duration || !thumbVid.videoWidth) return;
+                const token = ++filmToken;
+                const barW = bar.clientWidth;
+                if (!barW) return;
+                const aspect = thumbVid.videoWidth / thumbVid.videoHeight || 16 / 9;
+                const thumbW = Math.max(20, Math.round(THUMB_H * aspect));
+                const N = Math.min(16, Math.max(3, Math.round(barW / thumbW)));
+                const [vs, ve] = view;
+                for (let i = 0; i < N; i++) {
+                    if (token !== filmToken) return;   // a newer window superseded this run
+                    await seekThumb(vs + ((i + 0.5) / N) * (ve - vs));
+                    if (token !== filmToken || !thumbVid.videoWidth) return;
+                    thumbCanvas.width = thumbW; thumbCanvas.height = THUMB_H;
+                    thumbCtx.drawImage(thumbVid, 0, 0, thumbW, THUMB_H);
+                    let img = filmstrip.children[i];
+                    if (!img) { img = document.createElement("img"); img.className = "mmrp-film-frame"; filmstrip.appendChild(img); }
+                    img.src = thumbCanvas.toDataURL("image/jpeg", 0.6);
+                    img.style.left = `${(i / N) * 100}%`;
+                    img.style.width = `${100 / N}%`;
+                }
+                while (filmstrip.children.length > N) filmstrip.lastChild.remove();
+            };
+            let filmTimer = null;
+            scheduleFilmstrip = () => {
+                clearTimeout(filmTimer);
+                filmTimer = setTimeout(extractFilmstrip, 200);
+            };
+            thumbVid.addEventListener("loadedmetadata", () => scheduleFilmstrip());
+            stopFilmstrip = () => {
+                clearTimeout(filmTimer);
+                filmToken++;               // supersede any in-flight extract
+                thumbVid.removeAttribute("src");
+            };
+        }
 
         syncTrim = () => {
             if (!duration || !trim) return;
@@ -5617,6 +5685,7 @@ function openEditModal(node, kind, index) {
     teardown = () => {
         document.removeEventListener("keydown", onKey, true);
         stopPlayback();   // cancels the playback rAF and pauses the element
+        stopFilmstrip();  // cancels a pending/running thumbnail extract
     };
 
     document.body.appendChild(overlay);

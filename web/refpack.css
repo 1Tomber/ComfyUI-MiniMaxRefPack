@@ -767,6 +767,28 @@
     justify-content: space-between;
     align-items: center;
 }
+/* Filmstrip of frame thumbnails behind the detail bar, spanning the zoom window. Behind the trim
+   span / handles / playhead (which have z-index >= 0 and paint later). */
+.mmrp-tl-timeline .mmrp-trim-bar {
+    height: 40px;   /* taller than the overview, to show the thumbnails */
+}
+.mmrp-filmstrip {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    overflow: hidden;
+    border-radius: 4px;
+    background: #0a0a0a;
+    pointer-events: none;
+}
+.mmrp-film-frame {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    object-fit: cover;
+    opacity: 0.9;
+    pointer-events: none;
+}
 
 /* A small fixed gap separating the transport buttons from the Set In/Set Out pair. */
 .mmrp-trim-gap {
