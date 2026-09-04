@@ -67,6 +67,22 @@ def _frame_downscale_fn():
     return resize
 
 
+def _fill_scale(w, h, rotate) -> float:
+    """Scale factor so a w×h frame rotated by `rotate` degrees COVERS a w×h box - i.e. the rotated
+    content fills the source extent with NO black corners (the overhang is cropped). This is the
+    "fit inside" meaning of rotate_expand=False: no black, the rotation fits inside the frame.
+
+    Derivation: a box corner (±w/2, ±h/2) un-rotated by -θ must land inside the scaled frame
+    [±f·w/2, ±f·h/2]; the binding corner gives f = |cosθ| + max(w/h, h/w)·|sinθ|. At θ=45° on a
+    square that is √2, exactly the scale that makes the inscribed square cover the original.
+    """
+    import math
+    if not w or not h:
+        return 1.0
+    r = math.radians(float(rotate) % 180.0)
+    return abs(math.cos(r)) + max(w / h, h / w) * abs(math.sin(r))
+
+
 def _orient_pil(img, flip, rotate, expand: bool = True):
     """Apply flip then rotation to a PIL image. Returns it unchanged when both are unset.
 
@@ -103,8 +119,19 @@ def _orient_pil(img, flip, rotate, expand: bool = True):
         return img
     # PIL rotates COUNTER-clockwise and `rotate` is clockwise, so it is negated here -
     # once, at the single place the angle is applied.
-    return img.rotate(-float(rotate), expand=bool(expand), resample=Image.BICUBIC,
-                      fillcolor=(0, 0, 0))
+    deg = -float(rotate)
+    if expand:
+        # Grow to the whole rotated frame, filling the new corners with black.
+        return img.rotate(deg, expand=True, resample=Image.BICUBIC, fillcolor=(0, 0, 0))
+    # "Fit inside": NO black. Scale the frame up so the rotated content covers the source box, keep
+    # the source size, and crop the overhang - the rotation fills the frame with no black corners.
+    w, h = img.size
+    f = _fill_scale(w, h, rotate)
+    bw, bh = max(1, round(w * f)), max(1, round(h * f))
+    rot = img.resize((bw, bh), Image.BICUBIC).rotate(deg, expand=False, resample=Image.BICUBIC,
+                                                      fillcolor=(0, 0, 0))
+    left, top = (bw - w) // 2, (bh - h) // 2
+    return rot.crop((left, top, left + w, top + h))
 
 
 def _quarter_turns(rotate) -> int | None:

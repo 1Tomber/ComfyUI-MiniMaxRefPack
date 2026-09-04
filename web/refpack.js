@@ -4393,10 +4393,16 @@ function openEditModal(node, kind, index) {
             const fit = Math.min(1, mediaH / mediaW, mediaW / mediaH) || 1;
             mediaWrap.style.transform += ` scale(${fit})`;
         }
-        // "Fit inside" clips the overhang to the source's extent, which is what the server does
-        // with rotate_expand: false. The viewport's LAYOUT box is the un-rotated media (transforms
-        // do not change it), so clipping there = clipping the rotated frame to the source box.
-        // (A clip-path on the rotated wrap itself rotates WITH it and does nothing.)
+        // "Fit inside" (no black): scale the rotated frame UP so it covers the source box (matching
+        // _fill_scale on the server), and clip the overhang at the viewport - whose LAYOUT box is the
+        // un-rotated media (transforms don't change it), i.e. the source extent. A clip-path on the
+        // rotated wrap itself rotates WITH it and does nothing.
+        if (!expand && rotate) {
+            const rr = (rotate % 180) * Math.PI / 180;
+            const W = mediaW || 1, H = mediaH || 1;
+            const f = Math.abs(Math.cos(rr)) + Math.max(W / H, H / W) * Math.abs(Math.sin(rr));
+            mediaWrap.style.transform += ` scale(${f})`;
+        }
         if (cropViewport) cropViewport.style.overflow = (!expand && rotate) ? "hidden" : "";
     };
 
@@ -4607,11 +4613,14 @@ function openEditModal(node, kind, index) {
         // Clicking back inside re-activates it (re-applies the typed ratio).
         customInput.addEventListener("focus", applyCustomRatio);
         row.appendChild(customInput);
-        // Toggle: the whole image (default) vs zoom into the crop (+ padding). The button shows
-        // the OTHER view - what clicking switches to.
+        // Toggle: the whole image (default) vs zoom into the crop (+ padding). An icon button
+        // overlaid at the preview's top-right; the icon shows what clicking switches TO.
         const viewToggle = document.createElement("button");
         viewToggle.className = "mmrp-btn mmrp-view-toggle";
-        const syncViewToggle = () => { viewToggle.textContent = croppedView ? "Whole image" : "Cropped view"; };
+        const syncViewToggle = () => {
+            viewToggle.textContent = croppedView ? "⛶" : "▣";
+            viewToggle.title = croppedView ? "Show the whole image" : "Zoom to the crop";
+        };
         syncViewToggle();
         viewToggle.onclick = () => {
             stopPlayback();
@@ -4619,7 +4628,7 @@ function openEditModal(node, kind, index) {
             syncViewToggle();
             applyCroppedView();
         };
-        row.appendChild(viewToggle);
+        stage.appendChild(viewToggle);
         // Nothing is highlighted on open. Free IS the starting behaviour (ratio = null),
         // but showing it selected reads as a choice the user made, and then "Clear crop"
         // has nothing left to visibly clear. The highlight means "you picked a lock".
@@ -4763,6 +4772,7 @@ function openEditModal(node, kind, index) {
             stopPlayback();
             expand = !fitBox.checked;
             applyOrientation();
+            syncScale();   // the emitted size changes with fit inside - refresh the readout
         };
         fitRow.appendChild(fitBox);
         fitRow.appendChild(document.createTextNode(" Fit inside"));
@@ -5734,15 +5744,23 @@ function openEditModal(node, kind, index) {
     }
 
     // For an image, size math only needs the natural dimensions.
+    // Also give the crop viewport the media's aspect, so it fits the stage and scales with the modal.
+    const setViewportAspect = () => {
+        if (cropViewport && mediaW > 0 && mediaH > 0) {
+            cropViewport.style.setProperty("--mmrp-ar", `${mediaW} / ${mediaH}`);
+        }
+    };
     if (kind === "image") {
         media.addEventListener("load", () => {
             mediaW = media.naturalWidth;
             mediaH = media.naturalHeight;
+            setViewportAspect();
         });
     } else if (kind === "video") {
         media.addEventListener("loadedmetadata", () => {
             mediaW = media.videoWidth;
             mediaH = media.videoHeight;
+            setViewportAspect();
         });
     }
 

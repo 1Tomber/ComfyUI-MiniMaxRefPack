@@ -481,8 +481,10 @@
        row) scales to whatever height is left after the controls take theirs. */
     resize: both;
     overflow: hidden;
-    min-width: 380px;
-    min-height: 320px;
+    /* Floor: below this the control rows wrap and the preview vanishes, so cap how small it goes
+       (still capped to the viewport for tiny screens). */
+    min-width: min(600px, 96vw);
+    min-height: min(560px, 94vh);
     max-width: 94vw;
     max-height: 92vh;
 }
@@ -504,9 +506,20 @@
    aligned). Shrink-wraps the media, so the crop layer (inset:0) matches the media box. */
 .mmrp-crop-viewport {
     position: relative;
+    /* Largest box of the media's aspect that fits the (flexible) stage, so the preview SCALES with
+       the window. aspect-ratio is set inline from the media's dimensions; the media fills it, so
+       the crop layer (inset:0) still matches the media box exactly. */
+    height: 100%;
+    width: auto;
     max-width: 100%;
     max-height: 100%;
+    aspect-ratio: var(--mmrp-ar, 4 / 3);
+    margin: auto;
     line-height: 0;
+}
+.mmrp-crop-viewport > .mmrp-edit-media-wrap {
+    width: 100%;
+    height: 100%;
 }
 
 /* The edit preview reframes the media inside this box: it becomes the crop's window
@@ -522,10 +535,11 @@
 .mmrp-edit-stage img,
 .mmrp-edit-stage video {
     display: block;
-    /* Fill the flexible stage, scaling down to whatever height is left after the controls, aspect
-       preserved (last in the size chain, after the modal's own width/height). */
-    max-width: 100%;
-    max-height: 100%;
+    /* Fill the aspect-fitted viewport (whose aspect equals the media's, so no distortion); the
+       viewport is what scales with the window. */
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
     background: #000;
 }
 
@@ -586,6 +600,20 @@
     background: #e0e0e0;
     border-color: #e0e0e0;
     color: #000;
+}
+/* Whole-image / cropped-view toggle: an icon overlaid at the preview's top-right. */
+.mmrp-view-toggle {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    z-index: 10;
+    padding: 2px 7px;
+    font-size: 15px;
+    line-height: 1.2;
+    opacity: 0.8;
+}
+.mmrp-view-toggle:hover {
+    opacity: 1;
 }
 /* The custom W:H ratio field, styled like the preset buttons (mmrp-btn) but a bit wider. */
 .mmrp-aspect-custom {
