@@ -4353,6 +4353,7 @@ function openEditModal(node, kind, index) {
             .catch(() => {});
     }
     let ratio = null; // aspect lock; null = free
+    let clearAspectActive = () => {}; // deselect all crop-ratio presets + the custom field
     let mediaW = 0;
     let mediaH = 0;
     const r2 = (v) => Math.round(v * 100) / 100;
@@ -4475,6 +4476,12 @@ function openEditModal(node, kind, index) {
             stopPlayback();
             e.preventDefault();
             e.stopPropagation();
+            // Resizing (a corner drag) releases the aspect lock and drops back to Free so the rect
+            // resizes freely; MOVING the rect keeps whatever lock is set.
+            if (mode !== "move" && ratio !== null) {
+                ratio = null;
+                clearAspectActive();
+            }
             const box = layer.getBoundingClientRect();
             if (!box.width || !box.height) return;
             const from = { x: e.clientX, y: e.clientY, crop: crop.slice() };
@@ -4521,9 +4528,9 @@ function openEditModal(node, kind, index) {
         customInput.type = "text";
         customInput.className = "mmrp-btn mmrp-aspect-custom";
         customInput.placeholder = "custom";
-        customInput.title = "Custom crop ratio, e.g. 3:2";
+        customInput.title = "Custom crop ratio (e.g. 3:2). Both above 64 means an exact pixel size (e.g. 1280:720).";
         customInput.addEventListener("keydown", (e) => e.stopPropagation());
-        const clearAspectActive = () => {
+        clearAspectActive = () => {
             for (const b of buttons) b.classList.remove("mmrp-active");
             customInput.classList.remove("mmrp-active");
         };
@@ -4545,13 +4552,22 @@ function openEditModal(node, kind, index) {
             buttons.push(btn);
         }
         const applyCustomRatio = () => {
-            const r = parseRatio(customInput.value);
-            if (!r) return;
+            const m = String(customInput.value).trim().match(/^(\d*\.?\d+)\s*[:\/xX]\s*(\d*\.?\d+)$/);
+            if (!m) return;
+            const w = parseFloat(m[1]), h = parseFloat(m[2]);
+            if (!(w > 0 && h > 0)) return;
             stopPlayback();
-            ratio = r;
+            ratio = w / h;
             clearAspectActive();
             customInput.classList.add("mmrp-active");
-            crop = setRectAspect(crop, r, mediaW, mediaH);
+            // Both components above 64 read as an EXACT pixel size (1280:720 means the resolution,
+            // not the ratio): a w×h box centred in the source, clamped to it. Otherwise, a ratio.
+            if (w > 64 && h > 64 && srcW > 0 && srcH > 0) {
+                const cw = Math.min(1, w / srcW), ch = Math.min(1, h / srcH);
+                crop = [(1 - cw) / 2, (1 - ch) / 2, cw, ch];
+            } else {
+                crop = setRectAspect(crop, ratio, mediaW, mediaH);
+            }
             syncCropRect();
         };
         customInput.addEventListener("change", applyCustomRatio);
