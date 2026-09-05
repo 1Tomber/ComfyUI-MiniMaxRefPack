@@ -182,14 +182,22 @@ snaps to 0/90/180/270 within a few degrees — snapping matters because a quarte
 every frame of a clip, so a slider parked on 89.6° would cost a full re-encode and look
 identical.
 
-**Fit inside** decides what happens to the corners. Off (the default), the whole rotated
-frame is kept and the empty corners are filled black. On, the result is bound to the
-source's extent and the overhang is cropped away.
+**The frame is the turned picture in its bounding box**, black corners and all, and the
+crop is a rect on that frame: what you box is what the sockets emit, at native size.
+
+**Fit inside** keeps the crop on the picture. Off (the default), the whole turned frame is
+kept and the empty corners are black. On, no black ever sits under the crop: with no crop
+of your own it becomes the largest straight box of the source's shape; a crop you placed
+stops at the picture's edge, slides inward if turning further would put black under it,
+and shrinks only if the picture can no longer hold it at that size.
+The box greys out at 0 and the quarter turns, where nothing is black, and comes back on by
+itself when you reopen a reference whose crop is clear of the corners at a free angle.
 
 One thing a free angle deliberately does *not* do: rotate your crop rect with it. A
 quarter turn maps a rect exactly; an arbitrary angle leaves it no longer axis-aligned,
-and quietly substituting its bounding box would select pixels you never chose. The rect
-stays where it is in the rotated frame — which is where the editor draws it.
+and quietly substituting its bounding box would select pixels you never chose. Instead
+the rect follows its content: it keeps its size on screen and stays centred on the same
+point of the picture, which turns behind it — a straighten tool, not a zoom.
 
 ## Trimming a video
 
