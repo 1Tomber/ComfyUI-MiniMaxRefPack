@@ -1396,6 +1396,38 @@ export function snapAngle(value, tolerance = 3) {
     return raw;
 }
 
+// The stored angle split into the part the BUTTONS own and the part the SLIDER owns.
+//
+// The quarter-turn buttons set the ORIENTATION - a lossless transpose - and the slider
+// STRAIGHTENS relative to it, within +-45. What is stored is ONE number, the sum, which is what
+// media.py applies (a quarter turn exactly when the straighten is 0); the split is only how the
+// editor shows and edits it. So after a quarter turn the slider reads the straighten it read
+// before - 0 in the usual case, since you orient first and straighten after - instead of
+// jumping to 90. splitAngle is used once, on open; from then on the editor keeps the two parts
+// and joins them, so a slider parked at +45 does not flip to "one more turn, -45".
+export function splitAngle(rotate) {
+    const r = (((Number(rotate) || 0) % 360) + 360) % 360;
+    // nearest quarter turn, an exact +-45 tie going to the LOWER one (a stored 45 opens as
+    // "no turn, straightened +45", not as "one turn, -45")
+    const base = (Math.floor(r / 90 + 0.5 - 1e-9) % 4) * 90;
+    let fine = r - base;
+    if (fine > 180) fine -= 360;
+    if (fine <= -180) fine += 360;
+    return { base, fine };
+}
+
+export function joinAngle(base, fine) {
+    return ((((Number(base) || 0) + (Number(fine) || 0)) % 360) + 360) % 360;
+}
+
+// A straighten-slider position -> the fine angle actually stored: clamped to +-45 and snapped
+// to 0 within `tolerance`. 0 is what keeps the lossless quarter-turn path reachable by hand: a
+// slider parked on 0.4 would resample every frame of a clip for nothing visible.
+export function snapFine(value, tolerance = 3) {
+    const v = Math.max(-45, Math.min(45, Number(value) || 0));
+    return Math.abs(v) <= tolerance ? 0 : v;
+}
+
 // The SCREEN axis the user clicked, translated into the SOURCE axis that produces it.
 //
 // The pipeline is exif -> flip -> rotate -> crop, so `flip` is stored in the SOURCE frame
@@ -4562,6 +4594,9 @@ function openEditModal(node, kind, index) {
 
     let crop = Array.isArray(ref.crop) ? ref.crop.slice() : [0, 0, 1, 1];
     let rotate = Number.isFinite(ref.rotate) ? ref.rotate : 0;
+    // The buttons own the quarter turns (rotBase), the slider the straighten on top (rotFine,
+    // +-45); `rotate` is always their sum and is what is saved. See splitAngle (MMRP-ORIENT).
+    let { base: rotBase, fine: rotFine } = splitAngle(rotate);
     let flip = ref.flip || null;
     // "Fit inside": keep the crop on the PICTURE when the angle is free - never over the black
     // corners. Editor-side only: what is saved is always the region itself. Off by default; read
@@ -4952,7 +4987,10 @@ function openEditModal(node, kind, index) {
 
         const turn = (delta) => {
             stopPlayback();
-            rotate = (((rotate + delta) % 360) + 360) % 360;
+            // The orientation steps; the straighten rides along unchanged, so the slider reads
+            // what it read before the click.
+            rotBase = (((rotBase + delta) % 360) + 360) % 360;
+            rotate = joinAngle(rotBase, rotFine);
             // A crop drawn on the old orientation does not survive a quarter turn: its
             // fractions mean something different once the axes swap. Rotating the RECT
             // with the frame keeps the same pixels selected, which is what the user means
@@ -4995,32 +5033,33 @@ function openEditModal(node, kind, index) {
             orow.appendChild(b);
         }
 
-        // Free angle. The quarter-turn buttons stay: they are two clicks for the case
-        // that is both common and lossless, and dragging to exactly 90 is fiddly.
+        // Straighten: up to +-45 either way, RELATIVE to the orientation the buttons set. The
+        // buttons carry the coarse turns (lossless, exact), the slider the fine correction; the
+        // stored angle is the sum.
         const angle = document.createElement("input");
         angle.type = "range";
         angle.className = "mmrp-angle";
-        angle.min = "-180";
-        angle.max = "180";
+        angle.min = "-45";
+        angle.max = "45";
         angle.step = "0.5";
-        angle.title = "Free rotation. Snaps to the quarter turns, which are lossless.";
+        angle.title = "Straighten: up to 45° either way, on top of the quarter turns. Snaps to 0, which is lossless.";
         // An editable angle field beside the slider - typing an exact degree is easier than
         // dragging to it.
         const angleNum = document.createElement("input");
         angleNum.type = "number";
         angleNum.className = "mmrp-trim-num mmrp-angle-num";
-        angleNum.min = "-180";
-        angleNum.max = "180";
+        angleNum.min = "-45";
+        angleNum.max = "45";
         angleNum.step = "0.5";
-        angleNum.title = "Rotation angle in degrees";
+        angleNum.title = "Straighten angle in degrees (-45 to 45), on top of the quarter turns";
         angleNum.addEventListener("keydown", (e) => e.stopPropagation());
         const angleDeg = document.createElement("span");
         angleDeg.className = "mmrp-angle-out";
         angleDeg.textContent = "°";
         const syncAngle = () => {
-            const shown = rotate > 180 ? rotate - 360 : rotate;
+            const shown = rotFine;
             if (Number(angle.value) !== shown) angle.value = String(shown);
-            if (document.activeElement !== angleNum) angleNum.value = (rotate ? shown : 0).toFixed(1);
+            if (document.activeElement !== angleNum) angleNum.value = shown.toFixed(1);
             // Only a free angle can spill outside the source, so the fit toggle is dead
             // weight on a quarter turn and says so rather than sitting there inert.
             const free = tiltIsFree(rotate);
@@ -5048,17 +5087,22 @@ function openEditModal(node, kind, index) {
             syncClears();
             applyCroppedView();
         };
+        // The slider / field set the STRAIGHTEN part; the orientation stays what the buttons made it.
+        const setFine = (value) => {
+            rotFine = snapFine(value);
+            setAngle(joinAngle(rotBase, rotFine));
+        };
         angleNum.addEventListener("change", () => {
             stopPlayback();
             mediaWrap.style.transition = "";
-            setAngle(snapAngle(angleNum.value));
+            setFine(angleNum.value);
         });
         angle.oninput = () => {
             stopPlayback();
             // No transition while sliding: the rect follows the picture on every event, and an
             // animated picture would lag behind it.
             mediaWrap.style.transition = "none";
-            setAngle(snapAngle(angle.value));
+            setFine(angle.value);
         };
         angle.onchange = () => { mediaWrap.style.transition = ""; };
         syncAngleRef = syncAngle;
@@ -5100,6 +5144,8 @@ function openEditModal(node, kind, index) {
             stopPlayback();
             mlog("edit_cleared", { file: ref.file, what: "rotation" });
             flip = null;
+            rotBase = 0;
+            rotFine = 0;
             // Fit inside is a preference and survives this: the checkbox greys out at 0 (nothing to
             // keep inside) and comes back live with the next free angle. The crop follows its
             // content to 0 like any other angle change.

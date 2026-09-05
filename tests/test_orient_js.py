@@ -178,3 +178,56 @@ def test_mirroring_twice_is_a_no_op_at_every_quarter_turn():
         return results;
     })()""")
     assert all(v is None for v in out.values()), out
+
+
+# ---- the buttons own the quarter turns, the slider the straighten on top --------------------
+
+
+@requires_node
+@pytest.mark.parametrize("rotate,base,fine", [
+    (0, 0, 0), (90, 90, 0), (180, 180, 0), (270, 270, 0),
+    (95, 90, 5), (85, 90, -5), (5, 0, 5), (355, 0, -5), (-5, 0, -5),
+    (100, 90, 10), (200, 180, 20), (250, 270, -20),
+    (45, 0, 45),        # an exact tie opens as "no turn, +45", not "one turn, -45"
+    (135, 90, 45), (225, 180, 45), (315, 270, 45),
+    (44.5, 0, 44.5), (45.5, 90, -44.5),
+])
+def test_a_stored_angle_splits_into_orientation_and_straighten(rotate, base, fine):
+    out = _run(f"splitAngle({rotate})")
+    assert out["base"] == base
+    assert out["fine"] == pytest.approx(fine)
+
+
+@requires_node
+def test_split_and_join_round_trip_every_half_degree():
+    out = _run("""(() => {
+        const bad = [];
+        for (let r = -360; r <= 720; r += 0.5) {
+            const { base, fine } = splitAngle(r);
+            const back = joinAngle(base, fine);
+            const want = ((r % 360) + 360) % 360;
+            if (Math.abs(back - want) > 1e-9 || base % 90 !== 0 || fine < -45 || fine > 45) bad.push(r);
+        }
+        return bad;
+    })()""")
+    assert out == []
+
+
+@requires_node
+def test_a_quarter_turn_keeps_the_straighten_and_join_wraps():
+    # orient first, straighten after: the slider reads the same 5 after every button press
+    assert _run("joinAngle(90, 5)") == 95
+    assert _run("joinAngle(270, 5)") == 275
+    assert _run("joinAngle(270 + 90, 5)") == 5
+    assert _run("joinAngle(0, -5)") == 355
+    assert _run("joinAngle(-90, 0)") == 270
+
+
+@requires_node
+@pytest.mark.parametrize("value,expected", [
+    (0, 0), (2.5, 0), (-3, 0), (3.5, 3.5), (-10, -10), (45, 45), (60, 45), (-70, -45),
+    ("7", 7), ("abc", 0),
+])
+def test_the_straighten_slider_snaps_to_zero_and_clamps_to_45(value, expected):
+    arg = f'"{value}"' if isinstance(value, str) else str(value)
+    assert _run(f"snapFine({arg})") == expected

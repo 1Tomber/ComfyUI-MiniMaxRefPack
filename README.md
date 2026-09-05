@@ -176,11 +176,13 @@ Two things it does that are easy to miss:
   re-encoded first, because the sockets emit the rotated frames and showing the model the
   unrotated original would let it describe a video you are not generating.
 
-**Any angle, not just quarter turns.** The slider beside the buttons rotates freely and
-snaps to 0/90/180/270 within a few degrees — snapping matters because a quarter turn is
-*lossless* (the pixels are re-indexed, not resampled) while any other angle re-renders
-every frame of a clip, so a slider parked on 89.6° would cost a full re-encode and look
-identical.
+**Any angle, not just quarter turns.** The buttons set the orientation; the slider beside
+them *straightens* on top of it, up to 45° either way, and snaps to 0 within a few degrees.
+After ↻ the slider reads what it read before, 0 in the usual case, because the quarter turn
+went into the orientation, not the slider. What is stored is one angle, the sum. The snap
+matters because a quarter turn is *lossless* (the pixels are re-indexed, not resampled)
+while any other angle re-renders every frame of a clip, so a slider parked on 0.4° would
+cost a full re-encode and look identical.
 
 **The frame is the turned picture in its bounding box**, black corners and all, and the
 crop is a rect on that frame: what you box is what the sockets emit, at native size.
