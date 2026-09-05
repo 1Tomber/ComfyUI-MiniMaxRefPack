@@ -520,6 +520,13 @@
 .mmrp-crop-viewport > .mmrp-edit-media-wrap {
     width: 100%;
     height: 100%;
+    /* The wrapper is sized to the SOURCE frame inside the rotation's bounding box (see
+       applyOrientation), and near a quarter turn that box is NARROWER than the source - a 4:3
+       clip at 80deg needs a wrapper ~110% of the box wide. Capping it at 100% letterboxes the
+       picture inside a too-narrow wrapper and paints black bars, with the crop rect drawn beside
+       the picture it should sit on. It turns into the box, so nothing overflows once rotated. */
+    max-width: none;
+    max-height: none;
 }
 
 /* The edit preview reframes the media inside this box: it becomes the crop's window
