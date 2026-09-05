@@ -4851,7 +4851,7 @@ function openEditModal(node, kind, index) {
         customInput.type = "text";
         customInput.className = "mmrp-btn mmrp-aspect-custom";
         customInput.placeholder = "custom";
-        customInput.title = "Custom crop ratio (e.g. 3:2). Both above 64 means an exact pixel size (e.g. 1280:720).";
+        customInput.title = "Custom crop ratio (e.g. 3:2), or an exact pixel size when both are 64 or more (e.g. 1280:720 or 128x64).";
         customInput.addEventListener("keydown", (e) => e.stopPropagation());
         clearAspectActive = () => {
             for (const b of buttons) b.classList.remove("mmrp-active");
@@ -4881,10 +4881,11 @@ function openEditModal(node, kind, index) {
             ratio = w / h;
             clearAspectActive();
             customInput.classList.add("mmrp-active");
-            // Both components above 64 read as an EXACT pixel size (1280:720 means the resolution,
+            // Both components 64 or more read as an EXACT pixel size (1280:720 means the resolution,
             // not the ratio): a w×h box centred in the frame, clamped to it. Otherwise, a ratio.
+            // 64 is the smallest crop side, so 128:64 is a size, not a 2:1 ratio.
             const fr = frame();
-            if (w > 64 && h > 64 && srcW > 0 && srcH > 0) {
+            if (w >= 64 && h >= 64 && srcW > 0 && srcH > 0) {
                 const cw = Math.min(1, w / fr.bw), ch = Math.min(1, h / fr.bh);
                 placeCrop([(1 - cw) / 2, (1 - ch) / 2, cw, ch]);
                 // A pixel size also sets the output scale, so the emitted resolution matches it
