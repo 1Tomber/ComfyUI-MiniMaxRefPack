@@ -4375,6 +4375,48 @@ function openEditModal(node, kind, index) {
         syncScale();
     };
 
+    // The crop-aware "straighten" fill: the minimal zoom that keeps the CURRENT crop free of black
+    // when the frame is rotated about its centre (mirrors _fill_scale on the server). Used to fill
+    // the source box in the fit-inside preview and to place the crop rect in the whole-image view.
+    const cropFillScale = () => {
+        const W = mediaW || 1, H = mediaH || 1;
+        const rad = (rotate || 0) * Math.PI / 180;
+        const cr = Math.cos(rad), sr = Math.sin(rad);
+        const c = (crop && crop.length === 4) ? crop : [0, 0, 1, 1];
+        let f = 1;
+        for (const fx of [c[0], c[0] + c[2]]) {
+            for (const fy of [c[1], c[1] + c[3]]) {
+                const dx = fx * W - W / 2, dy = fy * H - H / 2;
+                const ax = cr * dx + sr * dy, ay = -sr * dx + cr * dy;
+                f = Math.max(f, 2 * Math.abs(ax) / W, 2 * Math.abs(ay) / H);
+            }
+        }
+        return f;
+    };
+
+    // While a crop handle is dragged in the whole-image fit-inside view the fill is FROZEN, so the
+    // rect-to-viewport mapping holds still under the pointer instead of chasing its own tail (the
+    // fill depends on the crop, which the drag is changing). null = use the live crop-aware fill.
+    let dragFill = null;
+
+    // How the stored crop (a fraction of the ORIENTED frame the node crops) is drawn in the current
+    // viewport. Identity everywhere except the whole-image view of a fit-inside FREE angle: there the
+    // viewport is the rotation's BOUNDING box (the whole tilted frame, black corners and all) while
+    // the crop is a fraction of the smaller, fill-zoomed source box, so it maps to a centred sub-rect.
+    const cropDisplayMap = () => {
+        const rot = rotate || 0;
+        const q90 = ((rot % 90) + 90) % 90;
+        const freeAngle = rot && q90 > 1e-6 && q90 < 90 - 1e-6;
+        if (croppedView || expand || !freeAngle) return { ox: 0, oy: 0, sx: 1, sy: 1 };
+        const W = mediaW || 1, H = mediaH || 1;
+        const rad = rot * Math.PI / 180;
+        const Wp = Math.abs(Math.cos(rad)) * W + Math.abs(Math.sin(rad)) * H;
+        const Hp = Math.abs(Math.sin(rad)) * W + Math.abs(Math.cos(rad)) * H;
+        const f = dragFill != null ? dragFill : cropFillScale();
+        const sx = W / (f * Wp), sy = H / (f * Hp);
+        return { ox: 0.5 - 0.5 * sx, oy: 0.5 - 0.5 * sy, sx, sy };
+    };
+
     // Show the orientation by transforming the MEDIA inside its wrapper. The crop layer
     // is a sibling of the wrapper, not a child, so the rect stays axis-aligned in the
     // rotated frame's coordinates - which is exactly the space refs.py stores it in and
@@ -4398,37 +4440,46 @@ function openEditModal(node, kind, index) {
         //   - free angle, expand=true: the rotation's BOUNDING BOX (black corners and all); the
         //     media shrinks so the WHOLE rotated frame fits - this is what "show the whole image"
         //     needs, and it is the box the node's expand=True crop is a fraction of.
-        let ow, oh, scale, clip;
+        let ow, oh, scale, clip, fitInscribed = false;
         if (!rot) {
             ow = W; oh = H; scale = 1; clip = false;
         } else if (swap) {
             ow = H; oh = W; scale = Math.max(W / H, H / W); clip = true;
         } else if (isQuarterTurn) {            // 180: same box, exact
             ow = W; oh = H; scale = 1; clip = false;
-        } else if (!expand) {                  // fit inside: source box + crop-aware straighten fill
-            ow = W; oh = H; clip = true;
-            const cr = Math.cos(rad), sr = Math.sin(rad);
-            const c = (crop && crop.length === 4) ? crop : [0, 0, 1, 1];
-            scale = 1;
-            for (const fx of [c[0], c[0] + c[2]]) {
-                for (const fy of [c[1], c[1] + c[3]]) {
-                    const dx = fx * W - W / 2, dy = fy * H - H / 2;
-                    const ax = cr * dx + sr * dy, ay = -sr * dx + cr * dy;
-                    scale = Math.max(scale, 2 * Math.abs(ax) / W, 2 * Math.abs(ay) / H);
-                }
-            }
-        } else {                               // expand: bounding box, media shrinks to fit it whole
+        } else if (!expand && croppedView) {   // fit inside, zoom-to-crop: source box + straighten fill
+            ow = W; oh = H; scale = cropFillScale(); clip = true;
+        } else {                               // bounding box: expand=true (any view), OR the
+            // whole-image view of fit inside - show the entire tilted frame with its black corners,
+            // the media sized so the WHOLE rotated frame fits. (Crop rect placed by cropDisplayMap.)
             ow = acos * W + asin * H;
             oh = asin * W + acos * H;
-            scale = Math.max(W / ow, H / oh);
-            clip = false;
+            scale = 1; clip = false; fitInscribed = true;
         }
 
         const parts = [];
         if (rot) parts.push(`rotate(${rot}deg)`);
         if (flip) parts.push(`scale(${flip.includes("h") ? -1 : 1}, ${flip.includes("v") ? -1 : 1})`);
-        if (Math.abs(scale - 1) > 1e-9) parts.push(`scale(${scale})`);
-        mediaWrap.style.transform = parts.join(" ");
+        if (fitInscribed) {
+            // Size the wrapper to the SOURCE frame (aspect W:H) so the media fills it with NO
+            // object-fit letterbox, centre it, and rotate: the rotation's bounding box then equals
+            // the viewport. Scaling a full-size wrapper instead letterboxes the video into the
+            // (differently-shaped) bounding box and rotates those black bars into the frame.
+            mediaWrap.style.width = `${(W / ow) * 100}%`;
+            mediaWrap.style.height = `${(H / oh) * 100}%`;
+            mediaWrap.style.position = "absolute";
+            mediaWrap.style.left = "50%";
+            mediaWrap.style.top = "50%";
+            mediaWrap.style.transform = `translate(-50%, -50%) ${parts.join(" ")}`;
+        } else {
+            mediaWrap.style.width = "";
+            mediaWrap.style.height = "";
+            mediaWrap.style.position = "";
+            mediaWrap.style.left = "";
+            mediaWrap.style.top = "";
+            if (Math.abs(scale - 1) > 1e-9) parts.push(`scale(${scale})`);
+            mediaWrap.style.transform = parts.join(" ");
+        }
         if (cropViewport) {
             if (mediaW > 0 && mediaH > 0) cropViewport.style.setProperty("--mmrp-ar", `${ow} / ${oh}`);
             cropViewport.style.overflow = clip ? "hidden" : "";
@@ -4527,10 +4578,14 @@ function openEditModal(node, kind, index) {
         };
 
         syncCropRect = () => {
-            rectEl.style.left = `${crop[0] * 100}%`;
-            rectEl.style.top = `${crop[1] * 100}%`;
-            rectEl.style.width = `${crop[2] * 100}%`;
-            rectEl.style.height = `${crop[3] * 100}%`;
+            // The rect is a fraction of the ORIENTED frame; cropDisplayMap places it in the current
+            // viewport (identity except the whole-image fit-inside view, where it maps onto the
+            // bigger bounding-box frame).
+            const map = cropDisplayMap();
+            rectEl.style.left = `${(map.ox + crop[0] * map.sx) * 100}%`;
+            rectEl.style.top = `${(map.oy + crop[1] * map.sy) * 100}%`;
+            rectEl.style.width = `${(crop[2] * map.sx) * 100}%`;
+            rectEl.style.height = `${(crop[3] * map.sy) * 100}%`;
             syncClears();
             // The "fit inside" fill is crop-aware, so the rotation's zoom must re-fit as the crop
             // changes - the image re-scales behind the fixed crop to stay black-free.
@@ -4556,10 +4611,16 @@ function openEditModal(node, kind, index) {
             // little from the cursor as the view magnifies, which is the price of live re-framing.
             const box = layer.getBoundingClientRect();
             if (!box.width || !box.height) return;
+            // Freeze the rect<->viewport mapping for the drag (see dragFill). Only the whole-image
+            // fit-inside view maps at all (sx!==1); everywhere else this is identity and a no-op.
+            const map = cropDisplayMap();
+            dragFill = (map.sx !== 1 || map.sy !== 1) ? cropFillScale() : null;
             const from = { x: e.clientX, y: e.clientY, crop: crop.slice() };
             const move = (ev) => {
-                const dx = (ev.clientX - from.x) / box.width;
-                const dy = (ev.clientY - from.y) / box.height;
+                // Pointer travel is in VIEWPORT fractions; /map.sx converts it to oriented-frame
+                // fractions so the stored crop stays in the frame the node actually crops.
+                const dx = ((ev.clientX - from.x) / box.width) / map.sx;
+                const dy = ((ev.clientY - from.y) / box.height) / map.sy;
                 crop = dragCrop(from.crop, mode, dx, dy, ratio, mediaW, mediaH);
                 syncCropRect();
                 if (croppedView) applyCroppedView();   // live zoom-to-crop while dragging the handles
@@ -4567,6 +4628,8 @@ function openEditModal(node, kind, index) {
             const up = () => {
                 window.removeEventListener("mousemove", move);
                 window.removeEventListener("mouseup", up);
+                dragFill = null;      // back to the live crop-aware fill
+                syncCropRect();       // re-place the rect with the settled fill
                 applyCroppedView();   // final re-fit of the zoomed view to the new crop (+ padding)
             };
             window.addEventListener("mousemove", move);
@@ -4667,6 +4730,10 @@ function openEditModal(node, kind, index) {
             stopPlayback();
             croppedView = !croppedView;
             syncViewToggle();
+            // Whole-image and zoom-to-crop can render a DIFFERENT oriented frame (fit inside shows
+            // the bounding box whole vs the filled source box), so re-run the orientation and re-map
+            // the crop rect, not just the zoom. syncCropRect calls applyOrientation.
+            syncCropRect();
             applyCroppedView();
         };
         stage.appendChild(viewToggle);
@@ -4783,7 +4850,7 @@ function openEditModal(node, kind, index) {
         angleNum.addEventListener("change", () => {
             stopPlayback();
             rotate = snapAngle(angleNum.value);
-            applyOrientation();
+            syncCropRect();   // re-map the rect: the whole-image fit-inside mapping depends on the angle
             syncAngle();
             syncClears();
         });
@@ -4795,7 +4862,7 @@ function openEditModal(node, kind, index) {
             // select pixels the user never chose. The rect stays where it is, in the
             // rotated frame, which is where the editor draws it.
             rotate = snapAngle(angle.value);
-            applyOrientation();
+            syncCropRect();   // re-map the rect: the whole-image fit-inside mapping depends on the angle
             syncAngle();
             syncClears();
         };
@@ -4812,7 +4879,7 @@ function openEditModal(node, kind, index) {
         fitBox.onchange = () => {
             stopPlayback();
             expand = !fitBox.checked;
-            applyOrientation();
+            syncCropRect();   // whole-image fit inside maps the rect onto the bounding box; identity off
             syncScale();   // the emitted size changes with fit inside - refresh the readout
         };
         fitRow.appendChild(fitBox);
@@ -5801,14 +5868,14 @@ function openEditModal(node, kind, index) {
             mediaW = media.naturalWidth;
             mediaH = media.naturalHeight;
             setViewportAspect();
-            applyOrientation();   // a reference opened WITH a rotation needs its fill now dims exist
+            syncCropRect();   // a reference opened WITH a rotation needs its fill + rect map now dims exist
         });
     } else if (kind === "video") {
         media.addEventListener("loadedmetadata", () => {
             mediaW = media.videoWidth;
             mediaH = media.videoHeight;
             setViewportAspect();
-            applyOrientation();
+            syncCropRect();
         });
     }
 
