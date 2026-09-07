@@ -506,9 +506,11 @@
    aligned). Shrink-wraps the media, so the crop layer (inset:0) matches the media box. */
 .mmrp-crop-viewport {
     position: relative;
-    /* Largest box of the media's aspect that fits the (flexible) stage, so the preview SCALES with
-       the window. aspect-ratio is set inline from the media's dimensions; the media fills it, so
-       the crop layer (inset:0) still matches the media box exactly. */
+    /* Largest box of the frame's aspect that fits the (flexible) stage, so the preview SCALES with
+       the window. The real size is set inline in px by fitViewport (refpack.js) once the media's
+       dimensions are known; what follows is only the placeholder before that. It cannot be the
+       real thing: with the frame wider than the stage, max-width wins over aspect-ratio, the box
+       keeps its full height and loses the aspect, and the picture gets letterboxed. */
     height: 100%;
     width: auto;
     max-width: 100%;

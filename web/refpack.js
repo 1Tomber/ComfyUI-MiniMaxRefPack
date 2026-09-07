@@ -4641,6 +4641,7 @@ function openEditModal(node, kind, index) {
     let applyCroppedView = () => {};  // (re)apply that zoom - assigned in the crop-layer block
     let cropViewport = null;          // wraps media + crop layer; its box is the turned frame's
                                       // bounding box (MMRP-TILT), which the crop is a fraction of
+    let stageResizeObs = null;        // keeps the viewport fitted to the stage (fitViewport)
     let mediaW = 0;
     let mediaH = 0;
     const r2 = (v) => Math.round(v * 100) / 100;
@@ -4709,6 +4710,29 @@ function openEditModal(node, kind, index) {
         if (cropViewport && mediaW > 0 && mediaH > 0) {
             cropViewport.style.setProperty("--mmrp-ar", `${fr.bw} / ${fr.bh}`);
         }
+        fitViewport();
+    };
+
+    // The viewport is the largest box of the FRAME's aspect that fits the stage - computed here,
+    // in px, not by CSS. `height: 100%` + `aspect-ratio` + `max-width: 100%` cannot do it: when
+    // the frame is wider than the stage the cap wins, the box stays full height and loses the
+    // aspect, the wrapper's %-sizing inherits the wrong shape, and object-fit letterboxes the
+    // picture - black bars that appear the moment the real dimensions arrive (a 16:9 clip in the
+    // default modal on a normal screen is enough). Re-run on every stage resize.
+    const fitViewport = () => {
+        if (!cropViewport || !stage || !(mediaW > 0 && mediaH > 0)) return;
+        const sw = stage.clientWidth, sh = stage.clientHeight;
+        if (!sw || !sh) return;
+        const fr = frame();
+        const k = Math.min(sw / fr.bw, sh / fr.bh);
+        cropViewport.style.width = `${fr.bw * k}px`;
+        cropViewport.style.height = `${fr.bh * k}px`;
+        // The CSS caps belong to the placeholder only. With them live, a box that is stale for a
+        // frame after the stage SHRINKS (the observer runs before the next paint) would be
+        // squashed to the stage and lose the aspect; without them it overflows, the stage clips
+        // it symmetrically, and the rect still sits on the picture until the refit lands.
+        cropViewport.style.maxWidth = "none";
+        cropViewport.style.maxHeight = "none";
     };
 
     const overlay = document.createElement("div");
@@ -4784,8 +4808,12 @@ function openEditModal(node, kind, index) {
         viewport.appendChild(mediaWrap);
         viewport.appendChild(layer);
         cropLayer = layer;
-        cropViewport = viewport;   // for applyOrientation's Fit-inside clip
-        applyOrientation();        // re-run now that the clip host exists (fit inside)
+        cropViewport = viewport;
+        applyOrientation();        // re-run now that the viewport exists
+        if (typeof ResizeObserver === "function") {
+            stageResizeObs = new ResizeObserver(() => fitViewport());
+            stageResizeObs.observe(stage);
+        }
 
         const CROP_PAD = 0.12;
         applyCroppedView = () => {
@@ -6303,6 +6331,7 @@ function openEditModal(node, kind, index) {
     const prevTeardown = teardown;
     teardown = () => {
         modalResizeObs.disconnect();
+        if (stageResizeObs) stageResizeObs.disconnect();
         window.removeEventListener("resize", onWinResize);
         if (prevTeardown) prevTeardown();
     };
