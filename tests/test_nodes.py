@@ -452,12 +452,25 @@ def _regen_key(fake_folder_paths, regen):
 
 def test_regen_always_forces_a_rerun(fake_folder_paths):
     """Always: IS_CHANGED returns a value that never equals itself (NaN), so ComfyUI treats
-    the node as changed every queue and re-runs the VLM."""
+    the node as changed every queue and re-runs the VLM.
+
+    Regression: it must be a FRESH float("nan"), NOT the math.nan singleton. ComfyUI folds
+    IS_CHANGED into a container cache key (frozenset/tuple of the signature) and compares
+    those by value - and container equality short-circuits on IDENTITY (`x is y or x == y`).
+    The math.nan singleton is the same object every queue, so two keys built from it compare
+    EQUAL and the node cache-HITS: it silently never regenerates. A fresh nan is a different
+    object each call, so identity fails and the key genuinely moves. (Plain scalar
+    `math.nan != math.nan` is True, which is why the old assertion passed with the bug.)"""
     import math
 
-    key = _regen_key(fake_folder_paths, "always")
-    assert isinstance(key, float) and math.isnan(key)
-    assert key != key   # the whole point - never cache-hits
+    k1 = _regen_key(fake_folder_paths, "always")
+    k2 = _regen_key(fake_folder_paths, "always")
+    assert isinstance(k1, float) and math.isnan(k1)
+    assert k1 is not k2   # distinct objects; the math.nan singleton would fail here
+    # Exactly what ComfyUI does with the value - wrap it in a container and compare. With the
+    # singleton these are EQUAL (identity short-circuit) => cache-hit => stuck.
+    assert (0, k1) != (0, k2)
+    assert frozenset([(0, k1)]) != frozenset([(0, k2)])
 
 
 def test_regen_once_nonce_moves_the_key_then_rests(fake_folder_paths):

@@ -380,9 +380,18 @@ class MiniMaxH3ReferencePack:
         # Regenerate Prompt = Always: return a value that never equals itself, so ComfyUI
         # treats the node as changed every queue and re-runs the VLM. Checked first - it
         # short-circuits the rest of the key.
+        #
+        # MUST be a FRESH float("nan"), not math.nan. ComfyUI folds this into a container
+        # cache key (a frozenset/tuple of the node signature) and compares those by value.
+        # Container equality short-circuits on IDENTITY (`x is y or x == y`), and math.nan is
+        # a singleton - the SAME object every queue - so two keys built from it compare EQUAL
+        # and the node cache-HITS, silently never re-running. A fresh nan object each call is a
+        # different object, so identity fails, `nan == nan` is False, and the key genuinely
+        # moves. (scalar `math.nan != math.nan` is True, which is why this hid from a test that
+        # only checked the scalar.)
         regen = _regen_token(references_json)
         if regen == "always":
-            return math.nan
+            return float("nan")
 
         reference_set = refs.ReferenceSet.from_json(references_json)
         sig = _files_signature(reference_set, folder_paths.get_input_directory())
